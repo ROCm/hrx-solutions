@@ -1,0 +1,131 @@
+// Exact Qwen3.8-27B greedy output head.
+//
+// The final RMSNorm and native Q6_K vocabulary projection stay inside the
+// command program. Greedy selection consumes device-local logits and exposes
+// only selected token IDs at the issue boundary.
+
+kernel.decl @ggml_quantize_q8_1_x4_f32(%token_count: index, %input_size: index) launch(%token_count: index, %input_size: index, %input: buffer, %output: buffer)
+kernel.decl @ggml_linear_q6k_q8_1_x4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_linear_q6k_q8_1_x4_m4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_output_projection_q6k_m8() launch(%input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_output_projection_q6k_m32() launch(%input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_rmsnorm_f32_decode() launch(%epsilon: f32, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_rmsnorm_f32_prefill(%token_count: index) launch(%token_count: index, %epsilon: f32, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_rmsnorm_f32_prefill_last() launch(%control: buffer, %epsilon: f32, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_greedy_argmax_partial_rows_f32(%token_count: index, %output_size: index) launch(%token_count: index, %output_size: index, %logits: buffer, %partial_logits: buffer, %partial_token_ids: buffer)
+kernel.decl @qwen38_greedy_argmax_reduce_rows_f32(%token_count: index, %output_size: index) launch(%token_count: index, %output_size: index, %partial_logits: buffer, %partial_token_ids: buffer, %token_ids: buffer)
+
+// Projects normalized hidden rows and publishes their deterministic greedy
+// tokens. Complete cohorts share packing and argmax, while each contraction
+// retains vocabulary weights across a measured group of activation rows.
+command.program.def public @qwen38_output_projection_greedy(%token_count: index, %normalized_origin: offset, %output_origin: offset) launch(%parameters: buffer, %normalized: buffer, %token_id: buffer) where [range(%token_count, 1, 64)] {
+  %hidden_size = index.constant 5120 : index
+  %vocabulary_size = index.constant 248320 : index
+  %output_weight = command.parameter %parameters, "output.weight" : view<1042944000xi8>
+  %hidden_q8_row_bytes = index.constant 5760 : offset
+  %logits_row_bytes = index.constant 993280 : offset
+  %partial_row_bytes = index.constant 244 : offset
+  %hidden_q8_bytes = index.scale %token_count, %hidden_q8_row_bytes : index, offset -> offset
+  %logits_bytes = index.scale %token_count, %logits_row_bytes : index, offset -> offset
+  %partial_bytes = index.scale %token_count, %partial_row_bytes : index, offset -> offset
+  %normalized_q8 = buffer.alloca<global> align(256) %hidden_q8_bytes : buffer
+  %logits = buffer.alloca<global> align(256) %logits_bytes : buffer
+  %partial_logits = buffer.alloca<global> align(256) %partial_bytes : buffer
+  %partial_token_ids = buffer.alloca<global> align(256) %partial_bytes : buffer
+  %normalized_rows = buffer.view %normalized[%normalized_origin] : buffer -> view<[%token_count]x5120xf32>
+  %output_rows = buffer.view %token_id[%output_origin] : buffer -> view<[%token_count]xi32>
+
+  kernel.launch @ggml_quantize_q8_1_x4_f32[%token_count, %hidden_size](%token_count, %hidden_size, %normalized_rows, %normalized_q8) : [index, index](index, index, view<[%token_count]x5120xf32>, buffer)
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %four = index.constant 4 : index
+  %eight = index.constant 8 : index
+  %thirty_two = index.constant 32 : index
+  %wide_groups = index.div %token_count, %thirty_two : index
+  %wide_rows = index.mul %wide_groups, %thirty_two : index
+  scf.for %group = [%zero to %wide_groups step %one] unroll {
+    %row = index.mul %group, %thirty_two : index
+    %input_origin = index.scale %row, %hidden_q8_row_bytes : index, offset -> offset
+    %logits_origin = index.scale %row, %logits_row_bytes : index, offset -> offset
+    %input_group = buffer.view %normalized_q8[%input_origin] : buffer -> view<32x5760xi8>
+    %logits_group = buffer.view %logits[%logits_origin] : buffer -> view<32x248320xf32>
+    kernel.launch @qwen38_output_projection_q6k_m32(%input_group, %output_weight, %logits_group) : (view<32x5760xi8>, view<1042944000xi8>, view<32x248320xf32>)
+  }
+  %remaining_rows = index.sub %token_count, %wide_rows : index
+  %groups = index.div %remaining_rows, %eight : index
+  scf.for %group = [%zero to %groups step %one] unroll {
+    %relative_row = index.mul %group, %eight : index
+    %row = index.add %wide_rows, %relative_row : index
+    %input_origin = index.scale %row, %hidden_q8_row_bytes : index, offset -> offset
+    %logits_origin = index.scale %row, %logits_row_bytes : index, offset -> offset
+    %input_group = buffer.view %normalized_q8[%input_origin] : buffer -> view<8x5760xi8>
+    %logits_group = buffer.view %logits[%logits_origin] : buffer -> view<8x248320xf32>
+    kernel.launch @qwen38_output_projection_q6k_m8(%input_group, %output_weight, %logits_group) : (view<8x5760xi8>, view<1042944000xi8>, view<8x248320xf32>)
+  }
+  %grouped_rows = index.mul %groups, %eight : index
+  %tail_begin = index.add %wide_rows, %grouped_rows : index
+  scf.for %row = [%tail_begin to %token_count step %four] unroll {
+    %remaining = index.sub %token_count, %row : index
+    %count = index.min %remaining, %four : index
+    %input_origin = index.scale %row, %hidden_q8_row_bytes : index, offset -> offset
+    %logits_origin = index.scale %row, %logits_row_bytes : index, offset -> offset
+    %input_group = buffer.view %normalized_q8[%input_origin] : buffer -> view<[%count]x5760xi8>
+    %logits_group = buffer.view %logits[%logits_origin] : buffer -> view<[%count]x248320xf32>
+    %uses_m4 = index.cmp eq, %count, %four : index
+    scf.if %uses_m4 {
+      kernel.launch @ggml_linear_q6k_q8_1_x4_m4[%count, %hidden_size, %vocabulary_size](%count, %hidden_size, %vocabulary_size, %input_group, %output_weight, %logits_group) : [index, index, index](index, index, index, view<[%count]x5760xi8>, view<1042944000xi8>, view<[%count]x248320xf32>)
+    } else {
+      kernel.launch @ggml_linear_q6k_q8_1_x4[%count, %hidden_size, %vocabulary_size](%count, %hidden_size, %vocabulary_size, %input_group, %output_weight, %logits_group) : [index, index, index](index, index, index, view<[%count]x5760xi8>, view<1042944000xi8>, view<[%count]x248320xf32>)
+    }
+  }
+  kernel.launch @qwen38_greedy_argmax_partial_rows_f32[%token_count, %vocabulary_size](%token_count, %vocabulary_size, %logits, %partial_logits, %partial_token_ids) : [index, index](index, index, buffer, buffer, buffer)
+  kernel.launch @qwen38_greedy_argmax_reduce_rows_f32[%token_count, %vocabulary_size](%token_count, %vocabulary_size, %partial_logits, %partial_token_ids, %output_rows) : [index, index](index, index, buffer, buffer, view<[%token_count]xi32>)
+  command.return
+}
+
+// Normalizes the one-row decode residual before the shared projection.
+command.program.def @qwen38_output_head(%residual_offset: offset) launch(%parameters: buffer, %residual: buffer, %normalized: buffer, %token_id: buffer) {
+  %epsilon = scalar.constant 0.000001 : f32
+  %norm_weight = command.parameter %parameters, "output_norm.weight" : view<5120xf32>
+  %residual_row = buffer.view %residual[%residual_offset] : buffer -> view<5120xf32>
+  kernel.launch @qwen38_rmsnorm_f32_decode(%epsilon, %residual_row, %norm_weight, %normalized) : (f32, view<5120xf32>, view<5120xf32>, buffer)
+  %one = index.constant 1 : index
+  %origin = index.constant 0 : offset
+  command.program.launch @qwen38_output_projection_greedy[%one, %origin, %origin](%parameters, %normalized, %token_id) : [index, offset, offset](buffer, buffer, buffer)
+  command.return
+}
+
+// Publishes the normalized hidden row alongside the greedy token. Both output
+// bindings are issue-time resources and may change on every execution.
+command.program.def public @qwen38_output_head_greedy_with_hidden(%residual_offset: offset) launch(%parameters: buffer, %residual: buffer, %normalized: buffer, %token_id: buffer) {
+  command.program.launch @qwen38_output_head[%residual_offset](%parameters, %residual, %normalized, %token_id) : [offset](buffer, buffer, buffer, buffer)
+  command.return
+}
+
+// Selects the final active prefill row from device control before using the
+// same normalized-hidden and vocabulary projection path as decode.
+command.program.def public @qwen38_output_head_prefill_greedy_with_hidden() launch(%parameters: buffer, %residual: buffer, %control: buffer, %normalized: buffer, %token_id: buffer) {
+  %epsilon = scalar.constant 0.000001 : f32
+  %norm_weight = command.parameter %parameters, "output_norm.weight" : view<5120xf32>
+  kernel.launch @qwen38_rmsnorm_f32_prefill_last(%control, %epsilon, %residual, %norm_weight, %normalized) : (buffer, f32, buffer, view<5120xf32>, buffer)
+  %one = index.constant 1 : index
+  %origin = index.constant 0 : offset
+  command.program.launch @qwen38_output_projection_greedy[%one, %origin, %origin](%parameters, %normalized, %token_id) : [index, offset, offset](buffer, buffer, buffer)
+  command.return
+}
+
+// Normalizes and projects the complete depth-four verification span. One
+// projection workgroup retains each vocabulary row while evaluating all four
+// activations, so the immutable Q6_K output weight is decoded only once.
+// Vocabulary logits remain transient; only token IDs and normalized hidden
+// rows are visible outside the command program.
+command.program.def public @qwen38_output_head_rows_greedy_depth4() launch(%parameters: buffer, %residual: buffer, %normalized: buffer, %token_ids: buffer) {
+  %token_count = index.constant 4 : index
+  %epsilon = scalar.constant 0.000001 : f32
+  %norm_weight = command.parameter %parameters, "output_norm.weight" : view<5120xf32>
+
+  kernel.launch @qwen38_rmsnorm_f32_prefill[%token_count](%token_count, %epsilon, %residual, %norm_weight, %normalized) : [index](index, f32, buffer, view<5120xf32>, buffer)
+  %origin = index.constant 0 : offset
+  command.program.launch @qwen38_output_projection_greedy[%token_count, %origin, %origin](%parameters, %normalized, %token_ids) : [index, offset, offset](buffer, buffer, buffer)
+  command.return
+}
