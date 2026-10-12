@@ -3,7 +3,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("hrx-demos")
+    __version__ = version("hrx-solutions")
 except PackageNotFoundError:
     __version__ = "0.0.0"
 

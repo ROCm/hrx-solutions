@@ -110,7 +110,7 @@ jobs:
           fi
 
           wheel_name="$(basename "${wheels[0]}")"
-          if [[ "${wheel_name}" != hrx_demos-*.whl ||
+          if [[ "${wheel_name}" != hrx_solutions-*.whl ||
                 "${wheel_name}" != *manylinux*x86_64.whl ]]; then
             echo "Unexpected release wheel: ${wheel_name}" >&2
             exit 1
@@ -135,7 +135,7 @@ jobs:
               metadata = email.parser.BytesParser().parsebytes(
                   wheel.read(metadata_paths[0])
               )
-          if metadata["Name"] != "hrx-demos":
+          if metadata["Name"] != "hrx-solutions":
               raise SystemExit(f"Unexpected package name: {metadata['Name']!r}")
           if metadata["Version"] != expected_version:
               raise SystemExit(

@@ -1,4 +1,4 @@
-"""Build and staging helpers for the HRX Demos Python wheel."""
+"""Build and staging helpers for the HRX Solutions Python wheel."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ NeededLibraries = Callable[[Path], tuple[str, ...]]
 
 def package_version() -> str:
     """Returns the package version selected for this build."""
-    return os.environ.get("HRX_DEMOS_PACKAGE_VERSION") or DEFAULT_PACKAGE_VERSION
+    return os.environ.get("HRX_SOLUTIONS_PACKAGE_VERSION") or DEFAULT_PACKAGE_VERSION
 
 
 def discover_bazel(explicit: Optional[str] = None) -> Path:
@@ -355,9 +355,9 @@ def stage_native_payload(
 def validate_wheel_platform() -> None:
     machine = platform.machine().lower()
     if os.name != "posix" or platform.system() != "Linux":
-        raise RuntimeError("HRX Demos wheels currently require Linux")
+        raise RuntimeError("HRX Solutions wheels currently require Linux")
     if machine not in ("x86_64", "amd64"):
-        raise RuntimeError(f"HRX Demos wheels currently require x86-64, got {machine}")
+        raise RuntimeError(f"HRX Solutions wheels currently require x86-64, got {machine}")
 
 
 class BinaryDistribution(Distribution):
@@ -387,7 +387,7 @@ class BazelBuildPy(build_py):
         bazel = discover_bazel()
         rocm_root = discover_rocm_root()
         executables = build_native_executables(bazel, rocm_root)
-        package_root = Path(self.build_lib) / "hrx_demos"
+        package_root = Path(self.build_lib) / "hrx_solutions"
         if package_root.exists():
             shutil.rmtree(package_root)
         super().run()

@@ -51,7 +51,7 @@ jobs:
       HRX_ROCM_ARTIFACT_VARIANT: release
       HRX_ROCM_ROOT: ${{ github.workspace }}/build/wheel/rocm-root
       HRX_DOWNLOAD_CACHE_DIR: ${{ github.workspace }}/build/wheel/downloads
-      HRX_DEMOS_PACKAGE_VERSION: ${{ inputs.package_version }}
+      HRX_SOLUTIONS_PACKAGE_VERSION: ${{ inputs.package_version }}
       PIP_CACHE_DIR: ${{ github.workspace }}/build/wheel/caches/pip
       BAZELISK_HOME: ${{ github.workspace }}/build/wheel/caches/bazelisk
       BAZEL: ${{ github.workspace }}/build/wheel/tools/bin/bazel
@@ -197,11 +197,11 @@ jobs:
           "${SMOKE_VENV}/bin/python" - <<'PY'
           import importlib.metadata
           from pathlib import Path
-          import hrx_demos
+          import hrx_solutions
 
-          print(f"hrx-demos {importlib.metadata.version('hrx-demos')}")
-          print(f"package: {hrx_demos.__file__}")
-          package_root = Path(hrx_demos.__file__).resolve().parent
+          print(f"hrx-solutions {importlib.metadata.version('hrx-solutions')}")
+          print(f"package: {hrx_solutions.__file__}")
+          package_root = Path(hrx_solutions.__file__).resolve().parent
           assert (package_root / "_native/bin/loom-text-server").is_file()
           assert (
               package_root

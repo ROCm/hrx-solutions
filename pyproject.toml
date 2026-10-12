@@ -6,7 +6,7 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hrx-demos"
+name = "hrx-solutions"
 dynamic = ["version"]
 description = "Loom Serve application built on the HRX runtime"
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -25,14 +25,14 @@ classifiers = [
 ]
 
 [project.scripts]
-loom-serve = "hrx_demos.loom_serve:main"
+loom-serve = "hrx_solutions.loom_serve:main"
 
 [project.urls]
 Homepage = "https://github.com/ROCm/hrx-solutions"
 Repository = "https://github.com/ROCm/hrx-solutions"
 
 [tool.setuptools]
-packages = ["hrx_demos"]
+packages = ["hrx_solutions"]
 
 [tool.setuptools.package-dir]
-hrx_demos = "binding/python"
+hrx_solutions = "binding/python"

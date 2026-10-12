@@ -13,7 +13,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README_PATH = REPO_ROOT / "README.md"
-NATIVE_LIBRARY_PREFIX = "hrx_demos/_native/lib/"
+NATIVE_LIBRARY_PREFIX = "hrx_solutions/_native/lib/"
 REQUIRED_RUNTIME_LIBRARIES = {
     NATIVE_LIBRARY_PREFIX + "libhsa-runtime64.so.1",
     NATIVE_LIBRARY_PREFIX + "libhsa-amd-aqlprofile64.so.1",

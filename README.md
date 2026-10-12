@@ -14,7 +14,7 @@ remain external inputs.
 - GitHub Actions builds a manylinux x86-64 wheel, checks the wheel contents,
   and attaches it to a GitHub Release for a semantic-version tag.
 
-The wheel is published as `hrx-demos`. It is a platform-specific Linux wheel,
+The wheel is published as `hrx-solutions`. It is a platform-specific Linux wheel,
 although its Python ABI tag is `py3-none`; it includes native AMDGPU code and
 ROCm libraries.
 
@@ -24,7 +24,7 @@ Download the wheel from a GitHub Release, then install it on a Linux x86-64
 machine with a supported AMD GPU and driver:
 
 ```bash
-python -m pip install ./hrx_demos-*.whl
+python -m pip install ./hrx_solutions-*.whl
 loom-serve \
   --weights=/path/to/Qwen3.8-27B-UD-Q5_K_XL.gguf \
   --tokenizer=/path/to/tokenizer.json \
@@ -46,7 +46,7 @@ python -m build --wheel
 ```
 
 The build fetches the HRX commit pinned in `deps.lock` and builds the Loom Serve
-server with HRX's Bazel workspace. Set `HRX_DEMOS_PACKAGE_VERSION` to override
+server with HRX's Bazel workspace. Set `HRX_SOLUTIONS_PACKAGE_VERSION` to override
 the default wheel version `0.1.0`.
 
 ## License
