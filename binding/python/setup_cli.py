@@ -116,11 +116,15 @@ def _cmd_import(args: argparse.Namespace) -> int:
             )
         revision = args.revision or "main"
         gguf = model_store.HuggingFaceFile(args.hf_repo, args.gguf_file, revision)
-        tokenizer = model_store.HuggingFaceFile(args.hf_repo, args.tokenizer_file, revision)
+        tokenizer = model_store.HuggingFaceFile(
+            args.tokenizer_hf_repo or args.hf_repo,
+            args.tokenizer_file,
+            args.tokenizer_revision or revision,
+        )
     else:
-        if args.gguf_file or args.tokenizer_file:
+        if args.gguf_file or args.tokenizer_file or args.tokenizer_hf_repo or args.tokenizer_revision:
             raise model_store.ModelImportError(
-                "--gguf-file and --tokenizer-file are only valid with --hf-repo"
+                "Hugging Face file and revision options are only valid with --hf-repo"
             )
         if not args.tokenizer:
             raise model_store.ModelImportError("Local imports require --tokenizer")
@@ -331,20 +335,22 @@ def build_parser() -> argparse.ArgumentParser:
         handler=_cmd_pipelines
     )
 
-    importing = model_commands.add_parser("import", help="import a local or Hugging Face model")
+    importing = model_commands.add_parser("import", help="import local files or files downloaded by the Hugging Face CLI")
     importing.add_argument("model_id")
     source = importing.add_mutually_exclusive_group(required=True)
-    source.add_argument("--hf-repo", help="Hugging Face repository containing both files")
+    source.add_argument("--hf-repo", help="Hugging Face repository containing both files (requires the `hf` CLI)")
     source.add_argument("--gguf", help="local GGUF file; use with --tokenizer")
     importing.add_argument("--gguf-file", help="GGUF path within the Hugging Face repository")
     importing.add_argument("--tokenizer-file", help="tokenizer path within the Hugging Face repository")
+    importing.add_argument("--tokenizer-hf-repo", help="Hugging Face repository for the tokenizer (defaults to --hf-repo)")
     importing.add_argument("--revision", default="main")
-    importing.add_argument("--token", help="Hugging Face access token (or use HF_TOKEN)")
+    importing.add_argument("--tokenizer-revision", help="tokenizer revision (defaults to --revision)")
+    importing.add_argument("--token", help="Hugging Face access token passed to `hf download` (or use HF_TOKEN)")
     importing.add_argument("--tokenizer", help="local tokenizer.json file")
     importing.add_argument(
         "--alias",
         action="store_true",
-        help="symlink local files or use a shared cache for Hugging Face files instead of copying",
+        help="symlink local files or the Hugging Face CLI cache paths instead of copying",
     )
     importing.add_argument("--model-root", type=Path)
     importing.set_defaults(handler=_cmd_import)

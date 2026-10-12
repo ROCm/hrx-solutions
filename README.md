@@ -20,6 +20,9 @@ ROCm libraries.
 
 ## Use
 
+See the [quickstart guide](QUICKSTART.md) for wheel installation, local and
+Hugging Face model imports, alias mode, serving, and Pi configuration.
+
 Download the wheel from a GitHub Release, then install it on a Linux x86-64
 machine with a supported AMD GPU and driver:
 
@@ -47,12 +50,11 @@ loom-serve-setup models import qwen-7b-instruct \
 loom-serve-setup models import qwen-local --alias \
   --gguf /models/Qwen.gguf --tokenizer /models/tokenizer.json
 
-# Or download both files from a Hugging Face repository.
+# Download selected files from the Hugging Face cache (requires `hf`).
 loom-serve-setup models import qwen-local --hf-repo owner/repository \
   --gguf-file model.gguf --tokenizer-file tokenizer.json --revision main
 
-# Hugging Face aliases download once into a shared, commit-pinned cache,
-# then symlink those cached files into the model store.
+# Hugging Face aliases symlink the returned cache paths into the model store.
 loom-serve-setup models import qwen-7b-instruct --alias --hf-repo owner/repository \
   --gguf-file model.gguf --tokenizer-file tokenizer.json --revision main
 
@@ -79,12 +81,12 @@ Older manifests without a recorded pipeline require validation or an explicit
 override before serving. Pi remains an optional client installation;
 `pi-config` only writes its model configuration.
 
-Alias mode records absolute link targets in the model manifest. Local aliases
-refer directly to the selected files. Hugging Face aliases use
-`~/.cache/hrx-solutions/huggingface` (or `HRX_SOLUTIONS_HF_CACHE`) and resolve
-the requested revision to a commit before caching. Moving a local source or
-removing a cached Hugging Face file breaks its alias; `models list` reports
-broken aliases, and validation and serving explain which target is missing.
+Hugging Face imports require the Hugging Face CLI. Install it with
+`python -m pip install -U 'huggingface_hub[cli]'`. `hf download` obtains each requested file and
+returns its path in the standard Hugging Face cache. Alias mode records that
+path and symlinks it into the model store. Removing the cached file breaks the
+alias; `models list` reports broken aliases, and validation and serving explain
+which target is missing.
 
 ## Build locally
 

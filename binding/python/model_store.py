@@ -1,8 +1,7 @@
 """Import GGUF models and tokenizers into the user's Loom model store.
 
-This module deliberately has no third-party dependencies. Hugging Face files
-are fetched from the repository's ``resolve/<revision>/`` URLs, and local
-files are copied or aliased into the same canonical layout:
+Hugging Face files are resolved through the ``hf`` CLI into its standard
+cache. Local files are copied or aliased into the same canonical layout:
 
     ~/.loom/models/<model-id>/model.gguf
     ~/.loom/models/<model-id>/tokenizer.json
@@ -20,9 +19,7 @@ import os
 import re
 import shutil
 import tempfile
-import urllib.error
-import urllib.parse
-import urllib.request
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,15 +27,7 @@ from typing import Optional, Union
 
 
 DEFAULT_MODEL_ROOT = Path.home() / ".loom" / "models"
-_HF_CACHE_OVERRIDE = os.environ.get("HRX_SOLUTIONS_HF_CACHE")
-_USER_CACHE_ROOT = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-DEFAULT_HF_CACHE_ROOT = (
-    Path(_HF_CACHE_OVERRIDE).expanduser()
-    if _HF_CACHE_OVERRIDE
-    else _USER_CACHE_ROOT / "hrx-solutions" / "huggingface"
-)
 _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-_HF_COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
 _CHUNK_SIZE = 1024 * 1024
 
 
@@ -81,14 +70,12 @@ def import_model(
     """Install a local or Hugging Face GGUF and tokenizer atomically.
 
     Pass a local path for either file, or a :class:`HuggingFaceFile` for a
-    Hugging Face repository file. GGUF and tokenizer sources can come from
-    different repositories and revisions. Existing imports are left intact;
+    Hugging Face repository file. Files are obtained through ``hf download``.
+    Existing imports are left intact;
     remove one explicitly before importing a replacement.
 
-    With ``alias=True``, local files are symlinked in place. Hugging Face
-    files are downloaded to a shared cache under an immutable commit revision,
-    then symlinked from the model store so imports can share the downloaded
-    files.
+    With ``alias=True``, local files and Hugging Face cache paths are symlinked
+    in place, so large weights are not duplicated.
 
     ``token`` overrides ``HF_TOKEN`` and ``HUGGING_FACE_HUB_TOKEN`` for
     private or gated Hugging Face repositories. ``alias`` avoids a second
@@ -111,13 +98,8 @@ def import_model(
         tokenizer_path = stage / "tokenizer.json"
         link_targets = {}
         if alias:
-            resolved_revisions = {}
-            gguf_source, link_targets["gguf"] = _prepare_alias_source(
-                gguf_source, token, resolved_revisions
-            )
-            tokenizer_source, link_targets["tokenizer"] = _prepare_alias_source(
-                tokenizer_source, token, resolved_revisions
-            )
+            link_targets["gguf"] = gguf_source["path"]
+            link_targets["tokenizer"] = tokenizer_source["path"]
             os.symlink(link_targets["gguf"], gguf_path)
             os.symlink(link_targets["tokenizer"], tokenizer_path)
             gguf_bytes = gguf_path.stat().st_size
@@ -162,7 +144,7 @@ def import_model(
         os.replace(stage, destination)
     except ModelImportError:
         raise
-    except (OSError, urllib.error.URLError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         raise ModelImportError(f"Could not import model {model_id!r}: {exc}") from exc
     finally:
         if stage.exists():
@@ -230,20 +212,30 @@ def _resolve_source(source: Source, token: Optional[str]) -> dict:
         if not filename or any(part in (".", "..") for part in filename.split("/")):
             raise ModelImportError(f"Invalid Hugging Face filename: {source.filename!r}")
         revision = source.revision or "main"
-        quoted_repo = "/".join(urllib.parse.quote(part, safe="") for part in repo_id.split("/"))
-        quoted_revision = urllib.parse.quote(revision, safe="")
-        quoted_filename = "/".join(
-            urllib.parse.quote(part, safe="") for part in filename.split("/")
-        )
-        url = f"https://huggingface.co/{quoted_repo}/resolve/{quoted_revision}/{quoted_filename}"
         auth_token = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        command = ["hf", "download", repo_id, filename, "--revision", revision]
+        if auth_token:
+            command.extend(("--token", auth_token))
+        try:
+            result = subprocess.run(command, check=True, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise ModelImportError(
+                "The Hugging Face CLI is required for Hugging Face imports; install it with `python -m pip install -U huggingface_hub[cli]`"
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            details = (exc.stderr or exc.stdout or str(exc)).strip()
+            raise ModelImportError(f"Hugging Face CLI download failed: {details}") from exc
+        cache_path = Path(result.stdout.strip()).expanduser()
+        if not cache_path.is_file():
+            raise ModelImportError(
+                f"Hugging Face CLI did not return an existing file path for {repo_id}/{filename}: {result.stdout.strip()!r}"
+            )
         return {
             "kind": "huggingface",
             "repo_id": repo_id,
             "filename": filename,
             "revision": revision,
-            "url": url,
-            "token": auth_token,
+            "path": cache_path.resolve(),
         }
     path = Path(source).expanduser()
     if not path.is_file():
@@ -251,115 +243,9 @@ def _resolve_source(source: Source, token: Optional[str]) -> dict:
     return {"kind": "local", "path": path.resolve()}
 
 
-def _prepare_alias_source(
-    source: dict,
-    token: Optional[str],
-    resolved_revisions: dict,
-) -> tuple[dict, Path]:
-    if source["kind"] == "local":
-        return source, source["path"]
-
-    requested_revision = source["revision"]
-    revision_key = (source["repo_id"], requested_revision)
-    commit = resolved_revisions.get(revision_key)
-    if commit is None:
-        commit = _resolve_hf_revision(source, token)
-        resolved_revisions[revision_key] = commit
-    source = dict(source)
-    source["requested_revision"] = requested_revision
-    source["revision"] = commit
-    source["url"] = _hf_resolve_url(source["repo_id"], source["filename"], commit)
-    cache_path = (
-        DEFAULT_HF_CACHE_ROOT / source["repo_id"] / commit / source["filename"]
-    )
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    if not cache_path.is_file():
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=f".{cache_path.name}.download-", dir=cache_path.parent
-        )
-        os.close(fd)
-        temporary = Path(temporary_name)
-        try:
-            _copy_source(source, temporary)
-            os.replace(temporary, cache_path)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
-    return source, cache_path.resolve()
-
-
-def _resolve_hf_revision(source: dict, token: Optional[str]) -> str:
-    repo_path = "/".join(
-        urllib.parse.quote(part, safe="") for part in source["repo_id"].split("/")
-    )
-    revision = urllib.parse.quote(source["revision"], safe="")
-    url = f"https://huggingface.co/api/models/{repo_path}/revision/{revision}"
-    headers = {"User-Agent": "hrx-solutions-model-store/0.1"}
-    auth_token = token or os.environ.get("HF_TOKEN") or os.environ.get(
-        "HUGGING_FACE_HUB_TOKEN"
-    )
-    if auth_token:
-        headers["Authorization"] = f"Bearer {auth_token}"
-    request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            metadata = json.load(response)
-    except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
-            raise ModelImportError(
-                f"Hugging Face denied access to {source['repo_id']}; authenticate with HF_TOKEN"
-            ) from exc
-        raise ModelImportError(
-            f"Could not resolve Hugging Face revision {source['revision']!r} "
-            f"for {source['repo_id']} ({exc.code})"
-        ) from exc
-    except (urllib.error.URLError, json.JSONDecodeError) as exc:
-        raise ModelImportError(
-            f"Could not resolve Hugging Face revision {source['revision']!r} "
-            f"for {source['repo_id']}: {exc}"
-        ) from exc
-    commit = metadata.get("sha") if isinstance(metadata, dict) else None
-    if not isinstance(commit, str) or not _HF_COMMIT_RE.fullmatch(commit):
-        raise ModelImportError(
-            f"Hugging Face returned an invalid commit for {source['repo_id']}"
-        )
-    return commit
-
-
-def _hf_resolve_url(repo_id: str, filename: str, revision: str) -> str:
-    quoted_repo = "/".join(
-        urllib.parse.quote(part, safe="") for part in repo_id.split("/")
-    )
-    quoted_revision = urllib.parse.quote(revision, safe="")
-    quoted_filename = "/".join(
-        urllib.parse.quote(part, safe="") for part in filename.split("/")
-    )
-    return f"https://huggingface.co/{quoted_repo}/resolve/{quoted_revision}/{quoted_filename}"
-
-
 def _copy_source(source: dict, destination: Path) -> int:
     digest_size = 0
-    if source["kind"] == "local":
-        input_stream = source["path"].open("rb")
-        close_stream = True
-    else:
-        headers = {"User-Agent": "hrx-solutions-model-store/0.1"}
-        if source["token"]:
-            headers["Authorization"] = f"Bearer {source['token']}"
-        request = urllib.request.Request(source["url"], headers=headers)
-        try:
-            input_stream = urllib.request.urlopen(request, timeout=60)
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                raise ModelImportError(
-                    f"Hugging Face denied access to {source['repo_id']}/{source['filename']}; "
-                    "authenticate with HF_TOKEN if the repository is gated or private"
-                ) from exc
-            raise ModelImportError(
-                f"Hugging Face download failed ({exc.code}) for "
-                f"{source['repo_id']}/{source['filename']} at revision {source['revision']!r}"
-            ) from exc
-        close_stream = True
+    input_stream = source["path"].open("rb")
     try:
         with input_stream, destination.open("wb") as output:
             while True:
@@ -369,10 +255,10 @@ def _copy_source(source: dict, destination: Path) -> int:
                 output.write(chunk)
                 digest_size += len(chunk)
     finally:
-        if close_stream and not input_stream.closed:
+        if not input_stream.closed:
             input_stream.close()
     if digest_size == 0:
-        raise ModelImportError(f"Source file is empty: {source.get('path') or source['url']}")
+        raise ModelImportError(f"Source file is empty: {source['path']}")
     return digest_size
 
 
