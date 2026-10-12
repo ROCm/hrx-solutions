@@ -1,0 +1,222 @@
+# Copyright 2026 The HRX Authors
+#
+# Licensed under the MIT License.
+# SPDX-License-Identifier: MIT
+
+name: Build Python Linux Wheel
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        type: string
+        default: Default
+      release_type:
+        type: string
+        default: nightly
+      run_id:
+        type: string
+        default: ""
+      artifact_set:
+        type: string
+        default: core
+      package_version:
+        type: string
+        default: 0.1.0
+
+permissions:
+  actions: read
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build_python_wheel:
+    name: ${{ inputs.name }}
+    runs-on: aws-linux-scale-rocm-prod
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/rocm/therock_build_manylinux_x86_64@sha256:702a5133851e6d1daf1207d2c9fbb01c2667914a5b6dc5a01faeb3ce66ea6421
+    env:
+      HRX_OUTPUT_DIR: ${{ github.workspace }}/build/wheel
+      HRX_SOURCE_DIR: ${{ github.workspace }}/.deps/hrx
+      HRX_BUILD_PYTHON: /opt/python/cp312-cp312/bin/python3
+      HRX_PYTHON: ${{ github.workspace }}/build/wheel/python/bin/python3
+      HRX_BAZEL_BIN_DIR: ${{ github.workspace }}/build/wheel/tools/bin
+      HRX_RELEASE_TYPE: ${{ inputs.release_type }}
+      HRX_RUN_ID: ${{ inputs.run_id }}
+      HRX_ARTIFACT_SET: ${{ inputs.artifact_set }}
+      HRX_ROCM_ARTIFACT_VARIANT: release
+      HRX_ROCM_ROOT: ${{ github.workspace }}/build/wheel/rocm-root
+      HRX_DOWNLOAD_CACHE_DIR: ${{ github.workspace }}/build/wheel/downloads
+      HRX_DEMOS_PACKAGE_VERSION: ${{ inputs.package_version }}
+      PIP_CACHE_DIR: ${{ github.workspace }}/build/wheel/caches/pip
+      BAZELISK_HOME: ${{ github.workspace }}/build/wheel/caches/bazelisk
+      BAZEL: ${{ github.workspace }}/build/wheel/tools/bin/bazel
+      WHEEL_DIST_DIR: ${{ github.workspace }}/build/wheel/dist
+      WHEEL_OUTPUT_DIR: ${{ github.workspace }}/build/wheel/wheelhouse
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Adjust git config
+        run: git config --global --add safe.directory "$PWD"
+
+      - name: Fetch pinned HRX source
+        run: bash .github/scripts/fetch_hrx_source.sh
+
+      - name: Fetch ROCm toolchain
+        run: bash .github/scripts/fetch_rocm_toolchain.sh
+
+      - name: Install Python build requirements
+        run: |
+          "${HRX_BUILD_PYTHON}" --version
+          "${HRX_BUILD_PYTHON}" -m pip install --upgrade \
+            build \
+            "setuptools>=77" \
+            "wheel>=0.45"
+          "${HRX_BUILD_PYTHON}" -m build --version
+
+      - name: Install Bazel host tools
+        run: |
+          mkdir -p "${HRX_BAZEL_BIN_DIR}"
+          "${HRX_BUILD_PYTHON}" \
+            "${HRX_SOURCE_DIR}/build_tools/devtools/install.py" \
+            --group bazel \
+            --bin-dir "${HRX_BAZEL_BIN_DIR}"
+          "${HRX_BUILD_PYTHON}" \
+            "${HRX_SOURCE_DIR}/build_tools/devtools/install.py" \
+            --group bazel \
+            --bin-dir "${HRX_BAZEL_BIN_DIR}" \
+            --check
+
+      - name: Check build environment
+        run: |
+          "${HRX_BUILD_PYTHON}" --version
+          USE_BAZEL_VERSION="$(cat .bazelversion)" "${BAZEL}" --version
+          "${CC}" --version
+          /usr/local/bin/auditwheel --version
+          test -n "${AUDITWHEEL_PLAT:-}"
+          test -d "${HRX_ROCM_ROOT}/include"
+          test -f "${HRX_ROCM_ROOT}/lib/libhsa-runtime64.so.1"
+          echo "AUDITWHEEL_PLAT=${AUDITWHEEL_PLAT}"
+
+      - name: Configure Bazel
+        run: |
+          "${HRX_BUILD_PYTHON}" build_tools/setup_python.py \
+            --rocm="${HRX_ROCM_ROOT}" \
+            --bazel="${BAZEL}"
+
+      - name: Build Linux wheel
+        run: >-
+          "${HRX_BUILD_PYTHON}" -m build --wheel
+          --outdir "${WHEEL_DIST_DIR}"
+
+      - name: Inspect Linux wheel
+        run: |
+          "${HRX_BUILD_PYTHON}" build_tools/validate_wheel.py \
+            "${WHEEL_DIST_DIR}"/*.whl
+          env LD_LIBRARY_PATH="${HRX_AUDITWHEEL_LD_LIBRARY_PATH}" \
+            /usr/local/bin/auditwheel show "${WHEEL_DIST_DIR}"/*.whl
+
+      - name: Repair manylinux wheel
+        run: |
+          env LD_LIBRARY_PATH="${HRX_AUDITWHEEL_LD_LIBRARY_PATH}" \
+            /usr/local/bin/auditwheel repair \
+            --plat "${AUDITWHEEL_PLAT}" \
+            --wheel-dir "${WHEEL_OUTPUT_DIR}" \
+            "${WHEEL_DIST_DIR}"/*.whl
+
+      - name: Validate manylinux wheel
+        run: |
+          shopt -s nullglob
+          wheels=("${WHEEL_OUTPUT_DIR}"/*.whl)
+          if [[ "${#wheels[@]}" -ne 1 ]]; then
+            echo "Expected one repaired wheel, found ${#wheels[@]}" >&2
+            printf '  %s\n' "${wheels[@]}" >&2
+            exit 1
+          fi
+          if [[ "$(basename "${wheels[0]}")" != *manylinux* ]]; then
+            echo "Repaired wheel is not tagged manylinux: ${wheels[0]}" >&2
+            exit 1
+          fi
+          "${HRX_BUILD_PYTHON}" build_tools/validate_wheel.py "${wheels[0]}"
+          /usr/local/bin/auditwheel show "${wheels[0]}"
+
+      - name: Upload manylinux wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hrx-solutions-wheel-linux-x86_64
+          path: build/wheel/wheelhouse/*.whl
+          if-no-files-found: error
+
+  smoke_test_python_wheel:
+    name: Smoke / Ubuntu 24.04
+    needs: build_python_wheel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    env:
+      WHEEL_DOWNLOAD_DIR: ${{ github.workspace }}/build/smoke/wheel
+      SMOKE_VENV: ${{ github.workspace }}/build/smoke/venv
+    steps:
+      - name: Download manylinux wheel
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: hrx-solutions-wheel-linux-x86_64
+          path: ${{ env.WHEEL_DOWNLOAD_DIR }}
+
+      - name: Select wheel artifact
+        run: |
+          shopt -s nullglob
+          wheels=("${WHEEL_DOWNLOAD_DIR}"/*.whl)
+          if [[ "${#wheels[@]}" -ne 1 ]]; then
+            echo "Expected one wheel, found ${#wheels[@]}" >&2
+            printf '  %s\n' "${wheels[@]}" >&2
+            exit 1
+          fi
+          if [[ "$(basename "${wheels[0]}")" != *manylinux* ]]; then
+            echo "Downloaded wheel is not tagged manylinux: ${wheels[0]}" >&2
+            exit 1
+          fi
+          echo "WHEEL_PATH=${wheels[0]}" >>"${GITHUB_ENV}"
+
+      - name: Install wheel in clean environment
+        run: |
+          python3 --version
+          python3 -m venv "${SMOKE_VENV}"
+          "${SMOKE_VENV}/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --no-index \
+            --no-deps \
+            "${WHEEL_PATH}"
+          "${SMOKE_VENV}/bin/python" - <<'PY'
+          import importlib.metadata
+          from pathlib import Path
+          import hrx_demos
+
+          print(f"hrx-demos {importlib.metadata.version('hrx-demos')}")
+          print(f"package: {hrx_demos.__file__}")
+          package_root = Path(hrx_demos.__file__).resolve().parent
+          assert (package_root / "_native/bin/loom-text-server").is_file()
+          assert (
+              package_root
+              / "_native/share/loom-serve/experimental/loom_serve/models/qwen/sources.txt"
+          ).is_file()
+          PY
+
+      - name: Check installed Loom Serve entry point
+        run: |
+          clean_env=(
+            env
+            -u HSA_OVERRIDE_GFX_VERSION
+            -u IREE_HAL_AMDGPU_LIBHSA_PATH
+            -u IREE_HAL_AMDGPU_LIBAQLPROFILE_PATH
+            -u LD_LIBRARY_PATH
+          )
+
+          "${clean_env[@]}" "${SMOKE_VENV}/bin/loom-serve" --help
