@@ -1,4 +1,7 @@
 config.loom
+control.loom
+prepare.loom
+weights.loom
 prefill.loom
 weights_prepare.loom
 epoch.loom

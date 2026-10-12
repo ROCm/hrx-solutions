@@ -34,6 +34,58 @@ loom-serve \
 The wheel does not include model weights. The selected checkpoint must match
 the model source shipped in the wheel.
 
+The `loom-serve-setup` command imports files into `~/.loom/models/<model-id>/`,
+validates a selected model against a registered pipeline, starts the server,
+and writes Pi's provider configuration. For example:
+
+```bash
+# Import local files.
+loom-serve-setup models import qwen-7b-instruct \
+  --gguf /models/Qwen.gguf --tokenizer /models/tokenizer.json
+
+# Register local files without copying them into the model store.
+loom-serve-setup models import qwen-local --alias \
+  --gguf /models/Qwen.gguf --tokenizer /models/tokenizer.json
+
+# Or download both files from a Hugging Face repository.
+loom-serve-setup models import qwen-local --hf-repo owner/repository \
+  --gguf-file model.gguf --tokenizer-file tokenizer.json --revision main
+
+# Hugging Face aliases download once into a shared, commit-pinned cache,
+# then symlink those cached files into the model store.
+loom-serve-setup models import qwen-7b-instruct --alias --hf-repo owner/repository \
+  --gguf-file model.gguf --tokenizer-file tokenizer.json --revision main
+
+loom-serve-setup models list
+loom-serve-setup models pipelines
+loom-serve-setup models validate qwen-7b-instruct --pipeline qwen
+loom-serve-setup serve qwen-7b-instruct --port 8080
+loom-serve-setup pi-config qwen-7b-instruct \
+  --base-url http://127.0.0.1:8080/v1 \
+  --output ~/.pi/agent/models.json
+```
+
+Choose a unique model ID for each imported fine-tune, even when several models
+use the same architecture. Model IDs identify installed weights; pipeline IDs
+select an installed implementation and source catalog. The command workflow is
+pipeline agnostic; `qwen` is the initial registered compatibility adapter.
+Validation uses the selected adapter's checker and records that pipeline in
+the model manifest only after a successful check. The list shows each model's
+ID, pipeline (or `unvalidated`), source, storage mode, and availability. Serve
+uses the recorded pipeline by default; `--pipeline` explicitly overrides it.
+The running endpoint advertises the installed model ID, so Pi and other
+OpenAI-compatible clients can address each fine-tune independently.
+Older manifests without a recorded pipeline require validation or an explicit
+override before serving. Pi remains an optional client installation;
+`pi-config` only writes its model configuration.
+
+Alias mode records absolute link targets in the model manifest. Local aliases
+refer directly to the selected files. Hugging Face aliases use
+`~/.cache/hrx-solutions/huggingface` (or `HRX_SOLUTIONS_HF_CACHE`) and resolve
+the requested revision to a commit before caching. Moving a local source or
+removing a cached Hugging Face file breaks its alias; `models list` reports
+broken aliases, and validation and serving explain which target is missing.
+
 ## Build locally
 
 Install Bazelisk 1.29.0, select the ROCm SDK, then configure and build the

@@ -60,13 +60,7 @@ def exec_loom_serve() -> NoReturn:
             0,
             "--model="
             + str(
-                native_root
-                / "share"
-                / "loom-serve"
-                / "experimental"
-                / "loom_serve"
-                / "models"
-                / "qwen"
+                package_root / "loom-pipeline" / "llm" / "qwen"
             ),
         )
     os.execve(

@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PACKAGE_VERSION = "0.1.0"
 BAZEL_TARGETS = (
     "//experimental/loom_serve/text:server",
+    "//experimental/loom_serve/models/qwen:epoch_check",
 )
 BAZEL_BUILD_OPTIONS = (
     "--config=opt",
@@ -190,6 +191,9 @@ def build_native_executables(bazel: Path, rocm_root: Path) -> dict[str, Path]:
         "loom-text-server": _query_bazel_output(
             bazel, source_root, BAZEL_TARGETS[0], build_options, build_environment
         ),
+        "loom-qwen-epoch-check": _query_bazel_output(
+            bazel, source_root, BAZEL_TARGETS[1], build_options, build_environment
+        ),
     }
 
 
@@ -198,28 +202,29 @@ def _copy_file(source: Path, destination: Path) -> None:
     shutil.copy2(source.resolve(), destination)
 
 
-def stage_loom_source_catalog(hrx_source_root: Path, native_root: Path) -> list[Path]:
-    """Copies only the Loom sources named by the packaged Qwen catalog."""
-    source_root = hrx_source_root / "experimental" / "loom_serve"
-    model_source = source_root / "models" / "qwen"
-    destination_root = (
-        native_root / "share" / "loom-serve" / "experimental" / "loom_serve"
-    )
-    staged: list[Path] = []
-    source_list = (model_source / "sources.txt").read_text(encoding="utf-8")
-    for raw_line in source_list.splitlines():
-        relative_path = raw_line.strip()
-        if not relative_path or relative_path.startswith("#"):
+def stage_loom_source_catalog(package_root: Path) -> list[Path]:
+    """Stages checked-in pipeline sources and validates the Qwen manifest."""
+    repository_catalog = REPO_ROOT / "loom-pipeline" / "llm"
+    packaged_catalog = package_root / "loom-pipeline" / "llm"
+    if packaged_catalog.exists():
+        shutil.rmtree(packaged_catalog)
+    for source in sorted(repository_catalog.rglob("*")):
+        if source.is_file():
+            _copy_file(source, packaged_catalog / source.relative_to(repository_catalog))
+
+    manifest = packaged_catalog / "qwen" / "sources.txt"
+    if not manifest.is_file():
+        raise RuntimeError(f"Checked-in Qwen source manifest is missing: {manifest}")
+    catalog_root = packaged_catalog.resolve()
+    for raw_line in manifest.read_text(encoding="utf-8").splitlines():
+        relative = raw_line.strip()
+        if not relative or relative.startswith("#"):
             continue
-        source = (model_source / relative_path).resolve(strict=True)
-        source.relative_to(source_root.resolve())
-        destination = destination_root / "models" / "qwen" / relative_path
-        _copy_file(source, destination)
-        staged.append(destination)
-    catalog_path = destination_root / "models" / "qwen" / "sources.txt"
-    _copy_file(model_source / "sources.txt", catalog_path)
-    staged.append(catalog_path)
-    return staged
+        source = (manifest.parent / relative).resolve(strict=True)
+        source.relative_to(catalog_root)
+        if not source.is_file():
+            raise RuntimeError(f"Qwen manifest entry is not a file: {relative}")
+    return [path for path in packaged_catalog.rglob("*") if path.is_file()]
 
 
 def _find_llvm_readelf(rocm_root: Path) -> Path:
@@ -329,7 +334,6 @@ def stage_native_payload(
         _copy_file(source, destination)
         destination.chmod(destination.stat().st_mode | 0o111)
 
-    stage_loom_source_catalog(hrx_source_root, native_root)
     _copy_file(
         hrx_source_root / "LICENSE",
         native_root / "share" / "loom-serve" / "LICENSE",
@@ -391,6 +395,7 @@ class BazelBuildPy(build_py):
         if package_root.exists():
             shutil.rmtree(package_root)
         super().run()
+        self._catalog_outputs = stage_loom_source_catalog(package_root)
         native_root = package_root / "_native"
         self._native_outputs = stage_native_payload(
             native_root, executables, rocm_root, discover_hrx_source()
@@ -399,4 +404,5 @@ class BazelBuildPy(build_py):
     def get_outputs(self, include_bytecode: int = 1) -> list[str]:
         outputs = super().get_outputs(include_bytecode)
         outputs.extend(str(path) for path in getattr(self, "_native_outputs", ()))
+        outputs.extend(str(path) for path in getattr(self, "_catalog_outputs", ()))
         return outputs

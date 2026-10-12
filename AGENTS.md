@@ -1,6 +1,6 @@
 # HRX Solutions Agent Guide
 
-This repository, `hrx-solutions`, builds and publishes the `hrx-demos` Python
+This repository, `hrx-solutions`, builds and publishes the `hrx-solutions` Python
 wheel for the Loom Serve text server from the HRX commit pinned in `deps.lock`.
 
 Keep this repository focused on the wheel, its thin Python launcher, pinned

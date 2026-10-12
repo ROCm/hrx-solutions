@@ -203,10 +203,12 @@ jobs:
           print(f"package: {hrx_solutions.__file__}")
           package_root = Path(hrx_solutions.__file__).resolve().parent
           assert (package_root / "_native/bin/loom-text-server").is_file()
+          assert (package_root / "_native/bin/loom-qwen-epoch-check").is_file()
           assert (
               package_root
-              / "_native/share/loom-serve/experimental/loom_serve/models/qwen/sources.txt"
+              / "loom-pipeline/llm/qwen/sources.txt"
           ).is_file()
+          assert (package_root / "loom-pipeline/llm/LICENSE-APACHE-2.0").is_file()
           PY
 
       - name: Check installed Loom Serve entry point
@@ -220,3 +222,4 @@ jobs:
           )
 
           "${clean_env[@]}" "${SMOKE_VENV}/bin/loom-serve" --help
+          "${clean_env[@]}" "${SMOKE_VENV}/bin/loom-serve-setup" --help

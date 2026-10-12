@@ -26,6 +26,8 @@ classifiers = [
 
 [project.scripts]
 loom-serve = "hrx_solutions.loom_serve:main"
+loom-serve-setup = "hrx_solutions.setup_cli:main"
+loom-serve-start = "hrx_solutions.serve_start:main"
 
 [project.urls]
 Homepage = "https://github.com/ROCm/hrx-solutions"

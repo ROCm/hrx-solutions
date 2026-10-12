@@ -14,6 +14,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README_PATH = REPO_ROOT / "README.md"
 NATIVE_LIBRARY_PREFIX = "hrx_solutions/_native/lib/"
+PACKAGE_PREFIX = "hrx_solutions/"
+PIPELINE_PREFIX = PACKAGE_PREFIX + "loom-pipeline/llm/"
 REQUIRED_RUNTIME_LIBRARIES = {
     NATIVE_LIBRARY_PREFIX + "libhsa-runtime64.so.1",
     NATIVE_LIBRARY_PREFIX + "libhsa-amd-aqlprofile64.so.1",
@@ -53,6 +55,54 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             raise RuntimeError(
                 "wheel is missing runtime libraries: " + ", ".join(missing)
             )
+
+        required_files = {
+            PACKAGE_PREFIX + "_native/bin/loom-text-server",
+            PACKAGE_PREFIX + "_native/bin/loom-qwen-epoch-check",
+            PIPELINE_PREFIX + "LICENSE-APACHE-2.0",
+            PIPELINE_PREFIX + "qwen/sources.txt",
+            PIPELINE_PREFIX + "qwen/prepare.loom",
+            PIPELINE_PREFIX + "qwen/control.loom",
+            PIPELINE_PREFIX + "qwen/weights.loom",
+            PACKAGE_PREFIX + "pipeline_validation.py",
+            PACKAGE_PREFIX + "setup_cli.py",
+            PACKAGE_PREFIX + "model_store.py",
+        }
+        missing = sorted(required_files - names)
+        if missing:
+            raise RuntimeError("wheel is missing setup assets: " + ", ".join(missing))
+
+        entry_points_paths = [
+            name for name in names if name.endswith(".dist-info/entry_points.txt")
+        ]
+        if len(entry_points_paths) != 1:
+            raise RuntimeError("wheel must contain one entry_points.txt")
+        entry_points = wheel.read(entry_points_paths[0]).decode("utf-8")
+        if "loom-serve-setup = hrx_solutions.setup_cli:main" not in entry_points:
+            raise RuntimeError("wheel does not expose the loom-serve-setup command")
+
+        manifest_path = REPO_ROOT / "loom-pipeline" / "llm" / "qwen" / "sources.txt"
+        expected_sources = []
+        for raw_line in manifest_path.read_text(encoding="utf-8").splitlines():
+            relative = raw_line.strip()
+            if not relative or relative.startswith("#"):
+                continue
+            expected_sources.append((manifest_path.parent / relative).resolve())
+        catalog_root = (REPO_ROOT / "loom-pipeline" / "llm").resolve()
+        expected_members = {
+            PIPELINE_PREFIX + path.relative_to(catalog_root).as_posix()
+            for path in expected_sources
+        }
+        missing = sorted(expected_members - names)
+        if missing:
+            raise RuntimeError("wheel is missing Qwen manifest sources: " + ", ".join(missing))
+
+        weight_suffixes = {".gguf", ".safetensors", ".pt", ".pth", ".ckpt"}
+        bundled_weights = sorted(
+            name for name in names if Path(name).suffix.lower() in weight_suffixes
+        )
+        if bundled_weights:
+            raise RuntimeError("wheel must not contain model weights: " + ", ".join(bundled_weights))
 
         for info in wheel.infolist():
             if info.is_dir():
