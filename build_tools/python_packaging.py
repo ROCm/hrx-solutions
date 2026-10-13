@@ -22,10 +22,16 @@ BAZEL_TARGETS = (
     "//experimental/loom_serve/text:server",
     "//experimental/loom_serve/models/qwen:epoch_check",
 )
+PLATFORM_LINK_OPTIONS = []
+if platform.system() == "Linux":
+    PLATFORM_LINK_OPTIONS.append(
+        "--linkopt=-Wl,--enable-new-dtags,-rpath,$ORIGIN/../lib"
+    )
 BAZEL_BUILD_OPTIONS = (
     "--config=opt",
     "--//runtime/config/hal:drivers=task,amdgpu",
     "--//loom/config/target:enable=amdgpu,vm,x86",
+    *PLATFORM_LINK_OPTIONS,
     "--repo_env=IREE_DEPENDENCY_MODE=pinned",
     "--repo_env=IREE_ROCM_DEPENDENCY_MODE=pinned",
     "--repo_env=IREE_HAL_AMDGPU_DEVICE_TOOLCHAIN=rocm",

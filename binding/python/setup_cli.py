@@ -374,8 +374,11 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     argv = [
         str(executable),
         f"--model={catalog}",
-        f"--weights={files.weights.resolve()}",
-        f"--tokenizer={files.tokenizer.resolve()}",
+        # Preserve the visible file extensions on Hugging Face snapshot paths.
+        # Resolving the symlinks follows them to extensionless blob names,
+        # which Loom cannot use to select its GGUF parser.
+        f"--weights={files.weights.absolute()}",
+        f"--tokenizer={files.tokenizer.absolute()}",
         f"--rows={args.rows}",
         f"--context_capacity={args.context_capacity}",
         f"--pool_capacity={args.pool_capacity}",
@@ -393,7 +396,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         executable=executable,
         argv=argv,
         port=args.port,
-        model_paths=(files.weights.resolve(), files.tokenizer.resolve(), catalog.resolve()),
+        model_paths=(files.weights.absolute(), files.tokenizer.absolute(), catalog.resolve()),
         launch_options={
             "rows": args.rows, "context_capacity": args.context_capacity,
             "pool_capacity": args.pool_capacity, "prefill_capacity": args.prefill_capacity,

@@ -191,8 +191,12 @@ class _QwenPipeline:
         command = (
             str(executable),
             f"--model={catalog}",
-            f"--weights={Path(model.weights).resolve()}",
-            f"--tokenizer={Path(model.tokenizer).resolve()}",
+            # Keep the visible filenames when these point through Hugging
+            # Face snapshot symlinks. The checker chooses the input format
+            # from the filename extension, while the resolved blob name has
+            # no extension.
+            f"--weights={Path(model.weights).absolute()}",
+            f"--tokenizer={Path(model.tokenizer).absolute()}",
             "--epoch=32:8",
         )
         try:

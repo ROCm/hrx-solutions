@@ -235,12 +235,19 @@ def _resolve_source(source: Source, token: Optional[str]) -> dict:
             "repo_id": repo_id,
             "filename": filename,
             "revision": revision,
-            "path": cache_path.resolve(),
+            # Keep the snapshot filename (for example, ``model.gguf``) in
+            # the path. Hugging Face snapshots symlink to extensionless blob
+            # files, and resolving here breaks consumers that select parsers
+            # by the path extension.
+            "path": cache_path.absolute(),
         }
     path = Path(source).expanduser()
     if not path.is_file():
         raise ModelImportError(f"Source file does not exist or is not a regular file: {path}")
-    return {"kind": "local", "path": path.resolve()}
+    # Preserve a symlink's filename for alias mode. This is important for
+    # Hugging Face snapshot paths, which link named files to extensionless
+    # content-addressed blobs.
+    return {"kind": "local", "path": path.absolute()}
 
 
 def _copy_source(source: dict, destination: Path) -> int:
