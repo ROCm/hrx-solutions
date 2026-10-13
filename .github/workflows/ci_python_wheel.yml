@@ -26,10 +26,6 @@ on:
           - core-with-llvm-dev
           - core-with-upstream-hip
         default: core
-      package_version:
-        type: string
-        description: "PEP 440 wheel version."
-        default: 0.1.0
   pull_request:
   push:
     branches:
@@ -52,4 +48,3 @@ jobs:
       release_type: ${{ inputs.release_type || 'nightly' }}
       run_id: ${{ inputs.run_id || '' }}
       artifact_set: ${{ inputs.artifact_set || 'core' }}
-      package_version: ${{ inputs.package_version || '0.1.0' }}

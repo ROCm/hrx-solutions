@@ -114,8 +114,10 @@ its exact filename. The setup command checks the Bazel version from
 
 The build fetches the HRX commit pinned in [deps.lock](deps.lock), builds the
 native server and compatibility checker, and packages them with this
-repository's pipeline sources. Set `HRX_SOLUTIONS_PACKAGE_VERSION` to override
-the default version `0.1.0`.
+repository's pipeline sources. The package version comes from
+[version.json](version.json) for both local builds and CI. See
+[RELEASING.md](RELEASING.md) for release preparation, tags, GitHub assets, and
+PyPI trusted publishing.
 
 ## License
 

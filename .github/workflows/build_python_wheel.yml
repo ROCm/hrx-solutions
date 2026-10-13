@@ -20,9 +20,6 @@ on:
       artifact_set:
         type: string
         default: core
-      package_version:
-        type: string
-        default: 0.1.0
 
 permissions:
   actions: read
@@ -33,8 +30,20 @@ defaults:
     shell: bash
 
 jobs:
+  check_release_tools:
+    name: Check release tooling
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install check requirements
+        run: python3 -m pip install 'packaging>=24.2'
+      - name: Check release and version handling
+        run: python3 -m unittest discover -s build_tools -p '*_test.py' -v
+
   build_python_wheel:
     name: ${{ inputs.name }}
+    needs: check_release_tools
     runs-on: aws-linux-scale-rocm-prod
     timeout-minutes: 30
     container:
@@ -51,7 +60,6 @@ jobs:
       HRX_ROCM_ARTIFACT_VARIANT: release
       HRX_ROCM_ROOT: ${{ github.workspace }}/build/wheel/rocm-root
       HRX_DOWNLOAD_CACHE_DIR: ${{ github.workspace }}/build/wheel/downloads
-      HRX_SOLUTIONS_PACKAGE_VERSION: ${{ inputs.package_version }}
       PIP_CACHE_DIR: ${{ github.workspace }}/build/wheel/caches/pip
       BAZELISK_HOME: ${{ github.workspace }}/build/wheel/caches/bazelisk
       BAZEL: ${{ github.workspace }}/build/wheel/tools/bin/bazel

@@ -11,8 +11,14 @@ from collections import defaultdict
 from pathlib import Path
 
 
+try:
+    from .versioning import read_package_version
+except ImportError:
+    from versioning import read_package_version
+
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-README_PATH = REPO_ROOT / "README.md"
+README_PATH = REPO_ROOT / "PYPI_README.md"
 NATIVE_LIBRARY_PREFIX = "hrx_solutions/_native/lib/"
 PACKAGE_PREFIX = "hrx_solutions/"
 PIPELINE_PREFIX = PACKAGE_PREFIX + "loom-pipeline/llm/"
@@ -42,13 +48,17 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         metadata = email.parser.BytesParser().parsebytes(
             wheel.read(metadata_paths[0])
         )
+        if metadata["Name"] != "hrx-solutions":
+            raise RuntimeError("wheel package name must be hrx-solutions")
+        if metadata["Version"] != read_package_version():
+            raise RuntimeError("wheel version does not match version.json")
         if metadata["Description-Content-Type"] != "text/markdown":
             raise RuntimeError(
                 "wheel long description must have content type text/markdown"
             )
         expected_description = README_PATH.read_text(encoding="utf-8")
         if metadata.get_payload() != expected_description:
-            raise RuntimeError("wheel long description does not match README.md")
+            raise RuntimeError("wheel long description does not match PYPI_README.md")
 
         missing = sorted(REQUIRED_RUNTIME_LIBRARIES - names)
         if missing:
