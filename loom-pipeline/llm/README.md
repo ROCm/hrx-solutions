@@ -1,10 +1,299 @@
-# Qwen Loom pipeline sources
+# LLM pipelines: an implementation guidebook
 
-This directory contains the Qwen runtime Loom source catalog maintained by
-HRX Solutions. The runtime catalog is rooted at `qwen/`; its `sources.txt`
-manifest lists the runtime entrypoints, kernels, programs, and shared GGML
-Loom motifs required for Qwen serving. Paths in the manifest are relative to
-`qwen/`.
+This guide traces the LLM serving solution from model import through generated
+tokens. Use the [serving walkthrough](../../docs/solutions/llm-serving.md) to
+run it first, then return here to change model policy, kernels, or integration.
+
+The current pipeline is `qwen`, specialized for Qwen3.8-27B with UD-Q5_K_XL
+GGUF weights. Its dimensions, tensor names, quantization layouts, layer order,
+and chat conventions are explicit in the source. Adapting it to another model
+requires reviewing those choices, even when the checkpoint has a similar name.
+
+## Ownership and reading order
+
+Three layers cooperate:
+
+| Layer | Owns | Start reading |
+| --- | --- | --- |
+| Python tools in this repository | Model inventory, validation dispatch, launch options, managed processes, client configuration | [`setup_cli.py`](../../binding/python/setup_cli.py), [`model_store.py`](../../binding/python/model_store.py), [`pipeline_validation.py`](../../binding/python/pipeline_validation.py) |
+| Loom sources in this directory | Model geometry, tensor bindings, preparation policy, chat framing, command composition, device state layouts, numerical kernels | [`sources.txt`](qwen/sources.txt), [`prepare.loom`](qwen/prepare.loom), [`control.loom`](qwen/control.loom) |
+| Native code in pinned HRX | HTTP transport, tokenization capabilities, admission, scheduling, physical storage, source JIT, command materialization, queue execution | Upstream [`text/`](https://github.com/ROCm/hrx/tree/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/text), [`runtime/`](https://github.com/ROCm/hrx/tree/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/runtime), and [`http/`](https://github.com/ROCm/hrx/tree/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/http) |
+
+The native text server is model independent. It loads a source catalog at
+startup and compiles for the actual device. Model policy can therefore change
+without rebuilding that executable. A wheel still needs to be rebuilt and
+reinstalled to distribute changed sources to its users.
+
+Read this guide in execution order, then follow the
+[change map](#where-to-make-a-change) to the relevant files. Native paths below
+are relative to `experimental/loom_serve/` in the HRX commit from
+[`deps.lock`](../../deps.lock). Local builds fetch it into `.deps/hrx/`.
+
+## 1. Import, validate, and select a pipeline
+
+[`model_store.py`](../../binding/python/model_store.py) obtains local files or
+runs `hf download`, checks GGUF magic and tokenizer JSON, and hashes the assets.
+It stages a directory and publishes it with a rename so partial imports do
+not appear as installed models. An import has this layout:
+
+```text
+~/.loom/models/<model-id>/
+  model.gguf
+  tokenizer.json
+  manifest.json
+```
+
+Files are copied by default or symlinked with `--alias`. Paths passed to native
+code must be absolute while preserving their visible filenames. Note that extensions matter for weight files and the symlinks must preserve them.
+
+[`pipeline_validation.py`](../../binding/python/pipeline_validation.py) maps
+pipeline IDs to adapters. The Qwen adapter invokes `loom-qwen-epoch-check` with
+the catalog, weight path, tokenizer path, and `--epoch=32:8`. This is a real
+GPU execution check. The CLI records `pipeline: qwen` in the model manifest
+only when the checker succeeds. It is a compatibility witness for that run;
+it does not exercise every server option or replace the upstream model tests.
+
+The **model ID** is the identity of an imported checkpoint. The **pipeline ID**
+selects its implementation. Keeping both lets multiple imports use the same
+catalog without inheriting the same public HTTP name.
+
+## 2. Launch and materialize the model
+
+[`serve_start.py`](../../binding/python/serve_start.py) forwards to the `serve`
+command in `setup_cli.py`. That command reads the manifest, chooses the
+recorded pipeline (or an explicit override), locates the assets, and constructs
+the native server arguments. Normal use validates the model before launching.
+
+The Qwen adapter copies the catalog into
+`~/.cache/hrx-solutions/catalogs/qwen/<model-id>-<source-fingerprint>/` and
+rewrites `@chat_model_name` in `control.loom`. The fingerprint includes the
+source tree contents. This makes `/v1/models` and request routing use the
+imported model ID while leaving the packaged catalog available for other
+imports.
+
+The default launch goes through
+[`server_manager.py`](../../binding/python/server_manager.py): it starts a
+background process, records its identity and logs, and waits for `/v1/models`
+to advertise the requested ID. `--foreground` executes the binary directly.
+The lower-level `loom-serve` command forwards native arguments and supplies
+the default packaged catalog when `--model` is absent; it bypasses model-store
+selection and managed server startup.
+
+[`_launcher.py`](../../binding/python/_launcher.py) constructs the environment
+for bundled native libraries. Linux binaries also receive a relative
+`$ORIGIN/../lib` RUNPATH from
+[`python_packaging.py`](../../build_tools/python_packaging.py).
+
+### The source catalog is the runtime input
+
+[`qwen/sources.txt`](qwen/sources.txt) lists the configuration, VM functions,
+command programs, and kernel providers needed for serving. Every path is
+relative to `qwen/`; the `../motifs/ggml/` entries are part of the package.
+Copy the whole `llm/` tree when moving a catalog so those paths still resolve.
+
+[`prepare.loom`](qwen/prepare.loom) is the cold startup entry. It receives
+prefill, context, pool, row, and checkpoint capacities, the MTP selection,
+token/span shapes, and the checkpoint path. It then:
+
+1. Declares stages with `prepare.stage`, applies specialization values through
+   `prepare.config_i64`, and binds checkpoint roots using `prepare.parameter`.
+2. Returns a source-owned control buffer containing the stage selection state,
+   the terminal token spelling, and descriptors for persistent allocations,
+   row views, origin tables, and cache geometry.
+3. Lets the native constructor compile the declared stages, check shared
+   parameter placement, allocate storage, and load the weights.
+
+The startup VM is temporary. Its returned control data survives and is later
+interpreted by `control.loom`. Native code owns allocation and execution
+lifetimes; the model source supplies sizes, layouts, and stage meaning.
+
+[`config.loom`](qwen/config.loom) holds fixed specialization bounds such as
+hidden and feed-forward sizes. Run-dependent capacities come from preparation.
+Changing a CLI capacity changes specialization and storage requirements; it
+does not change the model's underlying architecture.
+
+### Weight layout is source policy
+
+[`weights.loom`](qwen/weights.loom) recognizes the target and MTP feed-forward
+gate/up tensors and selects `qwen38_prepare_ffn` as their preparation root.
+[`weights_prepare.loom`](qwen/weights_prepare.loom) rearranges their Q5_K
+packets into groups of eight channels in device storage, preserving codes,
+scales, and total size. Other tensors retain their file representation.
+
+Consumers must agree with that prepared layout. A kernel change that alters
+weight interpretation must also review preparation and parameter views. The
+loader invokes source policy and reflected commands; it does not hardcode
+Qwen tensor names. Shared target stages must retain identical parameter
+placement so they can reuse the same resident weight storage.
+
+## 3. From an HTTP request to tokens
+
+```mermaid
+flowchart TD
+  request[Chat request and model ID] --> http[Native HTTP routing and validation]
+  http --> framing[control.loom: chat framing and input preparation]
+  framing --> admission[Native tokenization, admission, and scheduling]
+  admission --> encode[control.loom: encode_state and encode_epoch]
+  encode --> issue[control.loom: epoch]
+  issue --> commands[Command programs and GPU kernels]
+  commands --> feedback[Completed token and verification feedback]
+  feedback --> publish[control.loom: publish_epoch]
+  publish --> output[Native decoding and source text/tool policy]
+  output --> stream[Streaming chat response]
+  publish --> admission
+```
+
+### Chat and input policy
+
+Native `http/router.c` selects the advertised model. `text/chat.c` validates
+the supported chat request fields and calls these source hooks in
+[`control.loom`](qwen/control.loom):
+
+| Hooks | Responsibility |
+| --- | --- |
+| `model_name` | Public model ID, configured by the Python adapter. |
+| `chat_begin`, `chat_message`, `chat_end` | Prompt fragments, role transitions, and model-specific request options. |
+| `prepare_input` | Input framing and bounded tokenization, including continuation boundaries. |
+| `render_tool`, `parse_tools` | Canonical tool-call spelling and parsing of generated calls. |
+| `text_end` | How much generated text can be published, including incomplete tool markers. |
+| `complete_text` | Canonical retained transcript after a turn. |
+
+Native code carries source rendering state without interpreting its private
+bits. This keeps model syntax and tool grammar close to the model sources.
+The current source rejects thinking mode; the endpoint requires streaming
+and greedy generation. These are boundaries to revisit when porting a model
+or expanding client compatibility.
+
+### Scheduling and state ownership
+
+The native text scheduler chooses ready spans and an available token/span
+specialization. A **span** is a sequence of tokens for one resident row at a
+given position. An **epoch** packs spans into a flat token matrix so dense
+operations can share a weight traversal. Known input, decode, and speculative
+work can coexist in the scheduling flow.
+
+`encode_state` translates native ownership events into source-defined origin
+records. `encode_epoch` translates semantic spans into device descriptors,
+selection maps, options, and input-token banks. `epoch` selects prepared
+commands and submits them through the runtime's `execute_N` imports.
+
+One residency shares code, commands, weights, and a VM process. Requests have
+separate data rows and retained state. Persistent attention and recurrent
+state are addressed through stable origins; packing activations or changing
+the active row count must not relocate that state. A row's identity and the
+physical slot holding its recurrent state are separate concepts.
+
+Native storage owns physical page IDs and allocation lifetimes. Source owns
+the attention/GDN layout and the records consumed by kernels. Logical context
+capacity, shared physical pool capacity, resident-row count, and packed token
+capacity have different meanings; increasing one does not increase the others.
+
+### Execution and feedback
+
+Command execution and uploads advance a work timeline. Feedback downloads
+use a separate timeline that waits for their producers. Source buffers must
+remain immutable until their feedback transfer completes. The host joins the
+required work and feedback before consuming results or reusing that storage.
+
+`publish_epoch` translates completed ordinary or verification feedback into
+semantic progress: consumed inputs, known tokens, outputs, and verification
+results. The native service updates session frontiers, decodes output, and
+applies the source text/tool hooks before streaming the response. A selected
+token and a token already consumed into model state are distinct; continuation
+must preserve that distinction.
+
+## 4. Inside the model computation
+
+| Source | Role |
+| --- | --- |
+| [`prefill.loom`](qwen/prefill.loom) | Isolated prompt ingestion with bounded active tokens and positions. |
+| [`epoch.loom`](qwen/epoch.loom) | Packed target execution and selection of rows for the vocabulary head. |
+| [`programs/qwen38/model_prefill.loom`](qwen/programs/qwen38/model_prefill.loom) | Full model body for isolated or packed input; stateful dispatch depends on span mode. |
+| [`programs/qwen38/model_decode.loom`](qwen/programs/qwen38/model_decode.loom) | Single-token model body and greedy decode transition. |
+| [`programs/qwen38/`](qwen/programs/qwen38) | Layer composition, tensor bindings, scratch, and output-head assembly. |
+| [`kernels/qwen38/`](qwen/kernels/qwen38) | Model-specific attention, Gated DeltaNet (GDN), normalization, embedding, projection, and speculative-state kernels. |
+| [`motifs/ggml/`](motifs/ggml) | Shared quantized linear algebra and Q8 activation packing, specialized by callers. |
+
+The model body has sixteen groups of three GDN layers followed by one full
+attention layer: 64 target layers in total. Hidden size is 5,120 and
+feed-forward size is 17,408. Layer programs bind checkpoint tensors and compose
+the kernels; the shared motifs receive explicit dimensions and buffers.
+
+Dense computation can operate on packed tokens, while GDN and attention need
+span boundaries and retained state origins. `epoch.loom` sends only selected
+output rows to the vocabulary head. Fixed specialization capacities still
+introduce padding costs; evaluate both useful work and dispatched work when
+changing a shape or kernel.
+
+### Multi-token prediction and continuation
+
+MTP adds a proposal block and private draft state to the target model:
+
+1. [`mtp.loom`](qwen/mtp.loom) catches draft KV up to committed target inputs
+   (`qwen38_mtp_warm`) and generates three candidate tokens
+   (`qwen38_mtp_propose`).
+2. [`verify.loom`](qwen/verify.loom) runs target verification. GDN captures
+   speculative transitions; acceptance replays the accepted state updates.
+   Attention may have written beyond the accepted frontier, but those entries
+   remain unreachable.
+3. Acceptance publishes the committed target-hidden/token pairing needed by
+   the next draft warm-up. [`continue.loom`](qwen/continue.loom) constructs
+   following work from device results for bounded continuation.
+
+Committed carry, proposal scratch, target state, and feedback have different
+lifetimes. Keep acceptance and state publication consistent when changing any
+one of them. The optional device-fed continuation path issues bounded cohorts;
+the host still joins them. The setup CLI exposes MTP options, while additional
+native execution options are available through `loom-serve`.
+
+## Where to make a change
+
+| Intended change | Files or boundary to inspect |
+| --- | --- |
+| Import/download behavior or visible asset paths | `model_store.py`, `_model_files` in `setup_cli.py`, validation command construction. Preserve named paths through symlinks. |
+| Add a pipeline to the managed CLI | Adapter registration and catalog handling in `pipeline_validation.py`, catalog lookup in `setup_cli.py`, and wheel staging in `python_packaging.py`. |
+| Public model identity | Qwen `catalog_for_model` and `control.loom`'s `model_name`. Keep inventory, advertised ID, and routing consistent. |
+| Prompt, reasoning, or tool conventions | Chat and text hooks in `control.loom`; inspect native chat validation if the request contract must expand. |
+| Architecture, layer order, or tensor names | `config.loom`, `prepare.loom`, layer programs, and weight policy together. |
+| Faster projection or attention | The relevant kernel, its layer caller, specialization bounds, and any prepared weight layout. |
+| Retained-state geometry or speculation | Preparation descriptors, control encoders, stateful kernels, and acceptance/continuation programs together. |
+| Server lifecycle | [`server_manager.py`](../../binding/python/server_manager.py) and the `servers` commands in `setup_cli.py`. |
+| Generic scheduling, HTTP, JIT, or allocator behavior | The pinned HRX implementation; changes there require an upstream change and a reviewed dependency-pin update here. |
+
+A new source catalog can be exercised with the native `--model` argument
+before integrating it with the managed CLI. In that argument, “model” means
+a source-catalog directory; in `loom-serve-start MODEL_ID`, it means an
+imported asset identity. The Python registry is an integration mechanism;
+the native server does not have a compiled-in model registration list.
+
+## Developing and checking a change
+
+Start from a working import and a recorded baseline on the intended GPU.
+For numerical changes, first check the affected kernel or layer, then full
+model execution, retained continuation, and the HTTP behavior affected by
+the change. Include mixed spans and inactive or resumed rows when touching
+stateful execution. For MTP changes, include rejection and partial acceptance.
+
+The bundled `models validate` command runs one epoch-check configuration and
+does not enable MTP. Use HRX's model-specific checks for broader numerical,
+MTP, state-ownership, and performance coverage. Generic runtime and model
+tests remain in HRX; this repository maintains the deployed catalog, thin
+launchers, and packaging.
+
+The pinned upstream guides provide the detailed checks and commands:
+
+* [Agent starting point](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/docs/AGENT_START.md)
+  for the engineering loop and failure triage.
+* [Text execution contract](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/text/README.md)
+  for preparation records, storage ownership, and serving interfaces.
+* [Qwen implementation and checks](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/models/qwen/README.md)
+  for kernel differentials, packed execution, MTP, and replay witnesses.
+
+Keep `sources.txt` complete when introducing providers and retain the shared
+motif paths in packaged output. Rebuild and reinstall the wheel to evaluate
+the delivered solution; a running server retains its existing compiled code.
+Record the checkpoint revisions, GPU, source changes, and runtime settings
+with results. Keep weights and generated serving outputs outside this repository.
 
 ## Provenance
 
