@@ -11,13 +11,17 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
+try:
+    from .versioning import read_package_version
+except ImportError:
+    from versioning import read_package_version
+
 from setuptools import Distribution
 from setuptools.command.bdist_wheel import bdist_wheel
 from setuptools.command.build_py import build_py
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PACKAGE_VERSION = "0.1.0"
 BAZEL_TARGETS = (
     "//experimental/loom_serve/text:server",
     "//experimental/loom_serve/models/qwen:epoch_check",
@@ -60,7 +64,7 @@ NeededLibraries = Callable[[Path], tuple[str, ...]]
 
 def package_version() -> str:
     """Returns the package version selected for this build."""
-    return os.environ.get("HRX_SOLUTIONS_PACKAGE_VERSION") or DEFAULT_PACKAGE_VERSION
+    return read_package_version()
 
 
 def discover_bazel(explicit: Optional[str] = None) -> Path:

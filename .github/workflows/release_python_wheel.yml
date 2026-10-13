@@ -8,8 +8,11 @@ name: Release Python Wheel
 on:
   push:
     tags:
-      - "v*.*.*"
-      - "[0-9]*.[0-9]*.[0-9]*"
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   actions: read
@@ -21,51 +24,17 @@ defaults:
 
 jobs:
   validate_tag:
-    name: Validate tag
+    name: Validate tag and checked-in version
     runs-on: ubuntu-24.04
-    outputs:
-      package_version: ${{ steps.version.outputs.package_version }}
-      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
+      - name: Checkout release
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install version requirements
-        run: |
-          python3 -m venv "${RUNNER_TEMP}/release-version-venv"
-          "${RUNNER_TEMP}/release-version-venv/bin/python" -m pip install \
-            --upgrade \
-            "packaging>=24.2"
-
+        run: python3 -m pip install 'packaging>=24.2'
       - name: Validate release version
-        id: version
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          if [[ ! "${tag}" =~ ^v?([0-9]|[1-9][0-9]*)\.([0-9]|[1-9][0-9]*)\.([0-9]|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
-            echo "Not a semantic version tag: ${tag}" >&2
-            exit 1
-          fi
-
-          package_version="${tag#v}"
-          mapfile -t version_info < <(
-            "${RUNNER_TEMP}/release-version-venv/bin/python" \
-              - "${package_version}" <<'PY'
-          import sys
-
-          from packaging.version import InvalidVersion, Version
-
-          try:
-              version = Version(sys.argv[1])
-          except InvalidVersion as exc:
-              raise SystemExit(f"Not a PEP 440 package version: {sys.argv[1]}") from exc
-
-          print(version)
-          print(str(version.is_prerelease).lower())
-          PY
-          )
-          if [[ "${#version_info[@]}" -ne 2 ]]; then
-            echo "Could not canonicalize package version: ${package_version}" >&2
-            exit 1
-          fi
-          echo "package_version=${version_info[0]}" >>"${GITHUB_OUTPUT}"
-          echo "prerelease=${version_info[1]}" >>"${GITHUB_OUTPUT}"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 build_tools/publish_release.py validate-tag --tag "$RELEASE_TAG"
 
   build_python_wheel:
     name: Python / manylinux wheel
@@ -78,92 +47,67 @@ jobs:
       name: Release / manylinux x86-64
       release_type: nightly
       artifact_set: core
-      package_version: ${{ needs.validate_tag.outputs.package_version }}
 
   publish_release:
-    name: Publish release
-    needs:
-      - validate_tag
-      - build_python_wheel
+    name: Publish GitHub release
+    needs: build_python_wheel
     runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: write
     env:
-      PACKAGE_VERSION: ${{ needs.validate_tag.outputs.package_version }}
-      PRERELEASE: ${{ needs.validate_tag.outputs.prerelease }}
+      RELEASE_TAG: ${{ github.ref_name }}
     steps:
-      - name: Download manylinux wheel
+      - name: Checkout release
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Download validated manylinux wheel
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: hrx-solutions-wheel-linux-x86_64
           path: release-assets
-
+      - name: Install metadata validation requirements
+        run: python3 -m pip install 'twine>=6.1' 'packaging>=24.2'
       - name: Validate release assets
         run: |
-          shopt -s nullglob
-          wheels=(release-assets/*.whl)
-          if [[ "${#wheels[@]}" -ne 1 ]]; then
-            echo "Expected one release wheel, found ${#wheels[@]}" >&2
-            find release-assets -maxdepth 2 -type f -print >&2 || true
-            exit 1
-          fi
-
-          wheel_name="$(basename "${wheels[0]}")"
-          if [[ "${wheel_name}" != hrx_solutions-*.whl ||
-                "${wheel_name}" != *manylinux*x86_64.whl ]]; then
-            echo "Unexpected release wheel: ${wheel_name}" >&2
-            exit 1
-          fi
-
-          python3 - "${wheels[0]}" "${PACKAGE_VERSION}" <<'PY'
-          import email.parser
-          import sys
-          import zipfile
-
-          wheel_path, expected_version = sys.argv[1:]
-          with zipfile.ZipFile(wheel_path) as wheel:
-              metadata_paths = [
-                  name
-                  for name in wheel.namelist()
-                  if name.endswith(".dist-info/METADATA")
-              ]
-              if len(metadata_paths) != 1:
-                  raise SystemExit(
-                      f"Expected one METADATA file, found {metadata_paths!r}"
-                  )
-              metadata = email.parser.BytesParser().parsebytes(
-                  wheel.read(metadata_paths[0])
-              )
-          if metadata["Name"] != "hrx-solutions":
-              raise SystemExit(f"Unexpected package name: {metadata['Name']!r}")
-          if metadata["Version"] != expected_version:
-              raise SystemExit(
-                  f"Expected wheel version {expected_version}, "
-                  f"found {metadata['Version']!r}"
-              )
-          PY
-
-          ls -lh release-assets
-
-      - name: Publish GitHub release
+          python3 build_tools/publish_release.py validate-wheel \
+            --tag "$RELEASE_TAG" --wheel-dir release-assets
+          python3 build_tools/validate_wheel.py release-assets/*.whl
+          python3 -m twine check --strict release-assets/*.whl
+      - name: Publish GitHub release and checksums
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${GITHUB_REF_NAME}"
-          prerelease_args=()
-          if [[ "${PRERELEASE}" == "true" ]]; then
-            prerelease_args+=(--prerelease)
-          fi
+          python3 build_tools/publish_release.py github \
+            --tag "$RELEASE_TAG" --wheel-dir release-assets
 
-          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${tag}" release-assets/* \
-              --repo "${GITHUB_REPOSITORY}" \
-              --clobber
-          else
-            gh release create "${tag}" release-assets/* \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "HRX Solutions ${tag}" \
-              --generate-notes \
-              "${prerelease_args[@]}"
-          fi
+  publish_pypi:
+    name: Publish to PyPI
+    needs: publish_release
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/hrx-solutions/
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout release
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Download the same validated wheel
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: hrx-solutions-wheel-linux-x86_64
+          path: dist
+      - name: Install version requirements
+        run: python3 -m pip install 'packaging>=24.2'
+      - name: Check for an identical prior PyPI upload
+        id: pypi
+        run: python3 build_tools/publish_release.py pypi-status --tag "$RELEASE_TAG"
+      - name: Publish wheel through trusted publishing
+        if: steps.pypi.outputs.exists != 'true'
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+        with:
+          packages-dir: dist/
