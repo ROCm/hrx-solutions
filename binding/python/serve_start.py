@@ -21,6 +21,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("model_id", help="ID used when the model was imported")
     parser.add_argument("--pipeline", help="override the model's recorded pipeline")
+    parser.add_argument("--foreground", action="store_true", help="run Loom Serve in the foreground")
+    parser.add_argument("--json", action="store_true", help="print the managed server record as JSON")
     args, server_options = parser.parse_known_args(argv)
 
     # setup_cli performs the manifest, model-file, and catalog checks before
@@ -28,6 +30,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     command = ["serve", args.model_id]
     if args.pipeline:
         command.extend(("--pipeline", args.pipeline))
+    if args.foreground:
+        command.append("--foreground")
+    if args.json:
+        command.append("--json")
     return setup_cli.main([*command, *server_options])
 
 
