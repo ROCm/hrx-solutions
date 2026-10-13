@@ -7,22 +7,38 @@ For the implementation and extension points, see the
 [LLM pipeline guidebook](../../loom-pipeline/llm/README.md). The steps below
 use Bash and the `hrx-solutions` command-line tools.
 
+## Current example
+
+This worked solution demonstrates source-defined model execution on the shared
+HRX runtime. The table describes the packaged example and its checks:
+
+| Area | Current coverage |
+| --- | --- |
+| Model | Qwen3.8-27B with UD-Q5_K_XL GGUF tensor layouts and the matching tokenizer, pinned below. The `qwen` pipeline ID selects this implementation. |
+| Platform | Linux x86-64 and Python 3.9 or newer. The pinned sources have been exercised upstream on `gfx1100` and `gfx1151`; other devices need validation. |
+| Chat | Streaming responses with greedy generation (`stream: true`, `temperature: 0`). The current Qwen policy rejects thinking mode. |
+| Tools | Function-tool schemas, generated calls, and assistant/tool follow-up history, with Qwen-specific framing and parsing in Loom source. Pi configuration is included. |
+| Speculation | The launcher enables multi-token prediction (MTP) at depth three by default; `--no-mtp` disables it. |
+| Compatibility check | `models validate` runs the GPU epoch checker with `--epoch=32:8`, without MTP. HTTP, tool-use, and MTP checks are separate [upstream checks](../../loom-pipeline/llm/README.md#developing-and-checking-a-change). |
+
+See the [pinned upstream text guide](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/text/README.md)
+for hardware notes and the chat protocol contract. Adapting this example to
+another architecture or quantization requires reviewing its source and
+validating the new checkpoint/tokenizer pair.
+
 ## Requirements
 
 On the machine running inference:
 
 * Linux x86-64, Python 3.9 or newer, and an installed
   [HRX Solutions wheel](../../README.md#install-from-pypi).
-* An AMD GPU accessible through the installed driver. The pinned Qwen sources
-  have been exercised upstream on `gfx1100` and `gfx1151`; other devices need
-  validation. The wheel includes its ROCm runtime libraries; running it does
-  not require a separate ROCm SDK installation.
+* An AMD GPU accessible through a compatible installed driver, with coverage
+  as described above. The wheel includes its ROCm runtime libraries; running
+  it does not require a separate ROCm SDK installation.
 * Enough GPU-accessible memory for the weights, retained model state, and
   execution workspace, plus disk space for the downloaded checkpoint.
 * The GGUF checkpoint and matching `tokenizer.json` below, or another pair
-  validated against this pipeline. The current catalog specializes the
-  Qwen3.8-27B architecture and UD-Q5_K_XL tensor layouts. A `qwen` pipeline ID
-  does not imply support for every Qwen checkpoint or quantization.
+  validated against this pipeline.
 
 Activate the environment containing the wheel before running these commands.
 Keep model files outside the source checkout.
@@ -105,8 +121,8 @@ server ID, endpoint, PID, and log path. It uses the pipeline recorded during
 validation and advertises the imported model ID at `/v1/models`.
 
 The default settings are four resident rows, an 8,192-token context capacity,
-a 32,768-token shared pool, a 128-token prefill capacity, and MTP enabled at
-depth three. Use `loom-serve-setup serve --help` for configuration options.
+a 32,768-token shared pool, and a 128-token prefill capacity, with MTP as
+described above. Use `loom-serve-setup serve --help` for configuration options.
 For example, `--no-mtp` disables multi-token prediction, and
 `--ready-timeout 600` allows more time for startup. Add `--foreground` to run
 interactively; use Ctrl-C to stop that process.

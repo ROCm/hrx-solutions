@@ -1,12 +1,20 @@
 # HRX Solutions
 
-Worked solutions built on HRX (HIP Runtime eXtended), with runnable examples
-and implementation guidebooks for humans and agents.
+Executable documentation for building accelerated applications on HRX
+(HIP Runtime eXtended), a unified compute platform for ROCm. Worked solutions
+define application structure and model policy in Loom source, backed by
+reusable compiler, execution, and memory services. Developers and agents can
+run, inspect, and adapt these examples for their own workloads.
 
 The current package provides Loom Serve for streaming LLM chat on AMD GPUs.
 It includes native server and compatibility-checker executables, the Qwen
 Loom source catalog, and the required ROCm runtime libraries. Model weights
 are downloaded separately.
+
+The serving solution makes model computation, weight preparation, and chat
+policy explicit in source while sharing native scheduling and execution
+infrastructure. Its [implementation guide](https://github.com/ROCm/hrx-solutions/blob/main/loom-pipeline/llm/README.md)
+explains the boundaries and how to change them.
 
 ## Install
 

@@ -21,13 +21,40 @@ Three layers cooperate:
 
 The native text server is model independent. It loads a source catalog at
 startup and compiles for the actual device. Model policy can therefore change
-without rebuilding that executable. A wheel still needs to be rebuilt and
-reinstalled to distribute changed sources to its users.
+within the existing execution contract without rebuilding that executable.
+A wheel still needs to be rebuilt and reinstalled to distribute changed
+sources to its users.
 
 Read this guide in execution order, then follow the
-[change map](#where-to-make-a-change) to the relevant files. Native paths below
-are relative to `experimental/loom_serve/` in the HRX commit from
+[change map](#where-to-make-a-change) to the relevant files. For a concrete
+editing task, see [changing chat framing](#example-changing-chat-framing).
+The [evidence roadmap](#evidence-roadmap) describes measurements to collect
+after establishing correctness. Native paths below are relative to
+`experimental/loom_serve/` in the HRX commit from
 [`deps.lock`](../../deps.lock). Local builds fetch it into `.deps/hrx/`.
+
+## Why these boundaries matter
+
+The ownership split gives an engineer or agent a way to locate a change,
+identify the state it can affect, and choose a check for that behavior:
+
+* **Chat policy stays with the model.** Prompt fragments and tool conventions
+  are defined in `control.loom`. A framing change can use the existing native
+  protocol and rendering hooks; a new request field may also require a change
+  to native request validation. Both sides of that boundary are explicit.
+* **Weight preparation stays with its consumers.** `weights.loom` selects
+  preparation programs, and layer programs bind the resulting layouts. A
+  kernel-specific layout can be implemented alongside the model while the
+  generic loader continues to manage weight storage and execution lifetimes.
+* **Requests share execution while retaining their own state.** The scheduler
+  packs ready work over shared weights and commands. Source-defined origin
+  records let stateful kernels locate each request's attention and recurrent
+  state independently of its position in a packed token matrix.
+
+These boundaries make changes traceable through source, compiled commands,
+and runtime behavior. The checks later in this guide exercise different parts
+of that path. Adapting a model still requires reviewing its dimensions,
+layouts, semantics, and fit with the native execution contract.
 
 ## 1. Import, validate, and select a pipeline
 
@@ -44,7 +71,8 @@ not appear as installed models. An import has this layout:
 ```
 
 Files are copied by default or symlinked with `--alias`. Paths passed to native
-code must be absolute while preserving their visible filenames. Note that extensions matter for weight files and the symlinks must preserve them.
+code must be absolute while preserving their visible filenames. Extensions
+matter for weight files, and the symlinks must preserve them.
 
 [`pipeline_validation.py`](../../binding/python/pipeline_validation.py) maps
 pipeline IDs to adapters. The Qwen adapter invokes `loom-qwen-epoch-check` with
@@ -294,6 +322,89 @@ motif paths in packaged output. Rebuild and reinstall the wheel to evaluate
 the delivered solution; a running server retains its existing compiled code.
 Record the checkpoint revisions, GPU, source changes, and runtime settings
 with results. Keep weights and generated serving outputs outside this repository.
+
+### Example: changing chat framing
+
+Suppose a checkpoint needs a different assistant generation prefix. The task
+is to change that prefix while preserving the request and continuation
+contracts. Trace the change through these steps:
+
+1. **Locate the source policy.** Start with `chat_end` in
+   [`control.loom`](qwen/control.loom), which returns the final generation
+   prefix. Read `chat_begin` and `chat_message` to understand the fragments
+   preceding it and the role state they carry. Identify the exact expected
+   prompt and token sequence for the matching tokenizer before editing.
+2. **Check the native interface.** The pinned
+   [chat policy contract](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/text/README.md#chat-policy-entries)
+   specifies arguments, returned buffers, and state ownership. Native
+   `text/chat.c` validates HTTP fields; changing a source prefix leaves that
+   schema intact. If the change needs a new request option, trace its native
+   validation and source interpretation together.
+3. **Inspect rendering and tokenization.** Follow the rendered prompt into
+   `prepare_input`. Use the upstream
+   [`request_check` inspector](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/text/README.md#checks-that-matter-for-a-port)
+   with `--model` pointing to the edited catalog and the matching tokenizer.
+   It reports the model identity, rendered prompt, and tokens without loading
+   weights or creating a GPU device. Preserve the adjacent shared motifs when
+   copying the catalog.
+4. **Review continuation and output.** A fresh prompt and a retained follow-up
+   have different boundaries. Check assistant/tool history as well as user
+   input. Read `render_tool`, `parse_tools`, `text_end`, and `complete_text` if
+   the new prefix affects generated markers or canonical history. Preserve
+   the distinction between a selected token and one consumed into model state.
+5. **Check the affected behavior.** Upstream `models/qwen:chat_test` covers
+   source/native chat contracts; its default fixtures use the upstream source.
+   Ensure checks of this edit actually load the edited catalog. Then exercise
+   streaming HTTP and a retained follow-up with real weights. For tool-related
+   changes, use the upstream
+   [`check_tools.py` harness](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/models/qwen/check_tools.py),
+   supplying the edited catalog, to check generated calls and tool-result
+   follow-ups. The bundled `models validate` command checks model execution;
+   it does not establish that the new chat framing is correct.
+6. **Check the delivered solution.** Rebuild and reinstall the wheel, restart
+   the server, and repeat the relevant request through the packaged launcher.
+   Confirm the advertised model ID and active catalog. An already-running
+   process retains the code it compiled at startup.
+
+Keep the request fixture, expected rendering, source revision, and check
+results with the change review. This gives the next engineer or agent a
+concrete behavioral contract to preserve.
+
+## Evidence roadmap
+
+The following measurements are follow-up work for this solution. This section
+defines how to collect evidence; it reports no benchmark results.
+
+| Question | Measurement and boundaries |
+| --- | --- |
+| What does deployment require? | Report compressed wheel size, individual native executable sizes, and total installed payload separately. List bundled user-space libraries, required driver components, and build-only SDK requirements. If reporting build time, state the host, enabled targets, dependency preparation, and cache state. |
+| Where does startup time go? | Record process start, compilation, weight loading/preparation, API readiness, and first-response timing. Report overlapping phases as observed rather than summing them. Distinguish a cold process from cold filesystem or compiler caches. |
+| How do execution choices affect a workload? | Compare packed and isolated scheduling with speculation held fixed, then MTP off/on with scheduling held fixed. Record output correctness, prompt and generated token counts, time to first token, inter-token latency, completed throughput, and memory use. |
+
+Begin with one documented checkpoint and GPU configuration. Use fixed request
+fixtures covering a single conversation and concurrent conversations, with
+prompt/output lengths and offered concurrency recorded. Include a retained
+follow-up when evaluating state reuse. Check greedy outputs and continuation
+behavior before interpreting performance differences.
+
+For each run, retain the solution and HRX revisions, checkpoint/tokenizer
+revisions, GPU and driver, wheel/build configuration, launch command, client
+command, capacity settings, MTP settings, warm-up procedure, repetition count,
+and measurement tools. State whether memory means reserved virtual space,
+committed device backing, or host process memory. Keep startup costs separate
+from steady-state request results, and report variation across repetitions.
+
+The pinned [Qwen checks and replay guide](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/models/qwen/README.md)
+provides existing execution comparisons and workload tools. Review their
+measurement boundaries before using them to characterize the packaged HTTP
+solution. Kernel or replay timings alone do not establish end-to-end serving
+performance.
+
+Publish a results page with reproduction commands and links to raw artifacts
+once these measurements exist; keep generated outputs outside the source
+tree. Comparisons with other stacks should use documented, equivalent
+workloads and configurations, including model precision, generation policy,
+and hardware. Limit each conclusion to what that experiment measures.
 
 ## Provenance
 
