@@ -1,54 +1,129 @@
 # HRX Solutions
 
-HRX Solutions packages Loom Serve as a Python wheel for Linux x86-64 systems
-with a supported AMD GPU and driver. The wheel includes the native server,
-selected source catalog, and required ROCm libraries. Model weights are
-installed separately.
+Worked solutions built on [HRX (HIP Runtime eXtended)](https://github.com/ROCm/hrx-system),
+with runnable examples and implementation guidebooks for humans and agents.
+Start with [LLM serving](docs/solutions/llm-serving.md) to run a local model,
+and connect an agent.
 
-## Release
+HRX is a new subsystem being evaluated for inclusion in ROCm. It provides an
+alternative to the traditional HIP runtime, compiler, and library stack,
+organized around these principles:
 
-HRX source is pinned in [`deps.lock`](deps.lock) to
-`6f6176173bb543d0c330a35b78a1837582a76870`. GitHub Actions builds and checks a
-manylinux wheel and attaches it to GitHub Releases for semantic-version tags.
-The wheel has a `py3-none` Python ABI tag but contains platform-specific AMDGPU
-code and ROCm libraries.
+* **Minimal.** HRX has no build dependencies beyond the C compiler and can
+  build in about a minute on a typical desktop. With all features enabled,
+  its binaries are roughly 10–15 MiB, support static linking, and can be
+  redistributed to systems with device drivers but no ROCm SDK installation.
+* **Targets AMD compute hardware.** The compiler and runtime target GPUs
+  (Radeon, Ryzen, and Instinct), NPUs (including those in Strix Halo), and x86
+  CPUs, including their matrix acceleration facilities.
+* **Designed for agent authorship.** The embedded
+  [Loom compiler](https://rocm.github.io/hrx-system/loom/) accepts
+  [Loom ASM](https://rocm.github.io/hrx-system/loom/reference/) and a customized
+  C++ dialect. Both were developed through months of agent-driven iteration
+  on real workloads, balancing human legibility, agent authoring and debugging,
+  and explicit control over hardware. Constraint-based parameterization supports
+  dynamic and multiple-target programs. High-level vector operations and
+  machine-level instructions can coexist in the same sources, alongside tests,
+  benchmarks, and tuning parameters.
+* **Heterogeneous execution.** The programming model supports pipelined and
+  resident co-execution across GPU, NPU, and CPU, including combinations of
+  local and remote compute units over frontside and backside networks.
+* **AI components in one place.** Streaming tokenization, a dedicated LLM
+  serving JIT, KV-cache management, parameter prepacking, weight streaming,
+  and virtual memory management live in the same monorepo.
+* **Integrated optimization tools.** Compilation reports and profiling expose
+  generated code and expected or observed behavior to agents. Built-in
+  sanitizers provide access checks and other diagnostics through compiler flags.
+* **HIP compatibility.** HRX provides a high-fidelity HIP implementation for
+  incremental migration of existing HIP applications.
+* **Evolution.** We don't just sit down and spec any of these features. We trial
+  them and codesign them with agents in the loop over many months. As approaches
+  mature, we document them and publish correspnding solutions.
 
-Install a release wheel, then follow [QUICKSTART.md](QUICKSTART.md) to import,
-validate, and serve a model:
+## How the pieces fit
+
+![HRX platform architecture: Loom compiler and C API, libhrx and HIP APIs, shared runtime, and pluggable GPU, NPU, and CPU HAL modules.](docs/assets/hrx-platform.svg)
+
+This repository is executable documentation: complete solutions that agents
+can run, inspect, and adapt to new workloads. We use these tools ourselves for
+AI serving, and maintain the examples to make more of the platform accessible
+without implementing every possible application ourselves. The guidebooks
+explain the design decisions and the boundaries where a solution can change.
+
+The approach complements narrower integrations, such as the
+[HRX integration proposed for llama.cpp](https://github.com/ggml-org/llama.cpp/discussions/27219).
+Some solutions may eventually become products. In the meantime, we encourage
+direct use, exploration, and changes for the applications you want to build.
+
+## Install from PyPI
+
+PyPI publishing is pending. Once available, install in a Python 3.9 or newer
+virtual environment:
 
 ```bash
-python -m pip install ./hrx_solutions-*.whl
-loom-serve-setup models import MODEL_ID --gguf /path/model.gguf \
-  --tokenizer /path/tokenizer.json
-loom-serve-setup models validate MODEL_ID --pipeline qwen
-loom-serve-start MODEL_ID --port 8080
+# Installing in a venv is recommended.
+python -m pip install hrx-solutions
+
+# Discover setup commands and available pipelines.
+loom-serve-setup --help
+loom-serve-setup models --help
+loom-serve-setup models pipelines
+
+# Explore serving options for an imported model.
+loom-serve-start --help
+loom-serve-setup serve --help
 ```
 
-`loom-serve-start` and `loom-serve-setup serve` start a managed background
-server by default, wait for API readiness, and print its ID, endpoint, PID, and
-log path. Use `loom-serve-setup servers list|status|stop` to manage it; pass
-`--foreground` for an interactive process or `--json` for machine-readable
-output. Records are stored in `~/.loom/servers/` and logs in `~/.loom/logs/`.
+Continue with the [LLM serving walkthrough](docs/solutions/llm-serving.md)
+to import a checkpoint, validate it, and start the server.
 
-The setup tool also supports Hugging Face downloads, alias imports, Pi
-configuration, and remote serving through a tracked SSH tunnel. See the
-[quickstart](QUICKSTART.md) for these workflows and cleanup commands.
+## Solution Catalog
 
-## Build locally
+| Solution | What you can do |
+| --- | --- |
+| [LLM serving](docs/solutions/llm-serving.md) | Import and validate a model, serve streaming chat locally, and configure Pi. |
 
-Install Bazelisk 1.29.0, select the ROCm SDK, and build the wheel:
+Image serving, audio, NPU workloads, and interactive applications such as [Doom](https://gist.github.com/benvanik/20fbfd298ab1d53588ad12aedade6457)
+are candidates for future worked solutions.
+
+## Agent Guidebooks
+
+Guidebooks trace execution through the source and explain the design choices
+behind each solution. Start here when modifying an implementation:
+
+* [LLM pipelines](loom-pipeline/llm/README.md): model import and validation,
+  source JIT, request flow, state ownership, kernels, and extension points.
+
+## Build and Install Locally
+
+From a checkout, with a Python virtual environment activated, install
+Bazelisk 1.29.0 on `PATH` and select a ROCm SDK containing the compiler, headers,
+and runtime libraries:
 
 ```bash
+python -m pip install build 'setuptools>=77' 'wheel>=0.45'
 python build_tools/setup_python.py --rocm=/path/to/rocm
-python -m pip install build
 python -m build --wheel
+python -m pip install --force-reinstall dist/hrx_solutions-*.whl
 ```
 
-The build uses the HRX commit pinned in `deps.lock`. Set
-`HRX_SOLUTIONS_PACKAGE_VERSION` to override the default version `0.1.0`.
+Use a `dist/` directory containing just the wheel you want to install, or pass
+its exact filename. The setup command checks the Bazel version from
+[.bazelversion](.bazelversion) and writes the local SDK selection to the ignored
+`.bazelrc.local`. Its `--help` includes commands to install the pinned Bazelisk.
+
+The build fetches the HRX commit pinned in [deps.lock](deps.lock), builds the
+native server and compatibility checker, and packages them with this
+repository's pipeline sources. Set `HRX_SOLUTIONS_PACKAGE_VERSION` to override
+the default version `0.1.0`.
 
 ## License
 
 The Python launcher and packaging code are MIT licensed; see [LICENSE](LICENSE).
-The bundled Loom Serve binary, source catalog, and ROCm libraries retain their
-upstream licenses and notices. Model weights are not redistributed.
+Bundled native code, pipeline sources, and ROCm libraries retain their upstream
+licenses and notices. Model weights are not redistributed.
+
+Many HRX components were originally derived from [IREE](https://github.com/iree-org/iree)
+and use the Apache license with LLVM exception. HRX also borrows or adapts
+concepts from MLIR, without using MLIR code. Licenses in individual source
+files are authoritative; see the [pipeline notices](loom-pipeline/llm/README.md#license-notices).
