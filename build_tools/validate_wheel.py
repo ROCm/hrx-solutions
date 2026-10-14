@@ -67,13 +67,13 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             )
 
         required_files = {
-            PACKAGE_PREFIX + "_native/bin/loom-text-server",
-            PACKAGE_PREFIX + "_native/bin/loom-qwen-epoch-check",
+            PACKAGE_PREFIX + "_native/bin/loom-serve",
             PIPELINE_PREFIX + "LICENSE-APACHE-2.0",
             PIPELINE_PREFIX + "qwen/sources.txt",
             PIPELINE_PREFIX + "qwen/prepare.loom",
             PIPELINE_PREFIX + "qwen/control.loom",
             PIPELINE_PREFIX + "qwen/weights.loom",
+            PACKAGE_PREFIX + "_native/share/loom-serve/LICENSE",
             PACKAGE_PREFIX + "pipeline_validation.py",
             PACKAGE_PREFIX + "setup_cli.py",
             PACKAGE_PREFIX + "model_store.py",

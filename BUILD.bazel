@@ -1,0 +1,11 @@
+package(default_visibility = ["//visibility:public"])
+
+alias(
+    name = "loom-serve",
+    actual = "@hrx_system//loom/src/loom/tools/loom-serve",
+)
+
+filegroup(
+    name = "native",
+    srcs = [":loom-serve"],
+)

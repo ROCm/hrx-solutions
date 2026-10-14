@@ -118,6 +118,38 @@ behind each solution. Start here when modifying an implementation:
 
 ## Build and Install Locally
 
+### Native Bazel build
+
+This repository is the Bazel root. `@hrx_system` supplies HRX's compiler,
+runtime, and the current Loom Serve executable. `MODULE.bazel` records the
+source revision and is the source pin for both native and wheel builds.
+
+Put the following in the ignored `.bazelrc.local`, adjusting the SDK and
+compiler paths:
+
+```text
+common --repo_env=IREE_ROCM_PATH=/path/to/rocm
+common --repo_env=CC=/path/to/rocm/lib/llvm/bin/clang
+common --repo_env=CXX=/path/to/rocm/lib/llvm/bin/clang++
+```
+
+For development against a sibling `hrx-system` checkout, build from this
+repository with an explicit absolute override:
+
+```bash
+bazel build --config=opt --override_module="hrx=$PWD/../hrx-system" //...
+bazel run --config=opt --override_module="hrx=$PWD/../hrx-system" //:loom-serve -- --help
+```
+
+`//:native` groups the native deliverables; `//:loom-serve` aliases the public
+HRX executable. Bazel manages dependencies directly, without `.deps/hrx`.
+The sibling checkout currently carries a fix to HRX's generated-file rule so
+it matches declared output names independently of repository layout. That fix
+must land upstream and be included in the pin before building without the
+local override.
+
+### Python wheel build
+
 From a checkout, with a Python virtual environment activated, install
 Bazelisk 1.29.0 on `PATH` and select a ROCm SDK containing the compiler, headers,
 and runtime libraries:
@@ -132,11 +164,20 @@ python -m pip install --force-reinstall dist/hrx_solutions-*.whl
 Use a `dist/` directory containing just the wheel you want to install, or pass
 its exact filename. The setup command checks the Bazel version from
 [.bazelversion](.bazelversion) and writes the local SDK selection to the ignored
-`.bazelrc.local`. Its `--help` includes commands to install the pinned Bazelisk.
+`.bazelrc.configured`. Handwritten `.bazelrc.local` settings are loaded last.
+Its `--help` includes commands to install the pinned Bazelisk.
 
-The build fetches the HRX commit pinned in [deps.lock](deps.lock), builds the
-native server and compatibility checker, and packages them with this
-repository's pipeline sources. The package version comes from
+The wheel build invokes `//:loom-serve` from this Bazel root and stages the
+executable, HRX license, redistributable ROCm libraries, solution helpers,
+and this repository’s Qwen source catalog. To use a sibling
+checkout for wheel builds, add an absolute override to `.bazelrc.local`:
+
+```bash
+printf 'common --override_module=hrx=%s/../hrx-system\n' "$PWD" >> .bazelrc.local
+```
+
+Bazel's [MODULE.bazel](MODULE.bazel) pin is used when no override is present.
+The package version comes from
 [version.json](version.json) for both local builds and CI. See
 [RELEASING.md](RELEASING.md) for release preparation, tags, GitHub assets, and
 PyPI trusted publishing.
@@ -144,8 +185,8 @@ PyPI trusted publishing.
 ## License
 
 The Python launcher and packaging code are MIT licensed; see [LICENSE](LICENSE).
-Bundled native code, pipeline sources, and ROCm libraries retain their upstream
-licenses and notices. Model weights are not redistributed.
+Native code, checked-in pipeline sources, and bundled ROCm libraries retain
+their upstream licenses and notices. Model weights are not redistributed.
 
 Many HRX components were originally derived from [IREE](https://github.com/iree-org/iree)
 and use the Apache license with LLVM exception. HRX also borrows or adapts

@@ -1,4 +1,4 @@
-"""Console entry point for the pinned HRX Loom Serve text server."""
+"""Console entry point for the HRX Loom Serve server."""
 
 from typing import NoReturn
 

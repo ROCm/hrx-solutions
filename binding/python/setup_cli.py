@@ -41,10 +41,8 @@ def _model_files(model_id: str, model_root: Optional[Path]) -> ModelFiles:
 def _catalog(pipeline: str) -> Path:
     """Resolve the selected pipeline catalog in source or installed layouts."""
     package = Path(__file__).resolve().parent
-    native = package / "_native" / "share" / "loom-serve" / "experimental" / "loom_serve" / "models" / pipeline
     candidates = (
         package / "loom-pipeline" / "llm" / pipeline,
-        native,
         package.parents[1] / "loom-pipeline" / "llm" / pipeline,
     )
     for candidate in candidates:
@@ -368,7 +366,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     files = _model_files(args.model_id, args.model_root)
     catalog = pipeline_validation.catalog_for_model(pipeline, _catalog(pipeline), args.model_id)
     package = Path(__file__).resolve().parent
-    executable = package / "_native" / "bin" / "loom-text-server"
+    executable = package / "_native" / "bin" / "loom-serve"
     if not executable.is_file():
         raise FileNotFoundError(f"Loom Serve binary is missing: {executable}")
     argv = [

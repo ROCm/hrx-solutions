@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -22,24 +23,8 @@ from setuptools.command.build_py import build_py
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BAZEL_TARGETS = (
-    "//experimental/loom_serve/text:server",
-    "//experimental/loom_serve/models/qwen:epoch_check",
-)
-PLATFORM_LINK_OPTIONS = []
-if platform.system() == "Linux":
-    PLATFORM_LINK_OPTIONS.append(
-        "--linkopt=-Wl,--enable-new-dtags,-rpath,$ORIGIN/../lib"
-    )
-BAZEL_BUILD_OPTIONS = (
-    "--config=opt",
-    "--//runtime/config/hal:drivers=task,amdgpu",
-    "--//loom/config/target:enable=amdgpu,vm,x86",
-    *PLATFORM_LINK_OPTIONS,
-    "--repo_env=IREE_DEPENDENCY_MODE=pinned",
-    "--repo_env=IREE_ROCM_DEPENDENCY_MODE=pinned",
-    "--repo_env=IREE_HAL_AMDGPU_DEVICE_TOOLCHAIN=rocm",
-)
+BAZEL_TARGETS = {"loom-serve": "//:loom-serve"}
+BAZEL_BUILD_OPTIONS = ("--config=opt",)
 ROCM_RUNTIME_ROOTS = (
     "lib/libhsa-runtime64.so.1",
     "lib/libhsa-amd-aqlprofile64.so.1",
@@ -116,9 +101,9 @@ def discover_rocm_root() -> Path:
     """Finds the ROCm root used by the Bazel repository configuration."""
     configured = os.environ.get("IREE_ROCM_PATH")
     if not configured:
-        configured = read_bazel_repo_env(REPO_ROOT / ".bazelrc.local").get(
-            "IREE_ROCM_PATH"
-        )
+        values = read_bazel_repo_env(REPO_ROOT / ".bazelrc.configured")
+        values.update(read_bazel_repo_env(REPO_ROOT / ".bazelrc.local"))
+        configured = values.get("IREE_ROCM_PATH")
     if not configured:
         raise RuntimeError(
             "IREE_ROCM_PATH is not configured; run "
@@ -132,29 +117,49 @@ def discover_rocm_root() -> Path:
     return root
 
 
-def discover_hrx_source() -> Path:
-    """Fetches and validates the HRX source revision used by the wheel."""
-    source_root = Path(
-        os.environ.get("HRX_SOURCE_DIR", REPO_ROOT / ".deps" / "hrx")
-    ).expanduser().resolve()
+def bazel_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["USE_BAZEL_VERSION"] = (REPO_ROOT / ".bazelversion").read_text().strip()
+    return environment
+
+
+def discover_hrx_source(bazel: Path) -> Path:
+    """Returns Bazel's selected HRX checkout, including local module overrides."""
+    environment = bazel_environment()
     subprocess.run(
-        ["bash", str(REPO_ROOT / ".github" / "scripts" / "fetch_hrx_source.sh")],
+        [str(bazel), "fetch", "--repo=@hrx_system"],
         cwd=REPO_ROOT,
         check=True,
+        env=environment,
     )
-    return source_root
+
+    def query(*arguments: str) -> str:
+        return subprocess.run(
+            [str(bazel), *arguments],
+            cwd=REPO_ROOT,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            env=environment,
+        ).stdout.strip()
+
+    mapping = json.loads(query("mod", "dump_repo_mapping", ""))
+    output_base = Path(query("info", "output_base"))
+    source_root = output_base / "external" / mapping["hrx_system"]
+    if not (source_root / "MODULE.bazel").is_file():
+        raise RuntimeError(f"Bazel HRX source directory is missing: {source_root}")
+    return source_root.resolve()
 
 
 def _query_bazel_output(
     bazel: Path,
-    source_root: Path,
     target: str,
     build_options: tuple[str, ...],
     build_environment: dict[str, str],
 ) -> Path:
     result = subprocess.run(
         [str(bazel), "cquery", *build_options, "--output=files", target],
-        cwd=source_root,
+        cwd=REPO_ROOT,
         check=True,
         text=True,
         stdout=subprocess.PIPE,
@@ -167,43 +172,28 @@ def _query_bazel_output(
         )
     output = Path(output_paths[0])
     if not output.is_absolute():
-        output = source_root / output
+        output = REPO_ROOT / output
     if not output.is_file():
         raise RuntimeError(f"Bazel output for {target} does not exist: {output}")
     return output.resolve()
 
 
 def build_native_executables(bazel: Path, rocm_root: Path) -> dict[str, Path]:
-    """Builds the pinned Loom Serve executable included in the wheel."""
-    source_root = discover_hrx_source()
+    """Builds the root Bazel targets included in the wheel."""
     build_options = (
         *BAZEL_BUILD_OPTIONS,
         f"--repo_env=IREE_ROCM_PATH={rocm_root}",
     )
-    build_environment = os.environ.copy()
-    build_environment.update(
-        {
-            "CC": str(rocm_root / "lib" / "llvm" / "bin" / "clang"),
-            "CXX": str(rocm_root / "lib" / "llvm" / "bin" / "clang++"),
-            "AR": str(rocm_root / "lib" / "llvm" / "bin" / "llvm-ar"),
-            "USE_BAZEL_VERSION": (source_root / ".bazelversion")
-            .read_text(encoding="utf-8")
-            .strip(),
-        }
-    )
+    environment = bazel_environment()
     subprocess.run(
-        [str(bazel), "build", *build_options, *BAZEL_TARGETS],
-        cwd=source_root,
+        [str(bazel), "build", *build_options, *BAZEL_TARGETS.values()],
+        cwd=REPO_ROOT,
         check=True,
-        env=build_environment,
+        env=environment,
     )
     return {
-        "loom-text-server": _query_bazel_output(
-            bazel, source_root, BAZEL_TARGETS[0], build_options, build_environment
-        ),
-        "loom-qwen-epoch-check": _query_bazel_output(
-            bazel, source_root, BAZEL_TARGETS[1], build_options, build_environment
-        ),
+        name: _query_bazel_output(bazel, target, build_options, environment)
+        for name, target in BAZEL_TARGETS.items()
     }
 
 
@@ -408,7 +398,7 @@ class BazelBuildPy(build_py):
         self._catalog_outputs = stage_loom_source_catalog(package_root)
         native_root = package_root / "_native"
         self._native_outputs = stage_native_payload(
-            native_root, executables, rocm_root, discover_hrx_source()
+            native_root, executables, rocm_root, discover_hrx_source(bazel)
         )
 
     def get_outputs(self, include_bytecode: int = 1) -> list[str]:
