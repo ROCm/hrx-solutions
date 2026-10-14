@@ -11,9 +11,22 @@ import tempfile
 from typing import Any, BinaryIO, Iterator, Optional
 
 
+def state_root() -> Path:
+    """Resolve Loom-owned state without creating it (evaluated per call)."""
+    override = os.environ.get("LOOM_SERVE_DIR")
+    return Path(override).expanduser().absolute() if override else Path.home() / ".loom"
+
+
+def runtime_cache_dir() -> Path:
+    """Preserve the legacy runtime cache unless Loom state is explicitly isolated."""
+    if os.environ.get("LOOM_SERVE_DIR"):
+        return state_root() / "cache"
+    return Path.home() / ".cache" / "hrx-solutions"
+
+
 def state_dir() -> Path:
     """Return the Loom state directory, creating it when needed."""
-    path = Path.home() / ".loom"
+    path = state_root()
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
     return path

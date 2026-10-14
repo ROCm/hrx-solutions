@@ -14,9 +14,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
-DEFAULT_MODEL_ROOT = Path.home() / ".loom" / "models"
+from .state_store import state_root
+
 _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _CHUNK_SIZE = 1024 * 1024
+
+
+def default_model_root() -> Path:
+    """Resolve the model directory at use time so environment overrides apply."""
+    return state_root() / "models"
+
 
 class ModelImportError(Exception):
     """Raised when a model cannot be safely registered."""
@@ -84,7 +91,7 @@ def register_model(model_id: str, *, ggufs: Sequence[dict], tokenizer: dict,
     validate_model_id(model_id)
     if not ggufs:
         raise ModelImportError("At least one GGUF file is required")
-    root = (Path(model_root).expanduser() if model_root is not None else DEFAULT_MODEL_ROOT).absolute()
+    root = (Path(model_root).expanduser() if model_root is not None else default_model_root()).absolute()
     root.mkdir(parents=True, exist_ok=True)
     destination = root / model_id
     lock = root / f".{model_id}.lock"
@@ -207,7 +214,7 @@ def registered_model(model_id: str, model_root: Optional[Path] = None) -> Regist
     Malformed manifests are invalid; missing files retain their registration
     and validation information. Legacy manifests use conventional filenames.
     """
-    root = Path(model_root).expanduser() if model_root is not None else DEFAULT_MODEL_ROOT
+    root = Path(model_root).expanduser() if model_root is not None else default_model_root()
     directory = root / model_id
     manifest = {}
     try:
@@ -255,7 +262,7 @@ def registered_model(model_id: str, model_root: Optional[Path] = None) -> Regist
 
 
 def model_inventory(model_root: Optional[Path] = None) -> tuple[RegisteredModel, ...]:
-    root = Path(model_root).expanduser() if model_root is not None else DEFAULT_MODEL_ROOT
+    root = Path(model_root).expanduser() if model_root is not None else default_model_root()
     if not root.is_dir():
         return ()
     return tuple(registered_model(directory.name, root) for directory in sorted(root.iterdir())
@@ -275,7 +282,7 @@ def _manifest_path(directory: Path, name: str) -> Path:
 
 def read_manifest(model_id: str, model_root: Optional[Path] = None) -> dict:
     validate_model_id(model_id)
-    root = Path(model_root).expanduser() if model_root is not None else DEFAULT_MODEL_ROOT
+    root = Path(model_root).expanduser() if model_root is not None else default_model_root()
     path = root / model_id / "manifest.json"
     try:
         manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -290,7 +297,7 @@ def record_pipeline(model_id: str, pipeline: str, model_root: Optional[Path] = N
     validate_model_id(model_id)
     if not pipeline or not isinstance(pipeline, str):
         raise ModelImportError("Pipeline identifier must be a non-empty string")
-    root = Path(model_root).expanduser() if model_root is not None else DEFAULT_MODEL_ROOT
+    root = Path(model_root).expanduser() if model_root is not None else default_model_root()
     path = root / model_id / "manifest.json"
     manifest = read_manifest(model_id, root)
     manifest["pipeline"] = pipeline

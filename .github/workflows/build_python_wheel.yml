@@ -1,16 +1,14 @@
 # Copyright 2026 The HRX Authors
-#
 # Licensed under the MIT License.
 # SPDX-License-Identifier: MIT
-
-name: Build Python Linux Wheel
+name: Build and check Python wheel
 
 on:
   workflow_call:
     inputs:
       name:
         type: string
-        default: Default
+        default: Build and check wheel (manylinux x86-64)
       release_type:
         type: string
         default: nightly
@@ -30,250 +28,34 @@ defaults:
     shell: bash
 
 jobs:
-  check_release_tools:
-    name: Check release tooling
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Install check requirements
-        run: python3 -m pip install 'packaging>=24.2' 'setuptools>=77' 'wheel>=0.45'
-      - name: Check release and packaging handling
-        run: python3 -m unittest discover -s build_tools -p '*_test.py' -v
-      - name: Check Python GGUF and model validation
-        run: python3 -m unittest discover -s tests -p '*_test.py' -v
-
   build_python_wheel:
     name: ${{ inputs.name }}
-    needs: check_release_tools
-    runs-on: aws-linux-scale-rocm-prod
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-    container:
-      image: ghcr.io/rocm/therock_build_manylinux_x86_64@sha256:702a5133851e6d1daf1207d2c9fbb01c2667914a5b6dc5a01faeb3ce66ea6421
-    env:
-      HRX_OUTPUT_DIR: ${{ github.workspace }}/build/wheel
-      HRX_BUILD_PYTHON: /opt/python/cp312-cp312/bin/python3
-      HRX_PYTHON: ${{ github.workspace }}/build/wheel/python/bin/python3
-      HRX_BAZEL_BIN_DIR: ${{ github.workspace }}/build/wheel/tools/bin
-      HRX_RELEASE_TYPE: ${{ inputs.release_type }}
-      HRX_RUN_ID: ${{ inputs.run_id }}
-      HRX_ARTIFACT_SET: ${{ inputs.artifact_set }}
-      HRX_ROCM_ARTIFACT_VARIANT: release
-      HRX_ROCM_ROOT: ${{ github.workspace }}/build/wheel/rocm-root
-      HRX_DOWNLOAD_CACHE_DIR: ${{ github.workspace }}/build/wheel/downloads
-      PIP_CACHE_DIR: ${{ github.workspace }}/build/wheel/caches/pip
-      BAZELISK_HOME: ${{ github.workspace }}/build/wheel/caches/bazelisk
-      BAZEL: ${{ github.workspace }}/build/wheel/tools/bin/bazel
-      WHEEL_DIST_DIR: ${{ github.workspace }}/build/wheel/dist
-      WHEEL_OUTPUT_DIR: ${{ github.workspace }}/build/wheel/wheelhouse
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Adjust git config
-        run: git config --global --add safe.directory "$PWD"
-
-      - name: Install Python build requirements
+      - name: Install Python test requirements
+        run: python3 -m pip install 'packaging>=24.2' 'setuptools>=77' 'wheel>=0.45'
+      - name: Run Python unit tests
         run: |
-          "${HRX_BUILD_PYTHON}" --version
-          "${HRX_BUILD_PYTHON}" -m pip install --upgrade \
-            build \
-            "setuptools>=77" \
-            "wheel>=0.45"
-          "${HRX_BUILD_PYTHON}" -m build --version
-
-      - name: Install Bazelisk
-        run: |
-          mkdir -p "${HRX_BAZEL_BIN_DIR}"
-          curl -fL https://github.com/bazelbuild/bazelisk/releases/download/v1.29.0/bazelisk-linux-amd64 \
-            -o "${BAZEL}"
-          echo "5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992  ${BAZEL}" \
-            | sha256sum --check
-          chmod +x "${BAZEL}"
-
-      - name: Fetch HRX through Bazel
-        run: |
-          "${HRX_BUILD_PYTHON}" - <<'PYTHON'
-          import os
-          from build_tools.python_packaging import discover_bazel, discover_hrx_source
-
-          source = discover_hrx_source(discover_bazel())
-          with open(os.environ["GITHUB_ENV"], "a") as output:
-              output.write(f"HRX_SOURCE_DIR={source}\n")
-          PYTHON
-
-      - name: Fetch ROCm toolchain
-        run: bash .github/scripts/fetch_rocm_toolchain.sh
-
-      - name: Check build environment
-        run: |
-          "${HRX_BUILD_PYTHON}" --version
-          USE_BAZEL_VERSION="$(cat .bazelversion)" "${BAZEL}" --version
-          "${CC}" --version
-          /usr/local/bin/auditwheel --version
-          test -n "${AUDITWHEEL_PLAT:-}"
-          test -d "${HRX_ROCM_ROOT}/include"
-          test -f "${HRX_ROCM_ROOT}/lib/libhsa-runtime64.so.1"
-          echo "AUDITWHEEL_PLAT=${AUDITWHEEL_PLAT}"
-
-      - name: Configure Bazel
-        run: |
-          "${HRX_BUILD_PYTHON}" build_tools/setup_python.py \
-            --rocm="${HRX_ROCM_ROOT}" \
-            --bazel="${BAZEL}"
-
-      - name: Build Linux wheel
-        run: >-
-          "${HRX_BUILD_PYTHON}" -m build --wheel
-          --outdir "${WHEEL_DIST_DIR}"
-
-      - name: Inspect Linux wheel
-        run: |
-          "${HRX_BUILD_PYTHON}" build_tools/validate_wheel.py \
-            "${WHEEL_DIST_DIR}"/*.whl
-          env LD_LIBRARY_PATH="${HRX_AUDITWHEEL_LD_LIBRARY_PATH}" \
-            /usr/local/bin/auditwheel show "${WHEEL_DIST_DIR}"/*.whl
-
-      - name: Repair manylinux wheel
-        run: |
-          env LD_LIBRARY_PATH="${HRX_AUDITWHEEL_LD_LIBRARY_PATH}" \
-            /usr/local/bin/auditwheel repair \
-            --plat "${AUDITWHEEL_PLAT}" \
-            --wheel-dir "${WHEEL_OUTPUT_DIR}" \
-            "${WHEEL_DIST_DIR}"/*.whl
-
-      - name: Validate manylinux wheel
+          python3 -m unittest discover -s build_tools -p '*_test.py' -v
+          python3 -m unittest discover -s tests -p '*_test.py' -v
+      - name: Build and repair wheel in manylinux container
+        env:
+          HRX_RELEASE_TYPE: ${{ inputs.release_type }}
+          HRX_RUN_ID: ${{ inputs.run_id }}
+          HRX_ARTIFACT_SET: ${{ inputs.artifact_set }}
+        run: bash build_tools/build-wheel.sh
+      - name: Check wheel installation on Ubuntu host
         run: |
           shopt -s nullglob
-          wheels=("${WHEEL_OUTPUT_DIR}"/*.whl)
-          if [[ "${#wheels[@]}" -ne 1 ]]; then
-            echo "Expected one repaired wheel, found ${#wheels[@]}" >&2
-            printf '  %s\n' "${wheels[@]}" >&2
-            exit 1
-          fi
-          if [[ "$(basename "${wheels[0]}")" != *manylinux* ]]; then
-            echo "Repaired wheel is not tagged manylinux: ${wheels[0]}" >&2
-            exit 1
-          fi
-          "${HRX_BUILD_PYTHON}" build_tools/validate_wheel.py "${wheels[0]}"
-          /usr/local/bin/auditwheel show "${wheels[0]}"
-
-      - name: Upload manylinux wheel
+          wheels=(build/wheel/wheelhouse/*.whl)
+          test "${#wheels[@]}" -eq 1
+          bash build_tools/check-wheel.sh "${wheels[0]}" "${RUNNER_TEMP}/wheel-install-venv"
+      - name: Upload validated manylinux wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hrx-solutions-wheel-linux-x86_64
           path: build/wheel/wheelhouse/*.whl
           if-no-files-found: error
-
-  smoke_test_python_wheel:
-    name: Smoke / Ubuntu 24.04
-    needs: build_python_wheel
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      actions: read
-      contents: read
-    env:
-      WHEEL_DOWNLOAD_DIR: ${{ github.workspace }}/build/smoke/wheel
-      SMOKE_VENV: ${{ github.workspace }}/build/smoke/venv
-    steps:
-      - name: Download manylinux wheel
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: hrx-solutions-wheel-linux-x86_64
-          path: ${{ env.WHEEL_DOWNLOAD_DIR }}
-
-      - name: Select wheel artifact
-        run: |
-          shopt -s nullglob
-          wheels=("${WHEEL_DOWNLOAD_DIR}"/*.whl)
-          if [[ "${#wheels[@]}" -ne 1 ]]; then
-            echo "Expected one wheel, found ${#wheels[@]}" >&2
-            printf '  %s\n' "${wheels[@]}" >&2
-            exit 1
-          fi
-          if [[ "$(basename "${wheels[0]}")" != *manylinux* ]]; then
-            echo "Downloaded wheel is not tagged manylinux: ${wheels[0]}" >&2
-            exit 1
-          fi
-          echo "WHEEL_PATH=${wheels[0]}" >>"${GITHUB_ENV}"
-
-      - name: Install wheel in clean environment
-        run: |
-          python3 --version
-          python3 -m venv "${SMOKE_VENV}"
-          "${SMOKE_VENV}/bin/python" -m pip install \
-            --disable-pip-version-check \
-            --no-index \
-            --no-deps \
-            "${WHEEL_PATH}"
-          "${SMOKE_VENV}/bin/python" - <<'PY'
-          import importlib.metadata
-          from pathlib import Path
-          import hrx_solutions
-
-          print(f"hrx-solutions {importlib.metadata.version('hrx-solutions')}")
-          print(f"package: {hrx_solutions.__file__}")
-          package_root = Path(hrx_solutions.__file__).resolve().parent
-          assert (package_root / "_native/bin/loom-serve").is_file()
-          assert (package_root / "_native/share/loom-serve/LICENSE").is_file()
-          assert not (package_root / "_native/bin/loom-qwen-epoch-check").exists()
-          from hrx_solutions.gguf import inspect_gguf
-          from hrx_solutions.qwen_validation import load_profile
-          from hrx_solutions.pipeline_validation import resolve_catalog
-          catalog_root = package_root / "loom-pipeline/llm"
-          for pipeline, architecture in (("qwen", "qwen_27b"), ("qwen-08b", "qwen_08b")):
-              catalog = catalog_root / "qwen" / architecture
-              assert resolve_catalog(pipeline) == catalog
-              contract = load_profile(catalog)
-              assert contract["metadata"]["general.architecture"] == "qwen35"
-              manifest = catalog / "sources.txt"
-              assert manifest.is_file()
-              for line in manifest.read_text().splitlines():
-                  relative = line.strip()
-                  if relative and not relative.startswith("#"):
-                      source = (catalog / relative).resolve(strict=True)
-                      source.relative_to(catalog_root)
-                      assert source.is_file()
-          assert (package_root / "loom-pipeline/llm/LICENSE-APACHE-2.0").is_file()
-          import struct
-          import tempfile
-          from hrx_solutions.pipeline_validation import ModelFiles, validate_model
-          with tempfile.TemporaryDirectory() as directory:
-              weights = Path(directory) / "model.gguf"
-              tokenizer = Path(directory) / "tokenizer.json"
-              weights.write_bytes(b"GGUF" + struct.pack("<IQQ", 3, 0, 0) + bytes(8))
-              tokenizer.write_text('{"model": {}}')
-              assert inspect_gguf(weights).version == 3
-              for pipeline in ("qwen", "qwen-08b"):
-                  result = validate_model(ModelFiles(weights, tokenizer), pipeline)
-                  assert not result.compatible
-                  assert "Missing required metadata" in result.message
-          # --help does not load HSA. Check the installed runtime API without
-          # requiring a GPU or allowing host runtime overrides.
-          import os
-          import subprocess
-          import sys
-          from hrx_solutions._launcher import native_environment
-          clean_environment = dict(os.environ)
-          for name in ("IREE_HAL_AMDGPU_LIBHSA_PATH", "IREE_HAL_AMDGPU_LIBAQLPROFILE_PATH", "LD_LIBRARY_PATH"):
-              clean_environment.pop(name, None)
-          subprocess.run(
-              [sys.executable, "-c", "import ctypes, os; hsa = ctypes.CDLL(os.environ['IREE_HAL_AMDGPU_LIBHSA_PATH']); hsa.hsa_init; hsa.hsa_amd_queue_create"],
-              env=native_environment(clean_environment),
-              check=True,
-          )
-          PY
-
-      - name: Check installed Loom Serve entry point
-        run: |
-          clean_env=(
-            env
-            -u HSA_OVERRIDE_GFX_VERSION
-            -u IREE_HAL_AMDGPU_LIBHSA_PATH
-            -u IREE_HAL_AMDGPU_LIBAQLPROFILE_PATH
-            -u LD_LIBRARY_PATH
-          )
-
-          "${clean_env[@]}" "${SMOKE_VENV}/bin/loom-serve" --help
-          "${clean_env[@]}" "${SMOKE_VENV}/bin/loom-serve-setup" --help

@@ -268,7 +268,7 @@ def download(identifier: str, *, model_id: Optional[str] = None, model_root: Opt
     sources = _sources(recipe)
     _progress("Checking pinned Hugging Face cache files…")
     files = [source_status(source) for source in sources]
-    root = Path(model_root).expanduser() if model_root is not None else model_store.DEFAULT_MODEL_ROOT
+    root = Path(model_root).expanduser() if model_root is not None else model_store.default_model_root()
     destination = root / model_id
     plan = {"recipe": recipe, "id": model_id, "directory": str(destination),
             "storage": "alias", "offline": offline, "dry_run": dry_run,

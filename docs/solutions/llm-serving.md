@@ -9,6 +9,42 @@ For the implementation and extension points, see the
 [LLM pipeline guidebook](../../loom-pipeline/llm/README.md). The steps below
 use Bash and the `hrx-solutions` command-line tools.
 
+## Isolated Loom state
+
+Set `LOOM_SERVE_DIR` to keep model registrations, server/connection records,
+logs, locks, and generated catalogs/deployments in a separate directory:
+
+```bash
+export LOOM_SERVE_DIR=/path/to/test-run/loom
+loom-serve-setup models download qwen35-08b-q5-k-xl --id ci-qwen08
+loom-serve-start ci-qwen08 --json
+# Use the returned server_id to stop it in the same environment:
+loom-serve-setup servers stop SERVER_ID --json
+```
+
+Use the same environment for setup, start, status and stop. This setting leaves
+`HOME`, XDG settings, installed packages, Hugging Face's cache/credentials, and
+Pi configuration unchanged. Model aliases continue to point into the HF cache.
+An explicit `--model-root` still overrides the model directory. With the variable
+unset, existing paths remain unchanged: `~/.loom` for state/models and
+`~/.cache/hrx-solutions` for generated catalogs/deployments. No files are migrated.
+
+The local/CI smoke script installs a supplied wheel into a dedicated venv,
+downloads the bundled 0.8B recipe, starts it, checks one streamed `Hello!`
+response and stops it:
+
+```bash
+bash build_tools/model-smoke.sh /path/to/hrx_solutions.whl /path/to/new-run
+```
+
+The run directory must be new or empty. The script leaves its venv, Loom state,
+logs and `response.sse` for inspection; the caller removes the directory after
+all servers have stopped. A temporary run directory works equally well for a
+local test. Linux AMD GPU access, Python 3 with venv, curl, jq and CA certificates
+are required. HF downloads use the normal cache (or caller-provided HF settings).
+The manual **Check model setup and query** workflow builds a fresh repaired wheel
+and invokes this same script on gfx1151, uploading only logs and response files.
+
 ## Current example
 
 This worked solution demonstrates source-defined model execution on the shared

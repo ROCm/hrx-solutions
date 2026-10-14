@@ -17,6 +17,7 @@ from typing import Protocol, Optional
 import sys
 import threading
 
+from .state_store import runtime_cache_dir
 from .gguf import GGUF, inspect_gguf_set
 from .model_store import ModelFiles
 from .qwen_validation import compare_gguf, compare_tokenizer, load_profile
@@ -157,7 +158,7 @@ class _QwenPipeline:
             digest.update(source.read_bytes())
         fingerprint = digest.hexdigest()[:16]
 
-        cache_root = Path.home() / ".cache" / "hrx-solutions" / "catalogs" / self.identifier
+        cache_root = runtime_cache_dir() / "catalogs" / self.identifier
         output = cache_root / f"{model_id}-{fingerprint}"
         configured_control = output / catalog_relative / "control.loom"
         if configured_control.is_file():
@@ -243,7 +244,7 @@ def deployment_for_model(
                 "base_directory": str(catalog.absolute()), "definition": definition}
     content = json.dumps(document, indent=2) + "\n"
     digest = hashlib.sha256(content.encode()).hexdigest()[:20]
-    directory = Path.home() / ".cache" / "hrx-solutions" / "deployments"
+    directory = runtime_cache_dir() / "deployments"
     directory.mkdir(parents=True, exist_ok=True)
     output = directory / f"{digest}.json"
     if not output.exists():

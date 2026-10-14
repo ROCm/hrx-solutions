@@ -21,7 +21,7 @@ append_path() {
   if [[ -n "${GITHUB_PATH:-}" ]]; then
     echo "${path}" >>"${GITHUB_PATH}"
   else
-    echo "PATH += ${path}"
+    export PATH="${path}:${PATH}"
   fi
 }
 

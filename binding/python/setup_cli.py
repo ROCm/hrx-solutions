@@ -19,7 +19,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
     if args.json:
         _print_json(inventory)
     elif not inventory["models"]:
-        print(f"No models installed in {args.model_root or model_store.DEFAULT_MODEL_ROOT}")
+        print(f"No models installed in {args.model_root or model_store.default_model_root()}")
     else:
         for item in inventory["models"]:
             print(f"{item['id']}\tpipeline={item.get('pipeline') or 'unvalidated'}"

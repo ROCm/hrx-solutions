@@ -149,6 +149,21 @@ pinned revision unchanged and allows builds without a sibling override.
 
 ### Python wheel build
 
+CI runs Python checks, the manylinux build, and the wheel installation check on
+one GitHub-hosted Ubuntu runner. Only the model setup/query test uses a GPU runner.
+The same build and installation checks can run locally from a clean checkout:
+
+```bash
+bash build_tools/build-wheel.sh
+bash build_tools/check-wheel.sh build/wheel/wheelhouse/*.whl /path/to/new-check-venv
+```
+
+The build requires Docker and writes to `build/wheel/`. It runs as your user in
+the pinned manylinux image. The installation check runs on the host in a new
+venv, without the build container's toolchain or environment. The build checkout
+must have no conflicting local Bazel configuration; for a host-native build,
+use the setup below.
+
 From a checkout, with a Python virtual environment activated, install
 Bazelisk 1.29.0 on `PATH` and select a ROCm SDK containing the compiler, headers,
 and runtime libraries:

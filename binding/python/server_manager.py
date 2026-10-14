@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -225,6 +226,22 @@ def launch(
             )
         state_store.write_json_atomic(_record_path(server_id), record)
 
+    # Managed startup owns the child until readiness. Turn termination into an
+    # exception so the same failure cleanup handles cancellation and timeouts.
+    process = None
+    pending_signal = None
+
+    def interrupted(signum, frame):
+        nonlocal pending_signal
+        pending_signal = signum
+        # Popen must return the handle before cancellation can clean it up.
+        if process is not None:
+            raise SystemExit(128 + signum)
+
+    previous_handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, interrupted)
     try:
         with state_store.private_append_log(log_path) as log:
             process = subprocess.Popen(
@@ -232,6 +249,8 @@ def launch(
                 start_new_session=True, close_fds=True,
                 env=dict(environment) if environment is not None else None,
             )
+            if pending_signal is not None:
+                raise SystemExit(128 + pending_signal)
         deadline = time.monotonic() + ready_timeout
         info = _wait_for_process_identity(
             process, executable, argv, min(deadline, time.monotonic() + 1.0)
@@ -259,8 +278,11 @@ def launch(
                 return record
             time.sleep(1)
         raise RuntimeError(f"Loom Serve did not become ready within {ready_timeout:g}s; see {log_path}")
-    except Exception as exc:
-        if "process" in locals() and process.poll() is None:
+    except BaseException as exc:
+        # A second cancellation must not interrupt bounded child cleanup.
+        for signum in previous_handlers:
+            signal.signal(signum, signal.SIG_IGN)
+        if process is not None and process.poll() is None:
             try:
                 os.killpg(process.pid, signal.SIGTERM)
                 process.wait(timeout=5)
@@ -269,14 +291,18 @@ def launch(
                     os.killpg(process.pid, signal.SIGKILL)
                 except OSError:
                     pass
+                process.wait()
         with state_store.state_lock():
             current = state_store.read_json(_record_path(server_id))
             if isinstance(current, dict) and current.get("state") in {"stopping", "stopped"}:
                 record.update({"state": "stopped", "ended_at": _now(), "exit_status": "unknown"})
             else:
-                record.update({"state": "failed", "ended_at": _now(), "error": str(exc)})
+                record.update({"state": "failed", "ended_at": _now(), "error": str(exc) or type(exc).__name__})
             state_store.write_json_atomic(_record_path(server_id), record)
         raise
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 def list_servers() -> list[dict[str, Any]]:

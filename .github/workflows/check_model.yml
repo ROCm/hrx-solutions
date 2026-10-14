@@ -1,0 +1,66 @@
+# Copyright 2026 The HRX Authors
+# Licensed under the MIT License.
+# SPDX-License-Identifier: MIT
+name: Check model setup and query
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  wheel:
+    name: Build and check wheel
+    uses: ./.github/workflows/build_python_wheel.yml
+    with:
+      name: manylinux x86-64
+
+  model:
+    name: Test model setup and query (gfx1151)
+    needs: wheel
+    runs-on: linux-gfx1151-gpu-rocm
+    timeout-minutes: 20
+    # Matches the successful gfx1151 configuration in ROCm/hrx-system ci_iree.yml.
+    container:
+      image: ghcr.io/rocm/no_rocm_image_ubuntu24_04@sha256:4150afe4759d14822f0e3f8930e1124f26e11f68b5c7b91ec9a02b20b1ebbb98
+      options: >-
+        --ipc host --group-add video --device /dev/kfd --device /dev/dri
+        --group-add 993 --group-add 992 --group-add 110 --ulimit memlock=-1:-1
+        --security-opt seccomp=unconfined
+        --env-file /etc/podinfo/gha-gpu-isolation-settings --user 0:0
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install test prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 python3-venv curl jq ca-certificates git
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Download repaired wheel
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: hrx-solutions-wheel-linux-x86_64
+          path: ${{ runner.temp }}/model-wheel
+      - name: Set up and query 0.8B
+        env:
+          HF_HUB_CACHE: ${{ runner.temp }}/huggingface/hub
+        run: |
+          shopt -s nullglob
+          wheels=("${RUNNER_TEMP}/model-wheel/"*.whl)
+          test "${#wheels[@]}" -eq 1
+          bash build_tools/model-smoke.sh "${wheels[0]}" "${RUNNER_TEMP}/model-diagnostics"
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: model-smoke-diagnostics
+          path: |
+            ${{ runner.temp }}/model-diagnostics/*.log
+            ${{ runner.temp }}/model-diagnostics/*.json
+            ${{ runner.temp }}/model-diagnostics/response.sse
+            ${{ runner.temp }}/model-diagnostics/loom/logs/*.log
+          if-no-files-found: warn
