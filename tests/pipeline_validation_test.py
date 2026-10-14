@@ -8,7 +8,8 @@ import unittest
 from unittest.mock import patch
 
 from binding.python import _launcher, model_store, pipeline_validation, setup_cli
-from binding.python.pipeline_validation import ModelFiles, validate_model
+from binding.python.model_store import ModelFiles
+from binding.python.pipeline_validation import validate_model
 from tests.gguf_fixtures import profile, write_matching_gguf
 
 
@@ -96,7 +97,7 @@ class PipelineValidationTest(unittest.TestCase):
     def test_08b_catalog_cache_preserves_other_architecture_and_dependencies(self):
         source = pipeline_validation.resolve_catalog('qwen-08b')
         self.assertEqual(source.name, 'qwen_08b')
-        self.assertEqual(setup_cli._catalog('qwen').name, 'qwen_27b')
+        self.assertEqual(pipeline_validation.resolve_catalog('qwen').name, 'qwen_27b')
         original = (source/'control.loom').read_bytes()
         with patch.object(Path, 'home', return_value=self.root):
             configured = pipeline_validation.catalog_for_model('qwen-08b', source, 'small-qwen')
@@ -117,6 +118,7 @@ class PipelineValidationTest(unittest.TestCase):
         for pipeline, automatic in [('qwen', True), ('qwen-08b', False)]:
             if pipeline == 'qwen-08b':
                 self.select_08b_contract()
+            write_matching_gguf(self.weights, contract=self.contract)
             model_store.record_pipeline('test-model', pipeline, self.root)
             selected = pipeline_validation.resolve_catalog(pipeline)
             choices = [([], automatic), (['--no-mtp'], False)]

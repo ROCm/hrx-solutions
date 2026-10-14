@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from .gguf import ArrayInfo, GGUF, Metadata
 
@@ -133,7 +133,7 @@ def compare_gguf(model: GGUF, profile: dict) -> tuple[str, ...]:
     return tuple(problems)
 
 
-def compare_tokenizer(path: Path, profile: dict) -> tuple[str, ...]:
+def compare_tokenizer(path: Path, profile: dict, *, data: Optional[dict] = None) -> tuple[str, ...]:
     """Require the qualified tokenizer configuration, ignoring JSON formatting.
 
     Native tokenization uses tokenizer.json rather than the GGUF tokenizer
@@ -141,7 +141,8 @@ def compare_tokenizer(path: Path, profile: dict) -> tuple[str, ...]:
     run a model. Weight identity is deliberately not compared.
     """
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if data is None:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         return (f"Tokenizer is not valid UTF-8 JSON: {exc}",)
     if not isinstance(data, dict) or not isinstance(data.get("model"), dict):

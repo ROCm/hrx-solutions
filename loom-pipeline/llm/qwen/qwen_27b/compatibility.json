@@ -427,5 +427,11 @@
         "type": "F32"
       }
     }
+  },
+  "download_recipe": {
+    "id": "qwen38-27b-q5-k-xl",
+    "description": "Qwen3.8 27B with MTP, qualified for the packaged Qwen pipeline",
+    "variant": "UD-Q5_K_XL",
+    "quantization": "mixed Q5_K/Q6_K/Q8_0"
   }
 }

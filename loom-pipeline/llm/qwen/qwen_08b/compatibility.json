@@ -3,8 +3,16 @@
   "identifier": "qwen35-08b-ud-q5-k-xl-v1",
   "reference": {
     "gguf_repo": "unsloth/Qwen3.5-0.8B-GGUF",
+    "gguf_revision": "b97f009053190ee1de01f886721d5e17d2bf4622",
     "gguf_filename": "Qwen3.5-0.8B-UD-Q5_K_XL.gguf",
-    "tokenizer_repo": "Qwen/Qwen3.5-0.8B"
+    "tokenizer_repo": "Qwen/Qwen3.5-0.8B",
+    "tokenizer_revision": "2fc06364715b967f1860aea9cf38778875588b17"
+  },
+  "download_recipe": {
+    "id": "qwen35-08b-q5-k-xl",
+    "description": "Qwen3.5 0.8B without MTP, qualified for the packaged Qwen 0.8B pipeline",
+    "variant": "UD-Q5_K_XL",
+    "quantization": "mixed Q4_K/Q5_K/Q6_K"
   },
   "metadata": {
     "general.architecture": "qwen35",

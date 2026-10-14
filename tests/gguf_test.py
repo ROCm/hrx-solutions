@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python.gguf import ArrayInfo, GGUFError, inspect_gguf
+from binding.python.gguf import ArrayInfo, GGUFError, inspect_gguf, inspect_gguf_set
 from tests.gguf_fixtures import write_gguf
 
 
@@ -94,6 +94,17 @@ class GGUFReaderTest(unittest.TestCase):
                 self.path.write_bytes(original[:cutoff])
                 with self.assertRaises(GGUFError):
                     inspect_gguf(self.path)
+
+    def test_fragment_metadata_mismatch_and_duplicate_tensors_rejected(self):
+        first = self.path.parent / 'first.gguf'
+        second = self.path.parent / 'second.gguf'
+        write_gguf(first, metadata=[('general.architecture', 8, 'qwen35')], tensors=[('a', [32], 0, 0)])
+        write_gguf(second, metadata=[('general.architecture', 8, 'qwen35')], tensors=[('a', [32], 0, 0)])
+        with self.assertRaisesRegex(GGUFError, 'Duplicate tensor'):
+            inspect_gguf_set([first, second])
+        write_gguf(second, metadata=[('general.architecture', 8, 'other')], tensors=[('b', [32], 0, 0)])
+        with self.assertRaisesRegex(GGUFError, 'metadata'):
+            inspect_gguf_set([first, second])
 
 
 if __name__ == '__main__':

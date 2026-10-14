@@ -181,56 +181,19 @@ def local_model_inventory(model_root: Optional[Path] = None) -> dict[str, Any]:
     The result is stable JSON data rather than the human table printed by the
     CLI. It intentionally reports validation and file availability separately.
     """
-    root = Path(model_root).expanduser() if model_root else model_store.DEFAULT_MODEL_ROOT
-    models: list[dict[str, Any]] = []
-    if root.is_dir():
-        for directory in sorted(root.iterdir(), key=lambda item: item.name):
-            if not directory.is_dir() or directory.name.startswith("."):
-                continue
-            item: dict[str, Any] = {"id": directory.name}
-            try:
-                manifest = model_store.read_manifest(directory.name, root)
-                files = manifest.get("files", {})
-                broken_aliases = [
-                    key
-                    for key, entry in files.items()
-                    if manifest.get("install_mode") == "alias"
-                    and (
-                        not (directory / entry.get("path", "")).is_symlink()
-                        or not (directory / entry.get("path", "")).is_file()
-                    )
-                ]
-                if manifest.get("install_mode") == "alias" and broken_aliases:
-                    availability = "broken alias (" + ", ".join(broken_aliases) + ")"
-                elif (directory / "model.gguf").is_file() and (directory / "tokenizer.json").is_file():
-                    availability = "ready"
-                else:
-                    availability = "incomplete"
-                item.update(
-                    {
-                        "pipeline": manifest.get("pipeline"),
-                        "validated": bool(manifest.get("pipeline")),
-                        "install_mode": manifest.get("install_mode", "unknown"),
-                        "availability": availability,
-                    }
-                )
-            except (model_store.ModelImportError, AttributeError, TypeError) as exc:
-                item.update(
-                    {
-                        "pipeline": None,
-                        "validated": False,
-                        "install_mode": "unknown",
-                        "availability": "invalid",
-                        "error": str(exc),
-                    }
-                )
-            models.append(item)
+    models = []
+    for registered in model_store.model_inventory(model_root):
+        manifest = registered.manifest
+        item = {"id": registered.model_id, "pipeline": manifest.get("pipeline"),
+                "validated": bool(manifest.get("pipeline")),
+                "install_mode": manifest.get("install_mode", "unknown"),
+                "availability": registered.availability}
+        # Preserve the existing remote schema: errors describe invalid manifests;
+        # unavailable assets are represented by availability, separately from validation.
+        if registered.availability == "invalid":
+            item["error"] = registered.error
+        models.append(item)
     return {"schema_version": 1, "models": models}
-
-
-def inventory_json(model_root: Optional[Path] = None) -> str:
-    """Serialize :func:`local_model_inventory` as one JSON line."""
-    return json.dumps(local_model_inventory(model_root), sort_keys=True, separators=(",", ":"))
 
 
 def query_remote_models(name: str, *, timeout: float = 30.0) -> dict[str, Any]:

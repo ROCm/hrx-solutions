@@ -67,10 +67,19 @@ layouts, semantics, and fit with the native execution contract.
 
 ## 1. Import, validate, and select a pipeline
 
-[`model_store.py`](../../binding/python/model_store.py) obtains local files or
-runs `hf download`, checks GGUF magic and tokenizer JSON, and hashes the assets.
-It stages a directory and publishes it with a rename so partial imports do
-not appear as installed models. An import has this layout:
+[`model_download.py`](../../binding/python/model_download.py) supplies bundled
+qualified recipes for `models available` and `models download`. Recipes reuse
+the compatibility profile's independently pinned GGUF/tokenizer sources.
+Cache status is inspected locally and is separate from Loom registration.
+Downloads use one streamed `hf download` path and always alias HF-owned
+cache files. Offline operation and dry-run previews are supported.
+
+[`model_store.py`](../../binding/python/model_store.py) registers those cache
+aliases or imports user-owned local GGUF/tokenizer files. Local imports copy
+by default; `--alias` avoids a second copy of large weights. No weight payload
+hashes are computed. Registration stages a directory, validates downloaded
+assets on CPU, and publishes with a rename. Existing model IDs are preserved.
+A single-file registration has this layout:
 
 ```text
 ~/.loom/models/<model-id>/
@@ -79,9 +88,16 @@ not appear as installed models. An import has this layout:
   manifest.json
 ```
 
-Files are copied by default or symlinked with `--alias`. Paths passed to native
-code must be absolute while preserving their visible filenames. Extensions
-matter for weight files, and the symlinks must preserve them.
+Fragmented models have one `.gguf` alias/file per fragment and a small native
+parameter index. The pinned runtime's `.safetensors.index.json` index reader
+follows filenames in `weight_map`, then selects each member's parser by its
+extension; the generated index references GGUF files. Their descriptors are
+merged for CPU validation, rejecting duplicate tensors, incomplete split sets
+and inconsistent metadata. All fragment files are checked before loading.
+
+Paths passed to native code must be absolute while preserving their visible
+filenames. Extensions matter for weight files, and aliases must preserve them.
+Older single-file manifests remain readable; obsolete hash fields are ignored.
 
 [`pipeline_validation.py`](../../binding/python/pipeline_validation.py) maps
 pipeline IDs to adapters. The Qwen adapter uses
@@ -96,7 +112,7 @@ The versioned profile is grounded in the qualified GGUF and reviewed against
 the model sources. It records `qwen35` metadata, 64 base layers with a
 three-GDN/one-attention pattern, one MTP block, exact GGUF-order dimensions,
 and the GGML encoding for every required tensor. Repeated schemas expand to
-866 tensor bindings. The profile's reference checksums establish provenance;
+866 tensor bindings. The profile's pinned reference revisions establish provenance;
 validation does not hash weight payloads or require identical weights.
 The 0.8B profile has 24 base layers, no MTP tensors, and 320 required tensors.
 Its layer overrides select exact encodings instead of accepting any supported
@@ -113,7 +129,7 @@ scale. Float comparisons use a relative tolerance of one part per million.
 The reader bounds traversal to a 64 MiB header, 100,000 metadata/tensor entries,
 one million elements per metadata array, and 1 MiB per string. It skips large
 metadata array contents and verifies tensor storage ranges from file size,
-without reading or mapping payloads. Split models and tensor encodings absent
+without reading or mapping payloads. Incomplete fragment sets and tensor encodings absent
 from the pinned HRX parser are rejected. Vocabulary array counts/types are
 checked; their contents are not compared because native tokenization uses the
 external `tokenizer.json`. That file's complete canonical JSON configuration
@@ -358,7 +374,7 @@ native execution options are available through `loom-serve`.
 
 | Intended change | Files or boundary to inspect |
 | --- | --- |
-| Import/download behavior or visible asset paths | `model_store.py`, `_model_files` in `setup_cli.py`, validation command construction. Preserve named paths through symlinks. |
+| Import/download behavior or visible asset paths | `model_download.py`, `model_store.py`, validation command construction. Preserve named paths through symlinks. |
 | Add a pipeline to the managed CLI | Adapter registration and catalog handling in `pipeline_validation.py`, catalog lookup in `setup_cli.py`, and wheel staging in `python_packaging.py`. |
 | Public model identity | Qwen `catalog_for_model` and `control.loom`'s `model_name`. Keep inventory, advertised ID, and routing consistent. |
 | Prompt, reasoning, or tool conventions | Chat and text hooks in `control.loom`; inspect native chat validation if the request contract must expand. |

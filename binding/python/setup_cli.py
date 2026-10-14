@@ -10,87 +10,60 @@ import sys
 import tempfile
 from typing import Optional, Sequence
 
-from . import connection_manager, model_store, pipeline_validation, remote_registry, server_manager
+from . import connection_manager, model_download, model_store, pipeline_validation, remote_registry, server_manager
 from ._launcher import native_environment
-from .pipeline_validation import ModelFiles
-
-
-def _model_path(model_id: str, model_root: Optional[Path]) -> Path:
-    root = model_root.expanduser() if model_root else model_store.DEFAULT_MODEL_ROOT
-    manifest = model_store.read_manifest(model_id, root)
-    path = root / model_id
-    if not path.is_dir():
-        raise model_store.ModelImportError(f"Model is not installed: {model_id} (looked in {path})")
-    if manifest.get("install_mode") == "alias":
-        for name, entry in manifest.get("files", {}).items():
-            linked_path = path / entry.get("path", "")
-            if not linked_path.is_symlink() or not linked_path.is_file():
-                target = entry.get("link_target", "unknown target")
-                raise model_store.ModelImportError(
-                    f"Model alias {name} is unavailable: {linked_path} -> {target}; "
-                    "restore the source file or reimport the model"
-                )
-    return path
-
-
-def _model_files(model_id: str, model_root: Optional[Path]) -> ModelFiles:
-    directory = _model_path(model_id, model_root)
-    return ModelFiles(directory / "model.gguf", directory / "tokenizer.json")
-
-
-def _catalog(pipeline: str) -> Path:
-    """Resolve the selected pipeline catalog in source or installed layouts."""
-    return pipeline_validation.resolve_catalog(pipeline)
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
+    inventory = remote_registry.local_model_inventory(args.model_root)
     if args.json:
-        print(remote_registry.inventory_json(args.model_root))
-        return 0
-    root = args.model_root.expanduser() if args.model_root else model_store.DEFAULT_MODEL_ROOT
-    if not root.is_dir():
-        print(f"No models installed in {root}")
-        return 0
-    found = False
-    for directory in sorted(root.iterdir()):
-        if not directory.is_dir() or directory.name.startswith("."):
-            continue
-        found = True
-        try:
-            manifest = model_store.read_manifest(directory.name, root)
-            files = manifest.get("files", {})
-            gguf_ok = (directory / "model.gguf").is_file()
-            tokenizer_ok = (directory / "tokenizer.json").is_file()
-            if manifest.get("install_mode") == "alias":
-                invalid_links = [
-                    name
-                    for name, entry in files.items()
-                    if not (directory / entry.get("path", "")).is_symlink()
-                    or not (directory / entry.get("path", "")).is_file()
-                ]
-                state = (
-                    "broken alias (" + ", ".join(invalid_links) + ")"
-                    if invalid_links
-                    else "ready (alias)"
-                )
-            else:
-                state = "ready" if gguf_ok and tokenizer_ok else "incomplete"
-            source = files.get("gguf", {}).get("source", {})
-            if source.get("kind") == "huggingface":
-                source_label = f"hf:{source.get('repo_id', '?')}:{source.get('filename', '?')}"
-            elif source.get("kind") == "local":
-                source_label = str(source.get("path", "unknown"))
-            else:
-                source_label = "unknown"
-            print(
-                f"{directory.name}\tpipeline={manifest.get('pipeline', 'unvalidated')}"
-                f"\tsource={source_label}\tmode={manifest.get('install_mode', 'unknown')}"
-                f"\tavailability={state}"
-            )
-        except model_store.ModelImportError as exc:
-            print(f"{directory.name}\tinvalid\t{exc}")
-    if not found:
-        print(f"No models installed in {root}")
+        _print_json(inventory)
+    elif not inventory["models"]:
+        print(f"No models installed in {args.model_root or model_store.DEFAULT_MODEL_ROOT}")
+    else:
+        for item in inventory["models"]:
+            print(f"{item['id']}\tpipeline={item.get('pipeline') or 'unvalidated'}"
+                  f"\tmode={item.get('install_mode')}\tavailability={item['availability']}")
+    return 0
+
+
+def _cmd_available(args: argparse.Namespace) -> int:
+    catalog = model_download.available(args.model_root)
+    if args.json:
+        _print_json(catalog)
+    else:
+        for recipe in catalog:
+            print(f"{recipe['id']} — {recipe['description']}")
+            print(f"  variant: {recipe['variant']}; quantization: {recipe['quantization']}; pipeline: {recipe['pipeline']}")
+            print(f"  download: {recipe['cache_status']}; registration: {recipe['registration_status']}")
+            for file in recipe['files']:
+                print(f"  {file['role']}: {file['repo_id']}@{file['revision']}/{file['filename']}"
+                      f" ({'cached' if file['cached'] else 'not downloaded'})")
+            for registration in recipe['registrations']:
+                print(f"  local ID: {registration['id']} ({registration['status']})")
+    return 0
+
+
+def _cmd_download(args: argparse.Namespace) -> int:
+    result = model_download.download(args.recipe, model_id=args.id, model_root=args.model_root,
+                                     offline=args.offline, dry_run=args.dry_run)
+    if args.json:
+        _print_json(result)
+    elif args.dry_run:
+        print(f"Download plan for {result['id']}: {result['cache_status']}; cache aliases in {result['directory']}")
+        for file in result['files']:
+            size = file.get('size_bytes')
+            print(f"  {file['repo_id']}@{file['revision']}/{file['filename']}: "
+                  f"{'cached' if file['cached'] else 'download required'}, size={size if size is not None else file.get('expected_size', 'unknown')}")
+        if result.get('destination_exists'):
+            print("  Destination already exists; a conflicting installation will be preserved.")
+        if result.get('size_note'):
+            print("  " + result['size_note'])
+    else:
+        print(f"{result['id']}: {result['status']} in {result['directory']}")
+        print("  Files are aliases to the Hugging Face cache; retain those cache files.")
+        print(f"  Start: loom-serve-setup serve {result['id']}" +
+              (f" --model-root {args.model_root}" if args.model_root else ""))
     return 0
 
 
@@ -137,7 +110,7 @@ def _cmd_remote_models(args: argparse.Namespace) -> int:
 def _cmd_remote_start(args: argparse.Namespace) -> int:
     record = remote_registry.start_remote_server(args.name, args.model_id, timeout=args.timeout)
     if args.json:
-        _print_server_json(record)
+        _print_json(record)
     else:
         print(
             f"Started remote Loom Serve server {record['server_id']} for {record['model_id']}"
@@ -150,7 +123,7 @@ def _cmd_remote_start(args: argparse.Namespace) -> int:
 def _cmd_remote_servers_list(args: argparse.Namespace) -> int:
     records = remote_registry.list_remote_servers(args.name, timeout=args.timeout)
     if args.json:
-        _print_server_json(records)
+        _print_json(records)
     elif not records:
         print(f"No managed Loom Serve processes on {args.name}")
     else:
@@ -164,7 +137,7 @@ def _cmd_remote_servers_action(args: argparse.Namespace) -> int:
         args.name, args.server_id, args.servers_action, timeout=args.timeout
     )
     if args.json:
-        _print_server_json(record)
+        _print_json(record)
     else:
         print(_server_summary(record))
     if args.servers_action == "stop":
@@ -186,7 +159,7 @@ def _cmd_remote_connect(args: argparse.Namespace) -> int:
         args.name, args.model, ready_timeout=args.ready_timeout
     )
     if args.json:
-        _print_server_json(record)
+        _print_json(record)
     else:
         print(
             f"Connected to remote Loom Serve on {record['remote_name']}\n"
@@ -201,7 +174,7 @@ def _cmd_remote_connect(args: argparse.Namespace) -> int:
 def _cmd_remote_connections_list(args: argparse.Namespace) -> int:
     records = connection_manager.list_connections()
     if args.json:
-        _print_server_json(records)
+        _print_json(records)
     elif not records:
         print("No managed SSH connections")
     else:
@@ -213,7 +186,7 @@ def _cmd_remote_connections_list(args: argparse.Namespace) -> int:
 def _cmd_remote_connections_status(args: argparse.Namespace) -> int:
     record = connection_manager.get_connection(args.connection_id)
     if args.json:
-        _print_server_json(record)
+        _print_json(record)
     else:
         print(_connection_summary(record))
     return 0
@@ -222,49 +195,18 @@ def _cmd_remote_connections_status(args: argparse.Namespace) -> int:
 def _cmd_remote_connections_disconnect(args: argparse.Namespace) -> int:
     record = connection_manager.disconnect(args.connection_id)
     if args.json:
-        _print_server_json(record)
+        _print_json(record)
     else:
         print(_connection_summary(record))
     return 0 if record.get("state") == "disconnected" else 1
 
 
 def _cmd_import(args: argparse.Namespace) -> int:
-    if args.hf_repo:
-        if not args.gguf_file or not args.tokenizer_file:
-            raise model_store.ModelImportError(
-                "Hugging Face imports require both --gguf-file and --tokenizer-file"
-            )
-        if args.tokenizer:
-            raise model_store.ModelImportError(
-                "Use --tokenizer-file for Hugging Face imports or --tokenizer for local imports"
-            )
-        revision = args.revision or "main"
-        gguf = model_store.HuggingFaceFile(args.hf_repo, args.gguf_file, revision)
-        tokenizer = model_store.HuggingFaceFile(
-            args.tokenizer_hf_repo or args.hf_repo,
-            args.tokenizer_file,
-            args.tokenizer_revision or revision,
-        )
-    else:
-        if args.gguf_file or args.tokenizer_file or args.tokenizer_hf_repo or args.tokenizer_revision:
-            raise model_store.ModelImportError(
-                "Hugging Face file and revision options are only valid with --hf-repo"
-            )
-        if not args.tokenizer:
-            raise model_store.ModelImportError("Local imports require --tokenizer")
-        gguf = Path(args.gguf).expanduser()
-        tokenizer = Path(args.tokenizer).expanduser()
-    imported = model_store.import_model(
-        args.model_id,
-        gguf=gguf,
-        tokenizer=tokenizer,
-        model_root=args.model_root,
-        token=args.token,
-        alias=args.alias,
-    )
+    imported = model_store.import_model(args.model_id, gguf=args.gguf, tokenizer=args.tokenizer,
+                                        model_root=args.model_root, alias=args.alias)
     print(f"Imported {imported.model_id} into {imported.directory}")
-    print(f"  weights:   {imported.gguf_path}")
-    print(f"  tokenizer: {imported.tokenizer_path}")
+    print(f"  weights:   {imported.files.weights}")
+    print(f"  tokenizer: {imported.files.tokenizer}")
     return 0
 
 
@@ -279,7 +221,7 @@ def _cmd_pipelines(_args: argparse.Namespace) -> int:
 
 def _cmd_validate(args: argparse.Namespace) -> int:
     try:
-        files = _model_files(args.model_id, args.model_root)
+        files = model_store.model_files(args.model_id, args.model_root)
     except model_store.ModelImportError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -301,7 +243,7 @@ def _server_summary(record: dict) -> str:
     )
 
 
-def _print_server_json(value: object) -> None:
+def _print_json(value: object) -> None:
     """Write one JSON value to stdout for machine callers."""
     print(json.dumps(value, indent=2, sort_keys=True))
 
@@ -309,7 +251,7 @@ def _print_server_json(value: object) -> None:
 def _cmd_servers_list(args: argparse.Namespace) -> int:
     records = server_manager.list_servers()
     if args.json:
-        _print_server_json(records)
+        _print_json(records)
         return 0
     if not records:
         print("No managed Loom Serve processes")
@@ -322,7 +264,7 @@ def _cmd_servers_list(args: argparse.Namespace) -> int:
 def _cmd_servers_status(args: argparse.Namespace) -> int:
     record = server_manager.get_server(args.server_id)
     if args.json:
-        _print_server_json(record)
+        _print_json(record)
     else:
         print(_server_summary(record))
     return 0
@@ -331,7 +273,7 @@ def _cmd_servers_status(args: argparse.Namespace) -> int:
 def _cmd_servers_stop(args: argparse.Namespace) -> int:
     record = server_manager.stop_server(args.server_id)
     if args.json:
-        _print_server_json(record)
+        _print_json(record)
     else:
         print(_server_summary(record))
     return 0 if record.get("state") == "stopped" else 1
@@ -340,15 +282,16 @@ def _cmd_servers_stop(args: argparse.Namespace) -> int:
 def _cmd_serve(args: argparse.Namespace) -> int:
     if args.foreground and args.json:
         raise ValueError("--json is only available for managed background servers")
-    manifest = model_store.read_manifest(args.model_id, args.model_root)
-    pipeline = args.pipeline or manifest.get("pipeline")
+    registered = model_store.registered_model(args.model_id, args.model_root)
+    files = registered.require_files()
+    pipeline = args.pipeline or registered.manifest.get("pipeline")
     if not pipeline:
         raise model_store.ModelImportError(
             f"Model {args.model_id!r} has no validated pipeline recorded. Run "
             f"'loom-serve-setup models validate {args.model_id} --pipeline <pipeline>' "
             "or pass --pipeline explicitly."
         )
-    selected_catalog = _catalog(pipeline)
+    selected_catalog = pipeline_validation.resolve_catalog(pipeline)
     requested_mtp = args.mtp
     if args.mtp_depth is not None:
         if requested_mtp is False:
@@ -356,7 +299,6 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         requested_mtp = True
     enabled_mtp = pipeline_validation.mtp_enabled(selected_catalog, requested_mtp)
     mtp_depth = args.mtp_depth if args.mtp_depth is not None else 3
-    files = _model_files(args.model_id, args.model_root)
     catalog = pipeline_validation.catalog_for_model(pipeline, selected_catalog, args.model_id)
     package = Path(__file__).resolve().parent
     executable = package / "_native" / "bin" / "loom-serve"
@@ -378,7 +320,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         executable=executable,
         argv=argv,
         port=args.port,
-        model_paths=(files.weights.absolute(), files.tokenizer.absolute(), catalog.resolve(), deployment),
+        model_paths=tuple(path.absolute() for path in (*files.gguf_paths, files.weights, files.tokenizer, catalog, deployment)),
         launch_options={
             "rows": args.rows, "context_capacity": args.context_capacity,
             "pool_capacity": args.pool_capacity, "prefill_capacity": args.prefill_capacity,
@@ -388,7 +330,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         environment=native_environment(),
     )
     if args.json:
-        _print_server_json(record)
+        _print_json(record)
     else:
         print(
             f"Started Loom Serve server {record['server_id']} for {args.model_id}\n"
@@ -520,7 +462,7 @@ def _update_pi_config(
 def _cmd_pi_config(args: argparse.Namespace) -> int:
     # Refuse to point Pi at a model that has not been imported into Loom's
     # model store. This also catches broken aliases before changing user config.
-    files = _model_files(args.model_id, args.model_root)
+    files = model_store.model_files(args.model_id, args.model_root)
     for label, path in (("GGUF", files.weights), ("tokenizer", files.tokenizer)):
         if not path.is_file():
             raise model_store.ModelImportError(
@@ -589,23 +531,25 @@ def build_parser() -> argparse.ArgumentParser:
         handler=_cmd_pipelines
     )
 
-    importing = model_commands.add_parser("import", help="import local files or files downloaded by the Hugging Face CLI")
+    available = model_commands.add_parser("available", help="show bundled download recipes, variants and local cache/registration status")
+    available.add_argument("--model-root", type=Path)
+    available.add_argument("--json", action="store_true")
+    available.set_defaults(handler=_cmd_available)
+
+    downloading = model_commands.add_parser("download", help="download and validate a known recipe; alias Hugging Face cache files")
+    downloading.add_argument("recipe", help="recipe ID shown by models available")
+    downloading.add_argument("--id", help="local model/HTTP identity (defaults to recipe ID)")
+    downloading.add_argument("--model-root", type=Path)
+    downloading.add_argument("--offline", action="store_true", help="use pinned cached files only; make no network requests")
+    downloading.add_argument("--dry-run", action="store_true", help="preview sources, cache state and sizes without downloading or registering")
+    downloading.add_argument("--json", action="store_true", help="JSON result on stdout; progress streams to stderr")
+    downloading.set_defaults(handler=_cmd_download)
+
+    importing = model_commands.add_parser("import", help="import local GGUF/tokenizer files", epilog="Hugging Face options were removed: use models available and models download RECIPE instead.")
     importing.add_argument("model_id")
-    source = importing.add_mutually_exclusive_group(required=True)
-    source.add_argument("--hf-repo", help="Hugging Face repository containing both files (requires the `hf` CLI)")
-    source.add_argument("--gguf", help="local GGUF file; use with --tokenizer")
-    importing.add_argument("--gguf-file", help="GGUF path within the Hugging Face repository")
-    importing.add_argument("--tokenizer-file", help="tokenizer path within the Hugging Face repository")
-    importing.add_argument("--tokenizer-hf-repo", help="Hugging Face repository for the tokenizer (defaults to --hf-repo)")
-    importing.add_argument("--revision", default="main")
-    importing.add_argument("--tokenizer-revision", help="tokenizer revision (defaults to --revision)")
-    importing.add_argument("--token", help="Hugging Face access token passed to `hf download` (or use HF_TOKEN)")
-    importing.add_argument("--tokenizer", help="local tokenizer.json file")
-    importing.add_argument(
-        "--alias",
-        action="store_true",
-        help="symlink local files or the Hugging Face CLI cache paths instead of copying",
-    )
+    importing.add_argument("--gguf", required=True, type=Path, nargs="+", help="one or more local GGUF fragments")
+    importing.add_argument("--tokenizer", required=True, type=Path, help="local tokenizer.json")
+    importing.add_argument("--alias", action="store_true", help="alias user-owned files instead of copying large checkpoints")
     importing.add_argument("--model-root", type=Path)
     importing.set_defaults(handler=_cmd_import)
 
@@ -787,7 +731,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    tokens = list(argv) if argv is not None else sys.argv[1:]
+    removed = {"--hf-repo", "--gguf-file", "--tokenizer-file", "--tokenizer-hf-repo", "--revision", "--tokenizer-revision", "--token"}
+    if tokens[:2] == ["models", "import"] and any(token.split("=", 1)[0] in removed for token in tokens[2:]):
+        parser.error("models import accepts local files only; Hugging Face options were removed. Run models available, then models download RECIPE.")
+    args = parser.parse_args(tokens)
     try:
         return args.handler(args)
     except (model_store.ModelImportError, FileNotFoundError, OSError, RuntimeError, ValueError) as exc:

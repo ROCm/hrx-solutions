@@ -8,7 +8,7 @@ native runtime are needed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import os
 from pathlib import Path
@@ -78,6 +78,7 @@ class GGUF:
     header_bytes: int
     data_offset: int
     file_size: int
+    tensor_files: dict[str, Path] = field(default_factory=dict)
 
 
 def tensor_size(shape: tuple[int, ...], ggml_type: int) -> int:
@@ -154,7 +155,7 @@ class _Reader:
         return ArrayInfo(element_type, count)
 
 
-def inspect_gguf(path: Path) -> GGUF:
+def inspect_gguf(path: Path, *, allow_fragment: bool = False) -> GGUF:
     """Inspect one little-endian GGUF v2/v3 file, reading only its header.
 
     Limits cap header traversal and retained metadata. Unbuffered reads avoid
@@ -181,8 +182,8 @@ def inspect_gguf(path: Path) -> GGUF:
             metadata[key] = Metadata(value_type, reader.value(value_type))
         split_count = metadata.get("split.count")
         if any(key.startswith("split.") for key in metadata):
-            if split_count is None or split_count.value != 1:
-                raise GGUFError("Split GGUF files are unsupported; provide a complete single-file model")
+            if split_count is None or (split_count.value != 1 and not allow_fragment):
+                raise GGUFError("Split GGUF requires the complete fragment set; inspect all fragments together")
         alignment_entry = metadata.get("general.alignment", Metadata(4, 32))
         alignment = alignment_entry.value
         if alignment_entry.value_type != 4 or not isinstance(alignment, int) or alignment <= 0 or alignment % 8:
@@ -217,3 +218,50 @@ def inspect_gguf(path: Path) -> GGUF:
             raise GGUFError(f"{tensor.name}: tensor storage overlaps another tensor")
         previous_end = end
     return GGUF(version, metadata, tensors, header_bytes, data_offset, file_size)
+
+
+def inspect_gguf_set(paths) -> GGUF:
+    """Inspect all fragments and merge descriptors, never reading tensor data."""
+    paths = tuple(Path(path) for path in paths)
+    if not paths:
+        raise GGUFError("A GGUF set must contain at least one file")
+    parts = [inspect_gguf(path, allow_fragment=True) for path in paths]
+    first = parts[0]
+    tensors = {}
+    split_numbers = set()
+    tensor_files = {}
+    for index, part in enumerate(parts):
+        if part.version != first.version:
+            raise GGUFError("GGUF fragments have inconsistent format versions")
+        for key, value in part.metadata.items():
+            if key.startswith("split."):
+                continue
+            if key in first.metadata and first.metadata[key] != value:
+                raise GGUFError(f"GGUF fragments disagree on metadata {key}")
+        for key, value in first.metadata.items():
+            if key.startswith("split."):
+                continue
+            if part.metadata.get(key) != value:
+                raise GGUFError(f"GGUF fragment {paths[index].name} is missing or disagrees on metadata {key}")
+        count = part.metadata.get("split.count")
+        number = part.metadata.get("split.no")
+        if count is not None or number is not None:
+            if count is None or number is None or count.value != len(parts):
+                raise GGUFError("Incomplete GGUF fragment set: split.count does not match supplied files")
+            if not isinstance(number.value, int) or number.value in split_numbers or not 0 <= number.value < len(parts):
+                raise GGUFError("Invalid or duplicate GGUF split.no")
+            split_numbers.add(number.value)
+        for name, tensor in part.tensors.items():
+            if name in tensors:
+                raise GGUFError(f"Duplicate tensor across GGUF fragments: {name}")
+            tensors[name] = tensor
+            tensor_files[name] = paths[index]
+    if split_numbers and len(split_numbers) != len(parts):
+        raise GGUFError("Some GGUF fragments lack split metadata")
+    for part in parts:
+        count = part.metadata.get("split.tensors.count")
+        if count is not None and count.value != len(tensors):
+            raise GGUFError("Incomplete GGUF fragment tensor set: split.tensors.count differs")
+    return GGUF(first.version, first.metadata, tensors,
+                sum(part.header_bytes for part in parts), first.data_offset,
+                sum(part.file_size for part in parts), tensor_files)

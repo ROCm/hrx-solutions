@@ -80,6 +80,7 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             PACKAGE_PREFIX + "pipeline_validation.py",
             PACKAGE_PREFIX + "setup_cli.py",
             PACKAGE_PREFIX + "model_store.py",
+            PACKAGE_PREFIX + "model_download.py",
         }
         for architecture in ("qwen_27b", "qwen_08b"):
             required_files.update(

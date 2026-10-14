@@ -62,7 +62,7 @@ class PackagingTest(unittest.TestCase):
             'hrx_solutions/_native/lib/libhsa-amd-aqlprofile64.so.1':b'profile',
         }
         members.update({'hrx_solutions/'+path.relative_to(package).as_posix():path.read_bytes() for path in catalog})
-        for name in ('pipeline_validation.py','setup_cli.py','model_store.py','gguf.py','qwen_validation.py'):
+        for name in ('pipeline_validation.py','setup_cli.py','model_store.py','model_download.py','gguf.py','qwen_validation.py'):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         version=read_package_version()
         prefix=f'hrx_solutions-{version}.dist-info/'

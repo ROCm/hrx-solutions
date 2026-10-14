@@ -50,14 +50,12 @@ On the machine running inference:
 Activate the environment containing the wheel before running these commands.
 Keep model files outside the source checkout.
 
-## 1. Import a model
+## 1. Download a known recipe or import local files
 
-A **model ID** names one installed checkpoint or fine-tune and becomes its
-HTTP identity. A **pipeline ID** selects the implementation that can execute
-it. Here the model ID is `qwen38-27b-q5-k-xl`, and the pipeline is `qwen`.
-
-Choose one of the following import methods. An existing model ID cannot be
-imported again; use a new ID for a different checkpoint.
+A **recipe ID** selects bundled, qualified download coordinates. A **model ID**
+names a registered checkpoint and becomes its HTTP identity. A **pipeline ID**
+selects its implementation. Here the default model ID is `qwen38-27b-q5-k-xl`
+and the pipeline is `qwen`.
 
 ### Download from Hugging Face
 
@@ -67,25 +65,68 @@ Install the `hf` CLI into your environment:
 python -m pip install -U huggingface_hub
 ```
 
+For Python 3.9 environments, use `python -m pip install 'huggingface_hub[cli]>=0.34,<1'`.
+The wheel remains compatible with Python 3.9; it invokes the external CLI
+rather than importing the Hub Python client. The 0.34–0.36 CLI supports file
+downloads but lacks remote dry-run metadata. Newer CLIs exposing `--dry-run`
+can also preview uncached download sizes. [CLI reference](https://huggingface.co/docs/huggingface_hub/en/guides/cli),
+[0.36 CLI implementation](https://github.com/huggingface/huggingface_hub/blob/v0.36.0/src/huggingface_hub/cli/download.py),
+[0.36 Python requirements](https://github.com/huggingface/huggingface_hub/blob/v0.36.0/setup.py).
+
 For repositories requiring authentication, run `hf auth login` or set
-`HF_TOKEN` before importing. This example pins the
-[GGUF](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) and
-[tokenizer](https://huggingface.co/Qwen/Qwen3.8-27B) to separate revisions:
+`HF_TOKEN`. Credentials never appear in the announced subcommands. Recipes
+ship with the wheel and pin GGUF and tokenizer repositories independently;
+adding qualified recipes requires a package release.
 
 ```bash
+loom-serve-setup models available
+loom-serve-setup models available --json
 MODEL_ID="qwen38-27b-q5-k-xl"
-loom-serve-setup models import "$MODEL_ID" --alias \
-  --hf-repo unsloth/Qwen3.8-27B-GGUF \
-  --gguf-file Qwen3.8-27B-UD-Q5_K_XL.gguf \
-  --revision 408fcc1807ab264d8cd644a7c4c0f58fbd32eebc \
-  --tokenizer-hf-repo Qwen/Qwen3.8-27B \
-  --tokenizer-file tokenizer.json \
-  --tokenizer-revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+loom-serve-setup models download "$MODEL_ID" --dry-run
+loom-serve-setup models download "$MODEL_ID"
 ```
 
-`--alias` creates symlinks to the Hugging Face cache, avoiding a second copy
-of the weights. Keep the referenced cache files available. Omit `--alias` to
-copy the downloaded files into the model store.
+The bundled recipes include both supported model sizes:
+
+| Recipe ID | Model | Pipeline | MTP |
+| --- | --- | --- | --- |
+| `qwen38-27b-q5-k-xl` | Qwen3.8-27B UD-Q5_K_XL | `qwen` | Available |
+| `qwen35-08b-q5-k-xl` | Qwen3.5-0.8B UD-Q5_K_XL | `qwen-08b` | Unsupported |
+
+For the smaller model, run `loom-serve-setup models download qwen35-08b-q5-k-xl`.
+The recipe automatically validates and records the `qwen-08b` pipeline;
+serving selects its no-MTP default.
+
+`models available` shows recipe descriptions, variant/quantization, pipeline,
+repositories, filenames/fragments, pinned revisions, and local cache status
+(`cached`, `partially cached`, or `not downloaded`). It separately lists local
+model IDs and registration status (`ready`, `broken alias`, or `not registered`).
+It checks the local cache without contacting Hugging Face.
+
+`models download` invokes `hf download` and streams subcommand output and stage
+updates to stderr. `--json` keeps stdout machine readable. Downloaded files
+remain owned by the Hugging Face cache and are always symlinked into Loom's
+model store, avoiding a second copy of large weights. Cache locations follow
+`HF_HUB_CACHE`, legacy `HUGGINGFACE_HUB_CACHE`, `HF_HOME`, and `XDG_CACHE_HOME`.
+Keep those cache files available: loading checks every referenced file and
+reports broken/unreadable aliases without reading or hashing tensor payloads.
+[Hub cache layout](https://huggingface.co/docs/huggingface_hub/en/guides/manage-cache).
+
+Downloads validate the complete GGUF descriptor set and tokenizer configuration
+on CPU before publishing the registration atomically. Checkpoint hashes are
+not calculated or compared. Multi-file recipes validate their fragments
+together. The tokenizer's existing configuration comparison is retained.
+
+Use `--id my-qwen` to choose another local/HTTP identity. Existing installations
+are preserved; repeating a download succeeds only when its recorded recipe,
+cache aliases and CPU compatibility match. Conflicts require another ID.
+
+`--offline` uses only locally cached pinned files and reports all missing
+filenames without invoking network operations. `--dry-run` shows the source
+and storage plan without downloading files or publishing a registration;
+combine it with `--offline` for a strictly local preview. Cached sizes are
+exact; remote sizes depend on the installed CLI and may be estimates or
+unknown. Downloaded weights consume cache space, not another model-store copy.
 
 ### Use files already on disk
 
@@ -98,11 +139,17 @@ loom-serve-setup models import "$MODEL_ID" --alias \
   --tokenizer /path/to/tokenizer.json
 ```
 
-Omit `--alias` to copy the files. Both methods create a model directory under
+Omit `--alias` to copy the files. Both workflows create a model directory under
 `~/.loom/models/$MODEL_ID/` containing `model.gguf`, `tokenizer.json`, and a
-manifest recording the import.
+manifest recording the registration. Supply multiple paths after `--gguf`
+for a fragmented local model. `models import` accepts local files only; the
+former Hugging Face source, revision and token flags have been removed. Use
+`models available` and `models download RECIPE` for supported downloads.
 
 ## 2. Validate compatibility
+
+Recipe downloads already perform this validation. Run it explicitly after a
+local import or to recheck an existing registration.
 
 ```bash
 MODEL_ID="qwen38-27b-q5-k-xl"

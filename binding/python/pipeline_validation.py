@@ -13,18 +13,13 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Protocol
+from typing import Protocol, Optional
+import sys
+import threading
 
-from .gguf import inspect_gguf
+from .gguf import GGUF, inspect_gguf_set
+from .model_store import ModelFiles
 from .qwen_validation import compare_gguf, compare_tokenizer, load_profile
-
-
-@dataclass(frozen=True)
-class ModelFiles:
-    """The local files a pipeline needs to check a model."""
-
-    weights: Path
-    tokenizer: Path
 
 
 @dataclass(frozen=True)
@@ -34,6 +29,7 @@ class ValidationResult:
     compatible: bool
     pipeline: str
     message: str
+    inspection: Optional[GGUF] = None
 
 
 class Pipeline(Protocol):
@@ -41,7 +37,7 @@ class Pipeline(Protocol):
 
     identifier: str
 
-    def validate(self, model: ModelFiles) -> ValidationResult: ...
+    def validate(self, model: ModelFiles, *, tokenizer_data: Optional[dict] = None) -> ValidationResult: ...
 
 
 _PIPELINES: dict[str, Pipeline] = {}
@@ -108,6 +104,7 @@ def catalog_for_model(pipeline: str, catalog: Path, model_id: str) -> Path:
 def validate_model(
     model: ModelFiles,
     pipeline: str,
+    *, tokenizer_data: Optional[dict] = None,
 ) -> ValidationResult:
     """Inspect local model files with the selected registered pipeline."""
     implementation = _PIPELINES.get(pipeline)
@@ -117,7 +114,7 @@ def validate_model(
             False, pipeline, f"Unknown pipeline {pipeline!r}. Available pipelines: {choices}."
         )
 
-    missing = [str(path) for path in (model.weights, model.tokenizer) if not Path(path).is_file()]
+    missing = [str(path) for path in (*model.gguf_paths, model.tokenizer) if not Path(path).is_file()]
     if missing:
         return ValidationResult(
             False,
@@ -125,7 +122,18 @@ def validate_model(
             "Model validation requires existing weights and tokenizer files; missing: "
             + ", ".join(missing),
         )
-    return implementation.validate(model)
+    print("Validating GGUF descriptors and tokenizer compatibility on CPU…", file=sys.stderr, flush=True)
+    done = threading.Event()
+    def heartbeat():
+        while not done.wait(5):
+            print("Still validating model descriptors and tokenizer…", file=sys.stderr, flush=True)
+    worker = threading.Thread(target=heartbeat, daemon=True)
+    worker.start()
+    try:
+        return implementation.validate(model, tokenizer_data=tokenizer_data)
+    finally:
+        done.set()
+        worker.join()
 
 
 class _QwenPipeline:
@@ -179,11 +187,11 @@ class _QwenPipeline:
             shutil.rmtree(staging, ignore_errors=True)
         return output / catalog_relative
 
-    def validate(self, model: ModelFiles) -> ValidationResult:
+    def validate(self, model: ModelFiles, *, tokenizer_data: Optional[dict] = None) -> ValidationResult:
         try:
             profile = load_profile(resolve_catalog(self.identifier))
-            weights = inspect_gguf(model.weights)
-            problems = compare_gguf(weights, profile) + compare_tokenizer(model.tokenizer, profile)
+            weights = inspect_gguf_set(model.gguf_paths)
+            problems = compare_gguf(weights, profile) + compare_tokenizer(model.tokenizer, profile, data=tokenizer_data)
         except (OSError, ValueError) as exc:
             return ValidationResult(False, self.identifier, f"Could not inspect Qwen model assets: {exc}")
         if problems:
@@ -199,6 +207,7 @@ class _QwenPipeline:
             f"Model matches {profile['identifier']}: {profile['base_layer_count']} base layers "
             f"{'and MTP' if profile['mtp_layer'] is not None else 'without MTP'}, "
             f"{len(weights.tensors)} tensors checked from GGUF descriptors; matching tokenizer configuration.",
+            inspection=weights,
         )
 
 
