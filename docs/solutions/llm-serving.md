@@ -1,5 +1,12 @@
 # LLM serving
 
+> **Upstream migration in progress:** The setup/start commands and their
+> supporting workflows remain part of this solution. The current wheel uses
+> upstream's new `loom-serve` executable. Qwen compatibility validation runs
+> on CPU. Managed Qwen startup still needs its adapter ported to model JSON
+> documents, so the start commands below describe the intended workflow and
+> are not yet an end-to-end working path with the new native server.
+
 Run a Qwen model on a local AMD GPU, query its streaming chat endpoint, and
 connect Pi.
 

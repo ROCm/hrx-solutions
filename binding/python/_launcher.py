@@ -48,21 +48,13 @@ def native_environment(
 
 
 def exec_loom_serve() -> NoReturn:
-    """Runs the bundled text server with its packaged source catalog."""
+    """Runs the bundled server, forwarding all native command-line arguments."""
     package_root = Path(__file__).resolve().parent
     native_root = package_root / "_native"
-    executable = native_root / "bin" / "loom-text-server"
+    executable = native_root / "bin" / "loom-serve"
     if not executable.is_file():
-        raise RuntimeError("HRX wheel is missing native executable: loom-text-server")
+        raise RuntimeError("HRX wheel is missing native executable: loom-serve")
     arguments = list(sys.argv[1:])
-    if not any(argument == "--model" or argument.startswith("--model=") for argument in arguments):
-        arguments.insert(
-            0,
-            "--model="
-            + str(
-                package_root / "loom-pipeline" / "llm" / "qwen"
-            ),
-        )
     os.execve(
         str(executable),
         [str(executable), *arguments],

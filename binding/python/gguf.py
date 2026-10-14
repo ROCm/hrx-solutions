@@ -1,7 +1,7 @@
 """Bounded, header-only GGUF inspection with no tensor materialization.
 
 The accepted format versions, byte order and GGML block sizes follow the
-GGUF parser in the HRX revision pinned by deps.lock. Large metadata arrays
+GGUF parser in HRX revision 6f6176173bb543d0c330a35b78a1837582a76870. Large metadata arrays
 are traversed without retaining their contents. No optional dependencies or
 native runtime are needed.
 """

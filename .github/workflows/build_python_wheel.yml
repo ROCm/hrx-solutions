@@ -52,7 +52,6 @@ jobs:
       image: ghcr.io/rocm/therock_build_manylinux_x86_64@sha256:702a5133851e6d1daf1207d2c9fbb01c2667914a5b6dc5a01faeb3ce66ea6421
     env:
       HRX_OUTPUT_DIR: ${{ github.workspace }}/build/wheel
-      HRX_SOURCE_DIR: ${{ github.workspace }}/.deps/hrx
       HRX_BUILD_PYTHON: /opt/python/cp312-cp312/bin/python3
       HRX_PYTHON: ${{ github.workspace }}/build/wheel/python/bin/python3
       HRX_BAZEL_BIN_DIR: ${{ github.workspace }}/build/wheel/tools/bin
@@ -74,12 +73,6 @@ jobs:
       - name: Adjust git config
         run: git config --global --add safe.directory "$PWD"
 
-      - name: Fetch pinned HRX source
-        run: bash .github/scripts/fetch_hrx_source.sh
-
-      - name: Fetch ROCm toolchain
-        run: bash .github/scripts/fetch_rocm_toolchain.sh
-
       - name: Install Python build requirements
         run: |
           "${HRX_BUILD_PYTHON}" --version
@@ -89,18 +82,28 @@ jobs:
             "wheel>=0.45"
           "${HRX_BUILD_PYTHON}" -m build --version
 
-      - name: Install Bazel host tools
+      - name: Install Bazelisk
         run: |
           mkdir -p "${HRX_BAZEL_BIN_DIR}"
-          "${HRX_BUILD_PYTHON}" \
-            "${HRX_SOURCE_DIR}/build_tools/devtools/install.py" \
-            --group bazel \
-            --bin-dir "${HRX_BAZEL_BIN_DIR}"
-          "${HRX_BUILD_PYTHON}" \
-            "${HRX_SOURCE_DIR}/build_tools/devtools/install.py" \
-            --group bazel \
-            --bin-dir "${HRX_BAZEL_BIN_DIR}" \
-            --check
+          curl -fL https://github.com/bazelbuild/bazelisk/releases/download/v1.29.0/bazelisk-linux-amd64 \
+            -o "${BAZEL}"
+          echo "5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992  ${BAZEL}" \
+            | sha256sum --check
+          chmod +x "${BAZEL}"
+
+      - name: Fetch HRX through Bazel
+        run: |
+          "${HRX_BUILD_PYTHON}" - <<'PYTHON'
+          import os
+          from build_tools.python_packaging import discover_bazel, discover_hrx_source
+
+          source = discover_hrx_source(discover_bazel())
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write(f"HRX_SOURCE_DIR={source}\n")
+          PYTHON
+
+      - name: Fetch ROCm toolchain
+        run: bash .github/scripts/fetch_rocm_toolchain.sh
 
       - name: Check build environment
         run: |
@@ -212,7 +215,8 @@ jobs:
           print(f"hrx-solutions {importlib.metadata.version('hrx-solutions')}")
           print(f"package: {hrx_solutions.__file__}")
           package_root = Path(hrx_solutions.__file__).resolve().parent
-          assert (package_root / "_native/bin/loom-text-server").is_file()
+          assert (package_root / "_native/bin/loom-serve").is_file()
+          assert (package_root / "_native/share/loom-serve/LICENSE").is_file()
           assert not (package_root / "_native/bin/loom-qwen-epoch-check").exists()
           from hrx_solutions.gguf import inspect_gguf
           from hrx_solutions.qwen_validation import load_profile

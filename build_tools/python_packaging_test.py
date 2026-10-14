@@ -23,10 +23,10 @@ class PackagingTest(unittest.TestCase):
         (hrx/'.bazelversion').write_text('8.3.1')
         with patch.object(packaging,'discover_hrx_source',return_value=hrx), patch.object(packaging,'_query_bazel_output',return_value=self.root/'server') as query, patch.object(packaging.subprocess,'run') as run:
             outputs=packaging.build_native_executables(self.root/'bazel',self.root/'rocm')
-        self.assertEqual(set(outputs),{'loom-text-server'})
-        self.assertEqual(packaging.BAZEL_TARGETS,('//experimental/loom_serve/text:server',))
+        self.assertEqual(set(outputs),{'loom-serve'})
+        self.assertEqual(packaging.BAZEL_TARGETS,{'loom-serve':'//:loom-serve'})
         self.assertEqual(query.call_count,1)
-        self.assertEqual(run.call_args.args[0][-1],packaging.BAZEL_TARGETS[0])
+        self.assertEqual(run.call_args.args[0][-1],packaging.BAZEL_TARGETS['loom-serve'])
         self.assertNotIn('epoch_check',' '.join(run.call_args.args[0]))
 
     def test_staging_removes_stale_binary_and_preserves_runtime(self):
@@ -45,10 +45,10 @@ class PackagingTest(unittest.TestCase):
         (native/'bin/loom-qwen-epoch-check').write_text('stale checker')
         (native/'lib').mkdir()
         (native/'lib/stale.so').write_text('stale library')
-        outputs=packaging.stage_native_payload(native,{'loom-text-server':server},rocm,hrx,needed_libraries=lambda _:())
-        self.assertEqual({path.name for path in (native/'bin').iterdir()},{'loom-text-server'})
+        outputs=packaging.stage_native_payload(native,{'loom-serve':server},rocm,hrx,needed_libraries=lambda _:())
+        self.assertEqual({path.name for path in (native/'bin').iterdir()},{'loom-serve'})
         self.assertFalse((native/'lib/stale.so').exists())
-        self.assertTrue((native/'bin/loom-text-server').stat().st_mode & 0o111)
+        self.assertTrue((native/'bin/loom-serve').stat().st_mode & 0o111)
         for name in packaging.ROCM_RUNTIME_ROOTS:
             self.assertIn(native/name,outputs)
 
@@ -56,7 +56,8 @@ class PackagingTest(unittest.TestCase):
         package=self.root/'staged'
         catalog=packaging.stage_loom_source_catalog(package)
         members={
-            'hrx_solutions/_native/bin/loom-text-server':b'server',
+            'hrx_solutions/_native/bin/loom-serve':b'server',
+            'hrx_solutions/_native/share/loom-serve/LICENSE':b'license',
             'hrx_solutions/_native/lib/libhsa-runtime64.so.1':b'hsa',
             'hrx_solutions/_native/lib/libhsa-amd-aqlprofile64.so.1':b'profile',
         }

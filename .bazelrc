@@ -1,0 +1,35 @@
+common --enable_bzlmod
+common --enable_platform_specific_config
+common --check_direct_dependencies=error
+common --lockfile_mode=error
+common:lockfile-update --lockfile_mode=update
+
+build --incompatible_strict_action_env
+build --guard_against_concurrent_changes
+build --enable_runfiles
+build --incompatible_default_to_explicit_init_py
+
+# Native runtime drivers and compiler targets for the serving solution.
+build --@hrx_system//runtime/config/hal:drivers=task,amdgpu
+build --@hrx_system//loom/config/target:enable=amdgpu,vm,x86
+
+common --repo_env=IREE_DEPENDENCY_MODE=pinned
+common --repo_env=IREE_ROCM_DEPENDENCY_MODE=pinned
+common --repo_env=IREE_HAL_AMDGPU_DEVICE_TOOLCHAIN=rocm
+common --repo_env=IREE_ROCM_PATH
+common --repo_env=CC
+common --repo_env=CXX
+
+build:opt --compilation_mode=opt
+build:opt --features=thin_lto
+build:opt --copt=-O3
+build:opt --cxxopt=-O3
+build:opt --host_copt=-O3
+build:opt --host_cxxopt=-O3
+
+# Native executables are installed beside ../lib in the wheel.
+build:linux --linkopt='-Wl,--enable-new-dtags,-rpath,$ORIGIN/../lib'
+
+test --test_output=errors
+try-import %workspace%/.bazelrc.configured
+try-import %workspace%/.bazelrc.local

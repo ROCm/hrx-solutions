@@ -16,6 +16,11 @@ policy explicit in source while sharing native scheduling and execution
 infrastructure. Its [implementation guide](https://github.com/ROCm/hrx-solutions/blob/main/loom-pipeline/llm/README.md)
 explains the boundaries and how to change them.
 
+The solution helpers are being adapted to upstream's current serving
+contract. Qwen compatibility validation inspects GGUF descriptors and tokenizer
+configuration on CPU. The managed Qwen startup adapter still needs migration
+to model JSON documents.
+
 ## Install
 
 On Linux x86-64 with Python 3.9 or newer, preferably in a virtual environment:

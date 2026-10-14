@@ -1,5 +1,11 @@
 # LLM pipelines: an implementation guidebook
 
+> **Upstream migration in progress:** The Python solution helpers and Qwen
+> catalog are retained. This guide describes their earlier native serving
+> contract; validation and startup adapters still need migration to the
+> current server. See the [serving walkthrough](../../docs/solutions/llm-serving.md)
+> for the current limitations.
+
 This guide traces the LLM serving solution from model import through generated
 tokens. Use the [serving walkthrough](../../docs/solutions/llm-serving.md) to
 run it first, then return here to change model policy, kernels, or integration.
@@ -30,8 +36,9 @@ Read this guide in execution order, then follow the
 editing task, see [changing chat framing](#example-changing-chat-framing).
 The [evidence roadmap](#evidence-roadmap) describes measurements to collect
 after establishing correctness. Native paths below are relative to
-`experimental/loom_serve/` in the HRX commit from
-[`deps.lock`](../../deps.lock). Local builds fetch it into `.deps/hrx/`.
+`experimental/loom_serve/` in the earlier HRX revision documented under
+[Provenance](#provenance).
+Current native builds use the dependency in [`MODULE.bazel`](../../MODULE.bazel).
 
 ## Why these boundaries matter
 
@@ -148,7 +155,7 @@ selection and managed server startup.
 [`_launcher.py`](../../binding/python/_launcher.py) constructs the environment
 for bundled native libraries. Linux binaries also receive a relative
 `$ORIGIN/../lib` RUNPATH from
-[`python_packaging.py`](../../build_tools/python_packaging.py).
+[`.bazelrc`](../../.bazelrc).
 
 ### The source catalog is the runtime input
 
