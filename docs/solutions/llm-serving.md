@@ -1,5 +1,13 @@
 # LLM serving
 
+> **Upstream migration in progress:** The setup/start commands and their
+> supporting workflows remain part of this solution. The current wheel uses
+> upstream's new `loom-serve` executable. Qwen validation needs a compatible
+> external checker (`--checker` or `HRX_QWEN_EPOCH_CHECK`), and managed Qwen
+> startup still needs its adapter ported to model JSON documents. The Qwen
+> validation/start commands below describe that intended workflow; they are
+> not yet an end-to-end working path with the new native server.
+
 Run a Qwen model on a local AMD GPU, query its streaming chat endpoint, and
 connect Pi.
 
@@ -103,7 +111,7 @@ loom-serve-setup models validate "$MODEL_ID" --pipeline qwen
 loom-serve-setup models list
 ```
 
-Validation runs the bundled Qwen correctness checker on the GPU and records
+Validation runs the configured Qwen correctness checker on the GPU and records
 the pipeline after success. It can take time to load weights and compile
 kernels; the default timeout is 1,800 seconds. This checks execution against
 the pipeline, beyond the file-format checks performed during import.

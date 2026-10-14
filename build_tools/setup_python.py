@@ -14,14 +14,12 @@ try:
     from .python_packaging import (
         REPO_ROOT,
         discover_bazel,
-        discover_hrx_source,
         read_bazel_repo_env,
     )
 except ImportError:
     from python_packaging import (
         REPO_ROOT,
         discover_bazel,
-        discover_hrx_source,
         read_bazel_repo_env,
     )
 
@@ -155,7 +153,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Replace an incompatible existing .bazelrc.local.",
+        help="Replace an incompatible existing .bazelrc.configured.",
     )
     return parser.parse_args()
 
@@ -165,7 +163,6 @@ def main() -> int:
     if not args.rocm:
         raise SystemExit("--rocm is required when no ROCm path is exported")
     try:
-        hrx_source = discover_hrx_source()
         bazel = discover_bazel(args.bazel)
         bazel_version = validate_bazel(bazel)
         rocm_root, cc, cxx = validate_rocm_root(args.rocm)
@@ -174,7 +171,7 @@ def main() -> int:
             raise SystemExit(f"{error}\n\n{BAZELISK_INSTRUCTIONS}") from error
         raise SystemExit(str(error)) from error
 
-    rc_path = REPO_ROOT / ".bazelrc.local"
+    rc_path = REPO_ROOT / ".bazelrc.configured"
     values = configured_values(rocm_root, cc, cxx)
     if rc_path.exists() and bazelrc_is_compatible(rc_path, values):
         action = "Validated"
@@ -189,7 +186,6 @@ def main() -> int:
     print(f"{action} {rc_path}")
     print(f"Bazel: {bazel} ({bazel_version})")
     print(f"ROCm: {rocm_root}")
-    print(f"HRX source: {hrx_source}")
     print("Python wheel prerequisites are configured.")
     return 0
 

@@ -2,8 +2,8 @@
 /build/
 /dist/
 /*.egg-info/
+/.bazelrc.configured
 /.bazelrc.local
 __pycache__/
 *.py[cod]
 *.log
-.deps/

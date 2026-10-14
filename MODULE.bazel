@@ -1,0 +1,14 @@
+module(
+    name = "hrx_solutions",
+    version = "0.0.0",
+    bazel_compatibility = [">=9.2.0"],
+)
+
+# HRX source pin. For local development, pass
+# --override_module="hrx=$PWD/../hrx-system" from the shell.
+bazel_dep(name = "hrx", version = "0.0.0", repo_name = "hrx_system")
+git_override(
+    module_name = "hrx",
+    remote = "https://github.com/ROCm/hrx-system.git",
+    commit = "28d44d696030c65fc2ec91dd5a00e3d84166d5ca",
+)

@@ -9,7 +9,7 @@ weights. There is no nightly PyPI publication or source-distribution upload.
 
 `version.json` is the source of truth for local builds and CI. Its
 `package-version` is read by setuptools; there is no environment-variable
-version override. `deps.lock` separately pins the HRX source dependency.
+version override. `MODULE.bazel` pins the HRX source dependency.
 
 | Kind | Package version | Release tag |
 | --- | --- | --- |
@@ -127,6 +127,7 @@ Check the GitHub assets and PyPI project after success. For example:
 
 ```bash
 python -m pip install --upgrade 'hrx-solutions==0.3.0'
+loom-serve --help
 loom-serve-setup --help
 ```
 

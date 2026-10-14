@@ -174,9 +174,10 @@ class _QwenPipeline:
             return ValidationResult(
                 False,
                 self.identifier,
-                "The Qwen compatibility checker (HRX epoch_check) is unavailable. "
-                "Build //experimental/loom_serve/models/qwen:epoch_check from the "
-                "pinned HRX checkout, or set HRX_QWEN_EPOCH_CHECK to its executable.",
+                "The Qwen compatibility checker is unavailable. The current wheel "
+                "does not bundle the retired HRX epoch_check executable. Supply a "
+                "compatible external checker with --checker or HRX_QWEN_EPOCH_CHECK; "
+                "the Qwen validation adapter still needs migration to current HRX.",
             )
 
         catalog = _qwen_catalog()
@@ -254,8 +255,6 @@ def _find_qwen_checker(
     override: Optional[Union[str, os.PathLike[str]]],
 ) -> Optional[Path]:
     candidates: list[str] = []
-    packaged = Path(__file__).resolve().parent / "_native" / "bin" / "loom-qwen-epoch-check"
-    candidates.append(str(packaged))
     if override is not None:
         candidates.append(os.fspath(override))
     configured = os.environ.get("HRX_QWEN_EPOCH_CHECK")
@@ -266,17 +265,6 @@ def _find_qwen_checker(
         if found:
             candidates.append(found)
 
-    # Developer checkout convenience. Release wheels can provide the checker
-    # on PATH or through HRX_QWEN_EPOCH_CHECK without depending on this layout.
-    repo = Path(__file__).resolve().parents[2]
-    hrx = repo / ".deps" / "hrx"
-    candidates.extend(
-        str(hrx / relative)
-        for relative in (
-            "bazel-bin/experimental/loom_serve/models/qwen/epoch_check",
-            "bazel-bin/experimental/loom_serve/models/qwen/epoch_check_/epoch_check",
-        )
-    )
     for candidate in candidates:
         path = Path(candidate).expanduser()
         if path.is_file() and os.access(path, os.X_OK):
