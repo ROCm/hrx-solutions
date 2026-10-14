@@ -21,11 +21,11 @@ HRX runtime. The table describes the packaged example and its checks:
 
 | Area | Current coverage |
 | --- | --- |
-| Model | Qwen3.8-27B with UD-Q5_K_XL GGUF tensor layouts and the matching tokenizer, pinned below. The `qwen` pipeline ID selects this implementation. |
+| Model | Qwen3.8-27B UD-Q5_K_XL with its matching tokenizer (`qwen`, the default), or Qwen3.5-0.8B UD-Q5_K_XL with its own tokenizer (`qwen-08b`, explicit selection). The 27B reference is pinned below. |
 | Platform | Linux x86-64 and Python 3.9 or newer. The pinned sources have been exercised upstream on `gfx1100` and `gfx1151`; other devices need validation. |
 | Chat | Streaming responses with greedy generation (`stream: true`, `temperature: 0`). The current Qwen policy rejects thinking mode. |
 | Tools | Function-tool schemas, generated calls, and assistant/tool follow-up history, with Qwen-specific framing and parsing in Loom source. Pi configuration is included. |
-| Speculation | The launcher enables multi-token prediction (MTP) at depth three by default; `--no-mtp` disables it. |
+| Speculation | MTP defaults to depth three for 27B; `--no-mtp` disables it. The 0.8B checkpoint has no MTP weights, so automatic MTP is disabled and explicit `--mtp` requests are rejected. |
 | Compatibility check | `models validate` inspects GGUF architecture metadata and exact tensor shapes/types on CPU, including MTP tensors, and checks the matching tokenizer configuration. Numerical, HTTP, tool-use, and MTP execution checks remain [upstream checks](../../loom-pipeline/llm/README.md#developing-and-checking-a-change). |
 
 See the [pinned upstream text guide](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/text/README.md)

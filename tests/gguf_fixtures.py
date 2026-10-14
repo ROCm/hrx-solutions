@@ -9,8 +9,8 @@ from binding.python.gguf import tensor_size
 PROFILE_PATH = Path(__file__).resolve().parents[1] / 'loom-pipeline/llm/qwen/qwen_27b/compatibility.json'
 
 
-def profile():
-    return json.loads(PROFILE_PATH.read_text())
+def profile(architecture='qwen_27b'):
+    return json.loads((PROFILE_PATH.parent.parent / architecture / 'compatibility.json').read_text())
 
 
 def expected_tensors(contract=None):
@@ -18,8 +18,11 @@ def expected_tensors(contract=None):
     result = dict(contract['tensors']['global'])
     for layer in range(contract['base_layer_count']):
         family = 'attention' if layer % contract['full_attention_interval'] == 3 else 'gdn'
-        result.update({f'blk.{layer}.{name}': value for name, value in contract['tensors'][family].items()})
-    result.update({f"blk.{contract['mtp_layer']}.{name}": value for name, value in contract['tensors']['mtp'].items()})
+        entries = dict(contract['tensors'][family])
+        entries.update(contract['tensors'].get('layer_overrides', {}).get(str(layer), {}))
+        result.update({f'blk.{layer}.{name}': value for name, value in entries.items()})
+    if contract['mtp_layer'] is not None:
+        result.update({f"blk.{contract['mtp_layer']}.{name}": value for name, value in contract['tensors']['mtp'].items()})
     return result
 
 

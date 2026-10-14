@@ -11,4 +11,7 @@ git_override(
     module_name = "hrx",
     remote = "https://github.com/ROCm/hrx-system.git",
     commit = "28d44d696030c65fc2ec91dd5a00e3d84166d5ca",
+    # Normalize generated-file output names when HRX is an external module.
+    patches = ["//build_tools/patches:hrx-generated-files-external-path.patch"],
+    patch_strip = 1,
 )

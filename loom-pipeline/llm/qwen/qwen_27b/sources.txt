@@ -54,3 +54,5 @@ weights.loom
 ../programs/qwen38/model_decode.loom
 ../programs/qwen38/model_prefill.loom
 ../programs/qwen38/output_head_decode.loom
+../programs/qwen38/ffn.loom
+../programs/qwen38/embedding.loom

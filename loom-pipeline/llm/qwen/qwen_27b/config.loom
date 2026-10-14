@@ -16,6 +16,25 @@ config.def @qwen38.greedy_argmax.output_capacity = 248320 : index
 
 // Authoritative compiled shape for the shipped Qwen 27B Q5_K_XL architecture.
 // Derived extents are explicit to preserve current packing, alignment and rounding.
+// Retain Q5 embeddings, untied output, and the optimized prepared-weight recipes.
+config.def @qwen.model.embedding_quantization = 5 : index
+config.def @qwen.model.tie_word_embeddings = 0 : index
+config.def @qwen.model.projection_implementation = 0 : index
+// Layer masks select only canonical recipes; they are inactive for this catalog.
+config.def @qwen.model.ffn_gate_q4_layers = 0 : i32
+config.def @qwen.model.ffn_gate_q6_layers = 0 : i32
+config.def @qwen.model.ffn_down_q6_layers = 0 : i32
+config.def @qwen.model.attention_q6_layers = 0 : i32
+// Canonical encoding extents must resolve even when their recipes are inactive.
+config.def @qwen.model.ffn_gate_q4_weight_bytes = 50135040 : index
+config.def @qwen.model.ffn_gate_q5_weight_bytes = 61276160 : index
+config.def @qwen.model.ffn_gate_q6_weight_bytes = 73113600 : index
+config.def @qwen.model.ffn_down_q5_weight_bytes = 61276160 : index
+config.def @qwen.model.ffn_down_q6_weight_bytes = 73113600 : index
+config.def @qwen.model.query_q5_weight_bytes = 43253760 : index
+config.def @qwen.model.query_q6_weight_bytes = 51609600 : index
+config.def @qwen.model.key_q5_weight_bytes = 3604480 : index
+config.def @qwen.model.key_q6_weight_bytes = 4300800 : index
 config.def @qwen.model.attention_heads = 24 : index
 config.def @qwen.model.attention_partial_bytes = 247680 : index
 config.def @qwen.model.attention_partial_split_bytes = 24768 : index

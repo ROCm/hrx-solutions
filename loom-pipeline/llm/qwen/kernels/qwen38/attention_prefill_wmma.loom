@@ -9,6 +9,7 @@
 // concrete wrappers resolve the model's cache-capacity configuration.
 
 // Model geometry is supplied by the selected architecture catalog.
+config.decl @qwen.model.kv_heads : index
 config.decl @qwen.model.attention_heads : index
 config.decl @qwen.model.head_size : index
 config.decl @qwen.model.kv_size : index
@@ -37,7 +38,9 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
   %c2 = index.constant 2 : index
   %c3 = index.constant 3 : index
   %c4 = index.constant 4 : index
-  %c6 = index.constant 6 : index
+  %query_heads = config.get @qwen.model.attention_heads : index
+  %key_heads = config.get @qwen.model.kv_heads : index
+  %queries_per_kv = index.div %query_heads, %key_heads : index
   %c15 = index.constant 15 : index
   %c16 = index.constant 16 : index
   %c64 = index.constant 64 : index
@@ -81,10 +84,10 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
   %context_count = index.assume %context_count0 [range(%context_count0, 1, 262144), le(%context_count0, %logical_capacity)] : index
   %full_block_count = index.div %context_count, %c64 : index
   %full_context_count0 = index.mul %full_block_count, %c64 : index
-  %full_context_count = index.assume %full_context_count0 [range(%full_context_count0, 0, 262144), mul(%full_context_count0, 64)] : index
+  %full_context_count = index.assume %full_context_count0 [range(%full_context_count0, 0, 262144), multiple_of(%full_context_count0, 64)] : index
 
   %query_head_base = index.mul %query_head, %c256 : index
-  %key_value_head = index.div %query_head, %c6 : index
+  %key_value_head = index.div %query_head, %queries_per_kv : index
   %key_value_head_base = index.mul %key_value_head, %c256 : index
   %subgroup_score_column = index.mul %subgroup, %c16 : index
   %subgroup_query_row = index.mul %subgroup, %c4 : index
@@ -112,7 +115,9 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
 
   %query_transposed_layout = encoding.layout.strided [1, 264] : encoding<layout>
   %probability_transposed_layout = encoding.layout.strided [1, 24] : encoding<layout>
-  %activation_row_bytes = index.constant 24576 : offset
+  %c4_bytes = index.constant 4 : index
+  %activation_row_bytes0 = index.mul %shape_attention_width, %c4_bytes : index
+  %activation_row_bytes = index.cast %activation_row_bytes0 : index to offset
   %activation_origin = index.scale %token_begin, %activation_row_bytes : index, offset -> offset
   %query_view = buffer.view %query[%activation_origin] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
   %gate_view = buffer.view %gate[%activation_origin] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>

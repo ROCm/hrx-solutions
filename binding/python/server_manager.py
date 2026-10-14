@@ -66,6 +66,31 @@ def _matches(record: dict[str, Any]) -> bool:
     )
 
 
+def _wait_for_process_identity(
+    process: subprocess.Popen,
+    executable: Path,
+    argv: list[str],
+    deadline: float,
+) -> dict[str, Any]:
+    """Wait for /proc to reflect exec while the child is still ours and alive."""
+    expected_executable = os.path.realpath(str(executable))
+    while process.poll() is None:
+        # exe and cmdline are separate /proc reads and can straddle exec.
+        info = _process_info(process.pid)
+        if (
+            info
+            and os.path.realpath(info["executable"]) == expected_executable
+            and info["command"] == argv
+            and info["process_group"] == process.pid
+        ):
+            return info
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.01, remaining))
+    raise RuntimeError(f"Could not verify newly launched server process {process.pid}")
+
+
 def _load_records() -> list[dict[str, Any]]:
     records = []
     for path in sorted(_server_dir().glob("*.json")):
@@ -207,13 +232,10 @@ def launch(
                 start_new_session=True, close_fds=True,
                 env=dict(environment) if environment is not None else None,
             )
-        info = _process_info(process.pid)
-        if (
-            not info
-            or os.path.realpath(info["executable"]) != os.path.realpath(str(executable))
-            or info["command"] != list(argv)
-        ):
-            raise RuntimeError(f"Could not verify newly launched server process {process.pid}")
+        deadline = time.monotonic() + ready_timeout
+        info = _wait_for_process_identity(
+            process, executable, argv, min(deadline, time.monotonic() + 1.0)
+        )
         record.update({
             "pid": process.pid,
             "process_start_time": info["start_time"],
@@ -222,7 +244,6 @@ def launch(
         with state_store.state_lock():
             state_store.write_json_atomic(_record_path(server_id), record)
 
-        deadline = time.monotonic() + ready_timeout
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise RuntimeError(

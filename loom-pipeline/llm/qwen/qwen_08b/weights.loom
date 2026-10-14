@@ -1,0 +1,13 @@
+// Copyright 2026 The IREE Authors
+// Licensed under the Apache License v2.0 with LLVM Exceptions.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+// All mixed Q4_K/Q5_K/Q6_K tensors retain checkpoint byte order in residency.
+// An empty preparation root with zero result bytes means no transformation.
+global.rodata.def @unchanged = bytes("")
+
+func.def public @prepare_weight(%key: buffer) -> (buffer, i64) {
+  %root = global.load @unchanged : buffer
+  %bytes = scalar.constant 0 : i64
+  func.return %root, %bytes : buffer, i64
+}

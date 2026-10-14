@@ -83,11 +83,13 @@ kernel.def target(@qwen38_layer_gfx11_wave32) export("qwen38_rmsnorm_f32_prefill
 }
 
 // Adds one projection result into its residual stream. Four adjacent F32
-// elements travel together so the common 5120-wide boundary launches only
-// five workgroups.
+// elements travel together; each workgroup covers 1024 hidden channels.
 kernel.def export("qwen38_residual_add_f32_decode") @qwen38_residual_add_f32_decode() {
   %c1 = index.constant 1 : index
-  %workgroup_count = index.constant 5 : index
+  %hidden_size = config.get @qwen.model.hidden_size : index
+  %channels_per_group = index.constant 1024 : index
+  %bounded_hidden_size = index.assume %hidden_size [range(%hidden_size, 1024, 32768), multiple_of(%hidden_size, 1024)] : index
+  %workgroup_count = index.div %bounded_hidden_size, %channels_per_group : index
   %workgroup_size = index.constant 256 : index
   kernel.launch.config workgroups(%workgroup_count, %c1, %c1) workgroup_size(%workgroup_size, %c1, %c1) : index
 } launch(%lhs: buffer, %rhs: buffer, %output: buffer) {
@@ -100,7 +102,7 @@ kernel.def export("qwen38_residual_add_f32_decode") @qwen38_residual_add_f32_dec
   %workgroup_base = index.mul %workgroup, %workgroup_size : index
   %vector_ordinal = index.add %workgroup_base, %lane : index
   %element0 = index.mul %vector_ordinal, %c4 : index
-  %element = index.assume %element0 [range(%element0, 0, 5116), mul(%element0, 4)] : index
+  %element = index.assume %element0 [range(%element0, 0, 32764), multiple_of(%element0, 4), lt(%element0, %shape_hidden_size)] : index
   %lhs_view = buffer.view %lhs[%c0_offset] : buffer -> view<[%shape_hidden_size]xf32>
   %rhs_view = buffer.view %rhs[%c0_offset] : buffer -> view<[%shape_hidden_size]xf32>
   %output_view = buffer.view %output[%c0_offset] : buffer -> view<[%shape_hidden_size]xf32>
@@ -116,7 +118,10 @@ kernel.def export("qwen38_residual_add_f32_decode") @qwen38_residual_add_f32_dec
 // the command-program trace proves that extra materialization is significant.
 kernel.def export("qwen38_swiglu_f32_decode") @qwen38_swiglu_f32_decode() {
   %c1 = index.constant 1 : index
-  %workgroup_count = index.constant 68 : index
+  %ffn_size = config.get @qwen.model.ffn_size : index
+  %channels_per_group = index.constant 256 : index
+  %bounded_ffn_size = index.assume %ffn_size [range(%ffn_size, 256, 32768), multiple_of(%ffn_size, 256)] : index
+  %workgroup_count = index.div %bounded_ffn_size, %channels_per_group : index
   %workgroup_size = index.constant 256 : index
   kernel.launch.config workgroups(%workgroup_count, %c1, %c1) workgroup_size(%workgroup_size, %c1, %c1) : index
 } launch(%gate: buffer, %up: buffer, %output: buffer) {
@@ -127,7 +132,7 @@ kernel.def export("qwen38_swiglu_f32_decode") @qwen38_swiglu_f32_decode() {
   %c0_offset = index.constant 0 : offset
   %workgroup_base = index.mul %workgroup, %workgroup_size : index
   %element0 = index.add %workgroup_base, %lane : index
-  %element = index.assume %element0 [range(%element0, 0, 17407)] : index
+  %element = index.assume %element0 [range(%element0, 0, 32767), lt(%element0, %shape_ffn_size)] : index
   %gate_view = buffer.view %gate[%c0_offset] : buffer -> view<[%shape_ffn_size]xf32>
   %up_view = buffer.view %up[%c0_offset] : buffer -> view<[%shape_ffn_size]xf32>
   %output_view = buffer.view %output[%c0_offset] : buffer -> view<[%shape_ffn_size]xf32>

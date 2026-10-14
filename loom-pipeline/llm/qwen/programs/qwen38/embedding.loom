@@ -1,0 +1,37 @@
+// Architecture-selected token embedding. The Q6 consumer retains the existing
+// F16 decode/extend arithmetic; the Q5 consumer retains its F32 arithmetic.
+config.decl @qwen.model.embedding_quantization : index
+config.decl @qwen.model.embedding_weight_bytes : index
+
+kernel.decl @qwen38_token_embedding_q5k_f32_decode() launch(%token_id: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_token_embedding_q6k_f16_decode() launch(%token_id: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_token_embedding_q5k_f32_prefill(%token_count: index) launch(%token_ids: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_token_embedding_q6k_f16_prefill(%token_count: index) launch(%token_ids: buffer, %weight: buffer, %output: buffer)
+
+command.program.def public @qwen38_embedding_decode() launch(%parameters: buffer, %token_ids: buffer, %residual: buffer) {
+  %embedding_weight_bytes = config.get @qwen.model.embedding_weight_bytes : index
+  %embedding = command.parameter %parameters, "token_embd.weight" : view<[%embedding_weight_bytes]xi8>
+  %embedding_quantization = config.get @qwen.model.embedding_quantization : index
+  %six = index.constant 6 : index
+  %q6_embedding = index.cmp eq, %embedding_quantization, %six : index
+  scf.if %q6_embedding {
+    kernel.launch @qwen38_token_embedding_q6k_f16_decode(%token_ids, %embedding, %residual) : (buffer, view<[%embedding_weight_bytes]xi8>, buffer)
+  } else {
+    kernel.launch @qwen38_token_embedding_q5k_f32_decode(%token_ids, %embedding, %residual) : (buffer, view<[%embedding_weight_bytes]xi8>, buffer)
+  }
+  command.return
+}
+
+command.program.def public @qwen38_embedding_prefill(%token_count: index) launch(%parameters: buffer, %token_ids: buffer, %residual: buffer) where [range(%token_count, 1, 512)] {
+  %embedding_weight_bytes = config.get @qwen.model.embedding_weight_bytes : index
+  %embedding = command.parameter %parameters, "token_embd.weight" : view<[%embedding_weight_bytes]xi8>
+  %embedding_quantization = config.get @qwen.model.embedding_quantization : index
+  %six = index.constant 6 : index
+  %q6_embedding = index.cmp eq, %embedding_quantization, %six : index
+  scf.if %q6_embedding {
+    kernel.launch @qwen38_token_embedding_q6k_f16_prefill[%token_count](%token_ids, %embedding, %residual) : [index](buffer, view<[%embedding_weight_bytes]xi8>, buffer)
+  } else {
+    kernel.launch @qwen38_token_embedding_q5k_f32_prefill[%token_count](%token_ids, %embedding, %residual) : [index](buffer, view<[%embedding_weight_bytes]xi8>, buffer)
+  }
+  command.return
+}

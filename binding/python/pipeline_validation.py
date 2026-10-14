@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -44,6 +45,38 @@ class Pipeline(Protocol):
 
 
 _PIPELINES: dict[str, Pipeline] = {}
+_QWEN_CATALOGS = {"qwen": "qwen_27b", "qwen-08b": "qwen_08b"}
+
+
+def resolve_catalog(pipeline: str) -> Path:
+    """Resolve an explicitly selected catalog in source or installed layouts."""
+    package = Path(__file__).resolve().parent
+    relative = Path("qwen") / _QWEN_CATALOGS[pipeline] if pipeline in _QWEN_CATALOGS else Path(pipeline)
+    candidates = (
+        package / "loom-pipeline" / "llm" / relative,
+        package.parents[1] / "loom-pipeline" / "llm" / relative,
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+    raise FileNotFoundError(
+        f"No source catalog is installed for pipeline {pipeline!r}; searched: "
+        + ", ".join(str(path) for path in candidates)
+    )
+
+
+def mtp_enabled(catalog: Path, requested: bool | None = None) -> bool:
+    """Apply the selected catalog's MTP capability before native execution."""
+    if not (Path(catalog) / "compatibility.json").is_file():
+        return requested is not False
+    profile = load_profile(catalog)
+    supported = profile.get("capabilities", {}).get("mtp", profile["mtp_layer"] is not None)
+    if requested is True and not supported:
+        raise ValueError(
+            f"Model profile {profile['identifier']!r} does not support MTP: "
+            "this checkpoint has no MTP weights."
+        )
+    return supported if requested is None else requested
 
 
 def register_pipeline(pipeline: Pipeline) -> None:
@@ -98,7 +131,8 @@ def validate_model(
 class _QwenPipeline:
     """Header-only compatibility with the packaged Qwen architecture contract."""
 
-    identifier = "qwen"
+    def __init__(self, identifier: str = "qwen"):
+        self.identifier = identifier
 
     def catalog_for_model(self, catalog: Path, model_id: str) -> Path:
         """Make the Qwen HTTP model name match the installed model ID."""
@@ -147,7 +181,7 @@ class _QwenPipeline:
 
     def validate(self, model: ModelFiles) -> ValidationResult:
         try:
-            profile = load_profile(_qwen_catalog())
+            profile = load_profile(resolve_catalog(self.identifier))
             weights = inspect_gguf(model.weights)
             problems = compare_gguf(weights, profile) + compare_tokenizer(model.tokenizer, profile)
         except (OSError, ValueError) as exc:
@@ -162,19 +196,50 @@ class _QwenPipeline:
             )
         return ValidationResult(
             True, self.identifier,
-            f"Model matches {profile['identifier']}: 64 base layers and MTP, "
+            f"Model matches {profile['identifier']}: {profile['base_layer_count']} base layers "
+            f"{'and MTP' if profile['mtp_layer'] is not None else 'without MTP'}, "
             f"{len(weights.tensors)} tensors checked from GGUF descriptors; matching tokenizer configuration.",
         )
 
 
-def _qwen_catalog() -> Path:
-    # Source checkout layout. Wheel packaging can move this behind the same
-    # adapter by placing assets adjacent to the Python package.
-    repo_catalog = Path(__file__).resolve().parents[2] / "loom-pipeline" / "llm" / "qwen" / "qwen_27b"
-    if repo_catalog.is_dir():
-        return repo_catalog
-    return Path(__file__).resolve().parent / "loom-pipeline" / "llm" / "qwen" / "qwen_27b"
+for _identifier in _QWEN_CATALOGS:
+    register_pipeline(_QwenPipeline(_identifier))
 
 
-
-register_pipeline(_QwenPipeline())
+def deployment_for_model(
+    catalog: Path, model: ModelFiles, model_id: str, *, rows: int = 4,
+    context_capacity: int = 16384, pool_capacity: int = 65536,
+    prefill_capacity: int = 512, draft_depth: int = 0,
+) -> Path:
+    """Write a native deployment document outside the packaged source catalog."""
+    if draft_depth < 0 or draft_depth > 3:
+        raise ValueError("Qwen catalogs support --mtp-depth from 1 through 3 (0 disables MTP)")
+    mtp_enabled(catalog, draft_depth > 0)
+    if pool_capacity <= 0:
+        raise ValueError("The pinned Loom Serve runtime requires positive --pool-capacity")
+    sources = [line.strip() for line in (catalog / "sources.txt").read_text().splitlines()
+               if line.strip() and not line.strip().startswith("#")]
+    definition = {
+        "kind": "text", "prepare": "prepare.loom", "control": "control.loom",
+        "sources": [entry for entry in sources
+                    if entry not in {"prepare.loom", "control.loom", "weights.loom"}],
+        # Preserve parser-selecting extensions on symlinked model assets.
+        "weights": str(model.weights.absolute()),
+        "tokenizer": str(model.tokenizer.absolute()),
+        "rows": rows, "context_capacity": context_capacity,
+        "pool_capacity": pool_capacity, "prefill_capacity": prefill_capacity,
+        "draft_depth": draft_depth, "options": {},
+    }
+    document = {"name": model_id, "device": 0,
+                "base_directory": str(catalog.absolute()), "definition": definition}
+    content = json.dumps(document, indent=2) + "\n"
+    digest = hashlib.sha256(content.encode()).hexdigest()[:20]
+    directory = Path.home() / ".cache" / "hrx-solutions" / "deployments"
+    directory.mkdir(parents=True, exist_ok=True)
+    output = directory / f"{digest}.json"
+    if not output.exists():
+        with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as temporary:
+            temporary.write(content)
+            staging = Path(temporary.name)
+        staging.replace(output)
+    return output

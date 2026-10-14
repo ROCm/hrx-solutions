@@ -40,19 +40,7 @@ def _model_files(model_id: str, model_root: Optional[Path]) -> ModelFiles:
 
 def _catalog(pipeline: str) -> Path:
     """Resolve the selected pipeline catalog in source or installed layouts."""
-    package = Path(__file__).resolve().parent
-    catalog_path = Path(pipeline) / "qwen_27b" if pipeline == "qwen" else Path(pipeline)
-    candidates = (
-        package / "loom-pipeline" / "llm" / catalog_path,
-        package.parents[1] / "loom-pipeline" / "llm" / catalog_path,
-    )
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate.resolve()
-    raise FileNotFoundError(
-        f"No source catalog is installed for pipeline {pipeline!r}; searched: "
-        + ", ".join(str(path) for path in candidates)
-    )
+    return pipeline_validation.resolve_catalog(pipeline)
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
@@ -360,29 +348,28 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             f"'loom-serve-setup models validate {args.model_id} --pipeline <pipeline>' "
             "or pass --pipeline explicitly."
         )
+    selected_catalog = _catalog(pipeline)
+    requested_mtp = args.mtp
+    if args.mtp_depth is not None:
+        if requested_mtp is False:
+            raise ValueError("--mtp-depth cannot be combined with --no-mtp")
+        requested_mtp = True
+    enabled_mtp = pipeline_validation.mtp_enabled(selected_catalog, requested_mtp)
+    mtp_depth = args.mtp_depth if args.mtp_depth is not None else 3
     files = _model_files(args.model_id, args.model_root)
-    catalog = pipeline_validation.catalog_for_model(pipeline, _catalog(pipeline), args.model_id)
+    catalog = pipeline_validation.catalog_for_model(pipeline, selected_catalog, args.model_id)
     package = Path(__file__).resolve().parent
     executable = package / "_native" / "bin" / "loom-serve"
     if not executable.is_file():
         raise FileNotFoundError(f"Loom Serve binary is missing: {executable}")
-    argv = [
-        str(executable),
-        f"--model={catalog}",
-        # Preserve the visible file extensions on Hugging Face snapshot paths.
-        # Resolving the symlinks follows them to extensionless blob names,
-        # which Loom cannot use to select its GGUF parser.
-        f"--weights={files.weights.absolute()}",
-        f"--tokenizer={files.tokenizer.absolute()}",
-        f"--rows={args.rows}",
-        f"--context_capacity={args.context_capacity}",
-        f"--pool_capacity={args.pool_capacity}",
-        f"--prefill_capacity={args.prefill_capacity}",
-        f"--port={args.port}",
-        "--heartbeat_ms=1000",
-    ]
-    if not args.no_mtp:
-        argv.extend(("--mtp", f"--mtp_depth={args.mtp_depth}"))
+    deployment = pipeline_validation.deployment_for_model(
+        catalog, files, args.model_id, rows=args.rows,
+        context_capacity=args.context_capacity, pool_capacity=args.pool_capacity,
+        prefill_capacity=args.prefill_capacity,
+        draft_depth=mtp_depth if enabled_mtp else 0,
+    )
+    argv = [str(executable), "--device=amdgpu", f"--model={deployment}",
+            f"--listen=127.0.0.1:{args.port}", "--heartbeat_ms=1000"]
     if args.foreground:
         os.execve(str(executable), argv, native_environment())
     record = server_manager.launch(
@@ -391,11 +378,11 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         executable=executable,
         argv=argv,
         port=args.port,
-        model_paths=(files.weights.absolute(), files.tokenizer.absolute(), catalog.resolve()),
+        model_paths=(files.weights.absolute(), files.tokenizer.absolute(), catalog.resolve(), deployment),
         launch_options={
             "rows": args.rows, "context_capacity": args.context_capacity,
             "pool_capacity": args.pool_capacity, "prefill_capacity": args.prefill_capacity,
-            "mtp": not args.no_mtp, "mtp_depth": args.mtp_depth,
+            "mtp": enabled_mtp, "mtp_depth": mtp_depth,
         },
         ready_timeout=args.ready_timeout,
         environment=native_environment(),
@@ -644,12 +631,14 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--context-capacity", type=int, default=8192)
     serve.add_argument("--pool-capacity", type=int, default=32768)
     serve.add_argument("--prefill-capacity", type=int, default=128)
-    serve.add_argument("--no-mtp", action="store_true", help="disable multi-token prediction")
-    serve.add_argument("--mtp-depth", type=int, default=3)
+    mtp_options = serve.add_mutually_exclusive_group()
+    mtp_options.add_argument("--mtp", dest="mtp", action="store_true", help="require multi-token prediction")
+    mtp_options.add_argument("--no-mtp", dest="mtp", action="store_false", help="disable multi-token prediction")
+    serve.add_argument("--mtp-depth", type=int, help="require MTP with this depth (default: 3 for supported models)")
     serve.add_argument("--foreground", action="store_true", help="run Loom Serve in the foreground")
     serve.add_argument("--json", action="store_true", help="print the managed server record as JSON")
     serve.add_argument("--ready-timeout", type=float, default=180.0, help="seconds to wait for API readiness")
-    serve.set_defaults(handler=_cmd_serve)
+    serve.set_defaults(handler=_cmd_serve, mtp=None)
 
     servers = subparsers.add_parser(
         "servers",

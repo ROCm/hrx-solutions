@@ -1,10 +1,11 @@
-// Exact Qwen3.8-27B greedy output head.
+// Qwen greedy output head for tied and untied architecture catalogs.
 //
 // The final RMSNorm and native Q6_K vocabulary projection stay inside the
 // command program. Greedy selection consumes device-local logits and exposes
 // only selected token IDs at the issue boundary.
 
 // Model geometry is supplied by the selected architecture catalog.
+config.decl @qwen.model.tie_word_embeddings : index
 config.decl @qwen.model.argmax_partial_row_bytes : index
 
 config.decl @qwen.model.hidden_q8_row_bytes : index
@@ -37,7 +38,16 @@ command.program.def public @qwen38_output_projection_greedy(%token_count: index,
   %shape_output_weight_bytes = config.get @qwen.model.output_weight_bytes : index
   %hidden_size = config.get @qwen.model.hidden_size : index
   %vocabulary_size = config.get @qwen.model.vocabulary_size : index
-  %output_weight = command.parameter %parameters, "output.weight" : view<[%shape_output_weight_bytes]xi8>
+  %tie_word_embeddings = config.get @qwen.model.tie_word_embeddings : index
+  %tied_value = index.constant 1 : index
+  %tied = index.cmp eq, %tie_word_embeddings, %tied_value : index
+  %output_weight = scf.if %tied -> (view<[%shape_output_weight_bytes]xi8>) {
+    %embedding_weight = command.parameter %parameters, "token_embd.weight" : view<[%shape_output_weight_bytes]xi8>
+    scf.yield %embedding_weight : view<[%shape_output_weight_bytes]xi8>
+  } else {
+    %untied_weight = command.parameter %parameters, "output.weight" : view<[%shape_output_weight_bytes]xi8>
+    scf.yield %untied_weight : view<[%shape_output_weight_bytes]xi8>
+  }
   %hidden_q8_row_bytes = index.cast %shape_hidden_q8_row_bytes : index to offset
   %logits_row_bytes = index.cast %shape_logits_row_bytes : index to offset
   %partial_row_bytes = index.cast %shape_argmax_partial_row_bytes : index to offset

@@ -149,7 +149,9 @@ kernel.def export("qwen38_attention_decode") @qwen38_attention_decode() {
   %lane = index.assume %lane0 [range(%lane0, 0, 255)] : index
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
-  %c6 = index.constant 6 : index
+  %query_heads = config.get @qwen.model.attention_heads : index
+  %key_heads = config.get @qwen.model.kv_heads : index
+  %queries_per_kv = index.div %query_heads, %key_heads : index
   %c256 = config.get @qwen.model.head_size : index
   %c1024 = config.get @qwen.model.kv_size : index
   %c0_offset = index.constant 0 : offset
@@ -170,7 +172,7 @@ kernel.def export("qwen38_attention_decode") @qwen38_attention_decode() {
   %context_count = index.assume %context_count0 [range(%context_count0, 1, 262144), le(%context_count0, %cache_capacity)] : index
   %head_base = index.mul %head, %c256 : index
   %element = index.add %head_base, %lane : index
-  %key_head = index.div %head, %c6 : index
+  %key_head = index.div %head, %queries_per_kv : index
   %key_head_base = index.mul %key_head, %c256 : index
   %query_value = view.load %query_view[%element] : view<[%shape_attention_width]xf32> -> f32
   %final_max, %final_sum, %final_acc = scf.for %token = [%c0 to %context_count step %c1](%old_max = %negative_large, %old_sum = %c0_f32, %old_acc = %c0_f32 : f32, f32, f32) -> (f32, f32, f32) {

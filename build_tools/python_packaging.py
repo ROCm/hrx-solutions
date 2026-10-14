@@ -203,7 +203,7 @@ def _copy_file(source: Path, destination: Path) -> None:
 
 
 def stage_loom_source_catalog(package_root: Path) -> list[Path]:
-    """Stages checked-in pipeline sources and validates the Qwen manifest."""
+    """Stages checked-in pipeline sources and validates both Qwen manifests."""
     repository_catalog = REPO_ROOT / "loom-pipeline" / "llm"
     packaged_catalog = package_root / "loom-pipeline" / "llm"
     if packaged_catalog.exists():
@@ -212,18 +212,19 @@ def stage_loom_source_catalog(package_root: Path) -> list[Path]:
         if source.is_file():
             _copy_file(source, packaged_catalog / source.relative_to(repository_catalog))
 
-    manifest = packaged_catalog / "qwen" / "qwen_27b" / "sources.txt"
-    if not manifest.is_file():
-        raise RuntimeError(f"Checked-in Qwen source manifest is missing: {manifest}")
     catalog_root = packaged_catalog.resolve()
-    for raw_line in manifest.read_text(encoding="utf-8").splitlines():
-        relative = raw_line.strip()
-        if not relative or relative.startswith("#"):
-            continue
-        source = (manifest.parent / relative).resolve(strict=True)
-        source.relative_to(catalog_root)
-        if not source.is_file():
-            raise RuntimeError(f"Qwen manifest entry is not a file: {relative}")
+    for architecture in ("qwen_27b", "qwen_08b"):
+        manifest = packaged_catalog / "qwen" / architecture / "sources.txt"
+        if not manifest.is_file():
+            raise RuntimeError(f"Checked-in Qwen source manifest is missing: {manifest}")
+        for raw_line in manifest.read_text(encoding="utf-8").splitlines():
+            relative = raw_line.strip()
+            if not relative or relative.startswith("#"):
+                continue
+            source = (manifest.parent / relative).resolve(strict=True)
+            source.relative_to(catalog_root)
+            if not source.is_file():
+                raise RuntimeError(f"Qwen manifest entry is not a file: {relative}")
     return [path for path in packaged_catalog.rglob("*") if path.is_file()]
 
 

@@ -81,6 +81,11 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             PACKAGE_PREFIX + "setup_cli.py",
             PACKAGE_PREFIX + "model_store.py",
         }
+        for architecture in ("qwen_27b", "qwen_08b"):
+            required_files.update(
+                PIPELINE_PREFIX + f"qwen/{architecture}/{filename}"
+                for filename in ("sources.txt", "config.loom", "prepare.loom", "control.loom", "weights.loom", "compatibility.json")
+            )
         missing = sorted(required_files - names)
         if missing:
             raise RuntimeError("wheel is missing setup assets: " + ", ".join(missing))
@@ -101,13 +106,14 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         if "loom-serve-setup = hrx_solutions.setup_cli:main" not in entry_points:
             raise RuntimeError("wheel does not expose the loom-serve-setup command")
 
-        manifest_path = REPO_ROOT / "loom-pipeline" / "llm" / "qwen" / "qwen_27b" / "sources.txt"
         expected_sources = []
-        for raw_line in manifest_path.read_text(encoding="utf-8").splitlines():
-            relative = raw_line.strip()
-            if not relative or relative.startswith("#"):
-                continue
-            expected_sources.append((manifest_path.parent / relative).resolve())
+        for architecture in ("qwen_27b", "qwen_08b"):
+            manifest_path = REPO_ROOT / "loom-pipeline" / "llm" / "qwen" / architecture / "sources.txt"
+            for raw_line in manifest_path.read_text(encoding="utf-8").splitlines():
+                relative = raw_line.strip()
+                if not relative or relative.startswith("#"):
+                    continue
+                expected_sources.append((manifest_path.parent / relative).resolve())
         catalog_root = (REPO_ROOT / "loom-pipeline" / "llm").resolve()
         expected_members = {
             PIPELINE_PREFIX + path.relative_to(catalog_root).as_posix()

@@ -1,4 +1,4 @@
-// Exact Qwen3.8-27B Gated DeltaNet decode layer.
+// Qwen Gated DeltaNet decode layer.
 //
 // The program consumes the model's native UD-Q5_K_XL parameters, updates the
 // selected layer's persistent convolution and recurrent state, and advances
@@ -6,16 +6,16 @@
 // parameter names and persistent-state offsets disappear during preparation.
 
 // Model geometry is supplied by the selected architecture catalog.
+// Generic projections bypass the 27B-specific schedules and use Q8 activations.
+config.decl @qwen.model.projection_implementation : index
+
 config.decl @qwen.model.gdn_gate_row_bytes : index
 config.decl @qwen.model.gdn_inverse_row_bytes : index
 
 config.decl @qwen.model.projection_row_bytes : index
 
-config.decl @qwen.model.ffn_down_weight_bytes : index
-config.decl @qwen.model.ffn_gate_weight_bytes : index
 config.decl @qwen.model.ffn_q8_row_bytes : index
 config.decl @qwen.model.ffn_row_bytes : index
-config.decl @qwen.model.ffn_size : index
 config.decl @qwen.model.gdn_alpha_weight_bytes : index
 config.decl @qwen.model.gdn_beta_weight_bytes : index
 config.decl @qwen.model.gdn_capture_qkv_elements : index
@@ -39,13 +39,10 @@ config.decl @qwen.model.rms_epsilon : f32
 kernel.decl @ggml_quantize_q8_1_x4_f32(%token_count: index, %input_size: index) launch(%token_count: index, %input_size: index, %input: buffer, %output: buffer)
 kernel.decl @ggml_linear_q4k_q8_1_x4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
 kernel.decl @ggml_linear_q5k_q8_1_x4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
-kernel.decl @ggml_linear_q5k_q8_1_x4_channel8(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
-kernel.decl @ggml_linear_q6k_f32_decode(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
 kernel.decl @ggml_linear_q6k_q8_1_x4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
 
 kernel.decl @qwen38_rmsnorm_f32_decode() launch(%epsilon: f32, %input: buffer, %weight: buffer, %output: buffer)
 kernel.decl @qwen38_residual_add_f32_decode() launch(%lhs: buffer, %rhs: buffer, %output: buffer)
-kernel.decl @qwen38_swiglu_f32_decode() launch(%gate: buffer, %up: buffer, %output: buffer)
 kernel.decl @qwen38_gdn_conv_prepare_decode() launch(%l2_epsilon: f32, %qkv_input: buffer, %conv_weight: buffer, %conv_history: buffer, %qkv_silu: buffer, %qk_inverse_norm: buffer)
 kernel.decl @qwen38_gdn_recurrent_decode_x4() launch(%qkv_silu: buffer, %qk_inverse_norm: buffer, %alpha: buffer, %beta: buffer, %ssm_a: buffer, %dt_bias: buffer, %state: buffer, %raw_output: buffer)
 kernel.decl @qwen38_gdn_norm_gate_decode() launch(%rms_epsilon: f32, %raw_output: buffer, %norm_weight: buffer, %z: buffer, %output: buffer)
@@ -53,12 +50,16 @@ kernel.decl @qwen38_gdn_norm_gate_decode() launch(%rms_epsilon: f32, %raw_output
 // Advances one GDN layer. The parameter root is immutable and fixed during
 // command-buffer materialization. The residual and persistent state roots are
 // rebound for each sequence at issue time.
+command.program.decl @qwen38_ffn_gate_up_decode(%layer: index) launch(%parameters: buffer, %post_normalized_q8: buffer, %swiglu: buffer)
+command.program.decl @qwen38_ffn_down_decode(%layer: index) launch(%parameters: buffer, %swiglu: buffer, %residual: buffer)
+
 command.program.def public @qwen38_gdn_layer_decode(%layer: index, %gdn_ordinal: index) launch(%parameters: buffer, %residual: buffer, %gdn_state: buffer) where [range(%layer, 0, 63), range(%gdn_ordinal, 0, 47)] {
+  %projection_implementation = config.get @qwen.model.projection_implementation : index
+  %recipe_zero = index.constant 0 : index
+  %use_generic_quantized_projections = index.cmp ne, %projection_implementation, %recipe_zero : index
   %shape_gdn_gate_row_bytes = config.get @qwen.model.gdn_gate_row_bytes : index
   %shape_gdn_inverse_row_bytes = config.get @qwen.model.gdn_inverse_row_bytes : index
   %shape_projection_row_bytes = config.get @qwen.model.projection_row_bytes : index
-  %shape_ffn_down_weight_bytes = config.get @qwen.model.ffn_down_weight_bytes : index
-  %shape_ffn_gate_weight_bytes = config.get @qwen.model.ffn_gate_weight_bytes : index
   %shape_ffn_q8_row_bytes = config.get @qwen.model.ffn_q8_row_bytes : index
   %shape_ffn_row_bytes = config.get @qwen.model.ffn_row_bytes : index
   %shape_gdn_alpha_weight_bytes = config.get @qwen.model.gdn_alpha_weight_bytes : index
@@ -81,8 +82,7 @@ command.program.def public @qwen38_gdn_layer_decode(%layer: index, %gdn_ordinal:
   %hidden_size = config.get @qwen.model.hidden_size : index
   %qkv_size = config.get @qwen.model.gdn_qkv_size : index
   %gdn_size = config.get @qwen.model.gdn_width : index
-  %gate_size = index.constant 48 : index
-  %ffn_size = config.get @qwen.model.ffn_size : index
+  %gate_size = config.get @qwen.model.gdn_value_heads : index
   %epsilon = config.get @qwen.model.rms_epsilon : f32
 
   // Native GGUF parameter views. The byte-shaped quantized views preserve the
@@ -90,9 +90,6 @@ command.program.def public @qwen38_gdn_layer_decode(%layer: index, %gdn_ordinal:
   %attention_gate_weight = command.parameter %parameters, "blk.{}.attn_gate.weight"[%layer] : view<[%shape_gdn_gate_weight_bytes]xi8>
   %attention_norm_weight = command.parameter %parameters, "blk.{}.attn_norm.weight"[%layer] : view<[%shape_hidden_size]xf32>
   %qkv_weight = command.parameter %parameters, "blk.{}.attn_qkv.weight"[%layer] : view<[%shape_gdn_qkv_weight_bytes]xi8>
-  %ffn_down_weight = command.parameter %parameters, "blk.{}.ffn_down.weight"[%layer] : view<[%shape_ffn_down_weight_bytes]xi8>
-  %ffn_gate_weight = command.parameter %parameters, "blk.{}.ffn_gate.weight"[%layer] : view<[%shape_ffn_gate_weight_bytes]xi8>
-  %ffn_up_weight = command.parameter %parameters, "blk.{}.ffn_up.weight"[%layer] : view<[%shape_ffn_gate_weight_bytes]xi8>
   %post_attention_norm_weight = command.parameter %parameters, "blk.{}.post_attention_norm.weight"[%layer] : view<[%shape_hidden_size]xf32>
   %ssm_a = command.parameter %parameters, "blk.{}.ssm_a"[%layer] : view<[%shape_gdn_value_heads]xf32>
   %alpha_weight = command.parameter %parameters, "blk.{}.ssm_alpha.weight"[%layer] : view<[%shape_gdn_alpha_weight_bytes]xi8>
@@ -133,13 +130,21 @@ command.program.def public @qwen38_gdn_layer_decode(%layer: index, %gdn_ordinal:
   %z = buffer.alloca<global> align(256) %gdn_bytes : buffer
   %alpha = buffer.alloca<global> align(256) %gate_bytes : buffer
   %beta = buffer.alloca<global> align(256) %gate_bytes : buffer
-  command.concurrent {
-    kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %hidden_size, %qkv_size](%token_count, %hidden_size, %qkv_size, %normalized_q8, %qkv_weight, %qkv) : [index, index, index](index, index, index, buffer, view<[%shape_gdn_qkv_weight_bytes]xi8>, buffer)
-    kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %hidden_size, %gdn_size](%token_count, %hidden_size, %gdn_size, %normalized_q8, %attention_gate_weight, %z) : [index, index, index](index, index, index, buffer, view<[%shape_gdn_gate_weight_bytes]xi8>, buffer)
-    kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %hidden_size, %gate_size](%token_count, %hidden_size, %gate_size, %normalized_q8, %alpha_weight, %alpha) : [index, index, index](index, index, index, buffer, view<[%shape_gdn_alpha_weight_bytes]xi8>, buffer)
-    kernel.launch @ggml_linear_q4k_q8_1_x4[%token_count, %hidden_size, %gate_size](%token_count, %hidden_size, %gate_size, %normalized_q8, %beta_weight, %beta) : [index, index, index](index, index, index, buffer, view<[%shape_gdn_beta_weight_bytes]xi8>, buffer)
+  scf.if %use_generic_quantized_projections {
+    command.concurrent {
+      kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %hidden_size, %qkv_size](%token_count, %hidden_size, %qkv_size, %normalized_q8, %qkv_weight, %qkv) : [index, index, index](index, index, index, buffer, view<[%shape_gdn_qkv_weight_bytes]xi8>, buffer)
+      kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %hidden_size, %gdn_size](%token_count, %hidden_size, %gdn_size, %normalized_q8, %attention_gate_weight, %z) : [index, index, index](index, index, index, buffer, view<[%shape_gdn_gate_weight_bytes]xi8>, buffer)
+      kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %hidden_size, %gate_size](%token_count, %hidden_size, %gate_size, %normalized_q8, %alpha_weight, %alpha) : [index, index, index](index, index, index, buffer, view<[%shape_gdn_alpha_weight_bytes]xi8>, buffer)
+      kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %hidden_size, %gate_size](%token_count, %hidden_size, %gate_size, %normalized_q8, %beta_weight, %beta) : [index, index, index](index, index, index, buffer, view<[%shape_gdn_beta_weight_bytes]xi8>, buffer)
+    }
+  } else {
+    command.concurrent {
+      kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %hidden_size, %qkv_size](%token_count, %hidden_size, %qkv_size, %normalized_q8, %qkv_weight, %qkv) : [index, index, index](index, index, index, buffer, view<[%shape_gdn_qkv_weight_bytes]xi8>, buffer)
+      kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %hidden_size, %gdn_size](%token_count, %hidden_size, %gdn_size, %normalized_q8, %attention_gate_weight, %z) : [index, index, index](index, index, index, buffer, view<[%shape_gdn_gate_weight_bytes]xi8>, buffer)
+      kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %hidden_size, %gate_size](%token_count, %hidden_size, %gate_size, %normalized_q8, %alpha_weight, %alpha) : [index, index, index](index, index, index, buffer, view<[%shape_gdn_alpha_weight_bytes]xi8>, buffer)
+      kernel.launch @ggml_linear_q4k_q8_1_x4[%token_count, %hidden_size, %gate_size](%token_count, %hidden_size, %gate_size, %normalized_q8, %beta_weight, %beta) : [index, index, index](index, index, index, buffer, view<[%shape_gdn_beta_weight_bytes]xi8>, buffer)
+    }
   }
-
   %qkv_silu = buffer.alloca<global> align(256) %qkv_bytes : buffer
   %qk_inverse_norm = buffer.alloca<global> align(256) %qk_norm_bytes : buffer
   kernel.launch @qwen38_gdn_conv_prepare_decode(%epsilon, %qkv, %conv_weight, %conv_history, %qkv_silu, %qk_inverse_norm) : (f32, buffer, view<[%shape_gdn_conv_elements]xf32>, view<[%shape_gdn_history_elements]xf32>, buffer, buffer)
@@ -153,7 +158,11 @@ command.program.def public @qwen38_gdn_layer_decode(%layer: index, %gdn_ordinal:
   %gated_gdn_q8 = buffer.alloca<global> align(256) %ffn_q8_bytes : buffer
   %attention_output = buffer.alloca<global> align(256) %hidden_bytes : buffer
   kernel.launch @ggml_quantize_q8_1_x4_f32[%token_count, %gdn_size](%token_count, %gdn_size, %gated_gdn, %gated_gdn_q8) : [index, index](index, index, buffer, buffer)
-  kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %gdn_size, %hidden_size](%token_count, %gdn_size, %hidden_size, %gated_gdn_q8, %ssm_output_weight, %attention_output) : [index, index, index](index, index, index, buffer, view<[%shape_projection_weight_bytes]xi8>, buffer)
+  scf.if %use_generic_quantized_projections {
+    kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %gdn_size, %hidden_size](%token_count, %gdn_size, %hidden_size, %gated_gdn_q8, %ssm_output_weight, %attention_output) : [index, index, index](index, index, index, buffer, view<[%shape_projection_weight_bytes]xi8>, buffer)
+  } else {
+    kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %gdn_size, %hidden_size](%token_count, %gdn_size, %hidden_size, %gated_gdn_q8, %ssm_output_weight, %attention_output) : [index, index, index](index, index, index, buffer, view<[%shape_projection_weight_bytes]xi8>, buffer)
+  }
   kernel.launch @qwen38_residual_add_f32_decode(%residual, %attention_output, %residual) : (buffer, buffer, buffer)
 
   %post_normalized = buffer.alloca<global> align(256) %hidden_bytes : buffer
@@ -161,18 +170,9 @@ command.program.def public @qwen38_gdn_layer_decode(%layer: index, %gdn_ordinal:
   kernel.launch @qwen38_rmsnorm_f32_decode(%epsilon, %residual, %post_attention_norm_weight, %post_normalized) : (f32, buffer, view<[%shape_hidden_size]xf32>, buffer)
   kernel.launch @ggml_quantize_q8_1_x4_f32[%token_count, %hidden_size](%token_count, %hidden_size, %post_normalized, %post_normalized_q8) : [index, index](index, index, buffer, buffer)
 
-  %ffn_gate = buffer.alloca<global> align(256) %ffn_bytes : buffer
-  %ffn_up = buffer.alloca<global> align(256) %ffn_bytes : buffer
-  command.concurrent {
-    kernel.launch @ggml_linear_q5k_q8_1_x4_channel8[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %post_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
-    kernel.launch @ggml_linear_q5k_q8_1_x4_channel8[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %post_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
-  }
-
   %swiglu = buffer.alloca<global> align(256) %ffn_bytes : buffer
-  %ffn_output = buffer.alloca<global> align(256) %hidden_bytes : buffer
-  kernel.launch @qwen38_swiglu_f32_decode(%ffn_gate, %ffn_up, %swiglu) : (buffer, buffer, buffer)
-  kernel.launch @ggml_linear_q6k_f32_decode[%token_count, %ffn_size, %hidden_size](%token_count, %ffn_size, %hidden_size, %swiglu, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
-  kernel.launch @qwen38_residual_add_f32_decode(%residual, %ffn_output, %residual) : (buffer, buffer, buffer)
+  command.program.launch @qwen38_ffn_gate_up_decode[%layer](%parameters, %post_normalized_q8, %swiglu) : [index](buffer, buffer, buffer)
+  command.program.launch @qwen38_ffn_down_decode[%layer](%parameters, %swiglu, %residual) : [index](buffer, buffer, buffer)
   command.return
 }
 

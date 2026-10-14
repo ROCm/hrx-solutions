@@ -28,10 +28,23 @@ def expected_tensors(profile: dict) -> dict[str, dict]:
     schemas = profile["tensors"]
     expected = dict(schemas["global"])
     interval = profile["full_attention_interval"]
+    overrides = schemas.get("layer_overrides", {})
+    valid_layers = {str(layer) for layer in range(profile["base_layer_count"])}
+    if set(overrides) - valid_layers:
+        raise ValueError("Qwen profile contains overrides for nonexistent base layers")
     for layer in range(profile["base_layer_count"]):
         family = "attention" if (layer + 1) % interval == 0 else "gdn"
-        expected.update({f"blk.{layer}.{name}": spec for name, spec in schemas[family].items()})
-    expected.update({f"blk.{profile['mtp_layer']}.{name}": spec for name, spec in schemas["mtp"].items()})
+        selected = dict(schemas[family])
+        changes = overrides.get(str(layer), {})
+        if set(changes) - set(selected):
+            raise ValueError(f"Qwen profile overrides unknown tensors in layer {layer}")
+        selected.update(changes)
+        expected.update({f"blk.{layer}.{name}": spec for name, spec in selected.items()})
+    mtp_layer = profile["mtp_layer"]
+    if mtp_layer is not None:
+        expected.update({f"blk.{mtp_layer}.{name}": spec for name, spec in schemas["mtp"].items()})
+    elif schemas.get("mtp"):
+        raise ValueError("Qwen profile has MTP tensors without an MTP layer")
     return expected
 
 
@@ -115,6 +128,8 @@ def compare_gguf(model: GGUF, profile: dict) -> tuple[str, ...]:
     for name in model.tensors:
         if name.startswith("blk.") and name not in expected:
             problems.append(f"Unexpected model-block tensor: {name}")
+        elif name == "output.weight" and name not in expected:
+            problems.append("Unexpected untied output.weight for this tied-output catalog")
     return tuple(problems)
 
 

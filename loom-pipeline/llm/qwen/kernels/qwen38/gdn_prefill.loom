@@ -59,7 +59,7 @@ func.def inline @qwen38_gdn_conv_step(%current: f32, %history0: f32, %history1: 
   func.return %activated, %history1, %history2, %current : f32, f32, f32, f32
 }
 
-// One workgroup owns one Q/K head and its three matching V heads. Every lane
+// One workgroup owns one Q/K head and its configured matching V heads. Each lane
 // carries the histories for its physical channels through the token loop;
 // only Q/K norm reductions rendezvous the workgroup at each causal step. The
 // two exported wrappers specialize whether the final histories are published,
@@ -86,7 +86,6 @@ template.def<@qwen38.gdn_conv_prepare_prefill.body> device @qwen38_gdn_conv_prep
   %c4 = config.get @qwen.model.gdn_convolution_taps : index
   %c128 = config.get @qwen.model.gdn_head_size : index
   %c256 = index.constant 256 : index
-  %c384 = index.constant 384 : index
   %q_channel_count = config.get @qwen.model.gdn_q_channels : index
   %v_channel_base = config.get @qwen.model.gdn_v_base : index
   %values_per_key_head = config.get @qwen.model.gdn_value_channels_per_key_head : index
@@ -120,9 +119,11 @@ template.def<@qwen38.gdn_conv_prepare_prefill.body> device @qwen38_gdn_conv_prep
   %value_head_channel_base = index.mul %head, %values_per_key_head : index
   %value0_channel_add = index.add %value_head_channel_base, %thread : index
   %value0_channel0 = index.add %v_channel_base, %value0_channel_add : index
-  %value0_channel = index.assume %value0_channel0 [range(%value0_channel0, 4096, 10239)] : index
+  // Inactive value lanes use safe reads and never publish outputs/history.
+  %has_value0 = index.cmp ult, %thread, %values_per_key_head : index
+  %value0_channel = scf.select %has_value0, %value0_channel0, %c0 : index
   %value_thread1 = index.add %thread, %c256 : index
-  %has_value1 = index.cmp ult, %value_thread1, %c384 : index
+  %has_value1 = index.cmp ult, %value_thread1, %values_per_key_head : index
   %value1_channel_add = index.add %value_head_channel_base, %value_thread1 : index
   %value1_channel0 = index.add %v_channel_base, %value1_channel_add : index
   %safe_value1_channel = scf.select %has_value1, %value1_channel0, %c0 : index
@@ -181,7 +182,9 @@ template.def<@qwen38.gdn_conv_prepare_prefill.body> device @qwen38_gdn_conv_prep
 
     %v0_current = view.load %input_view[%token, %value0_channel] : view<[%bounded_token_count]x[%shape_gdn_qkv_size]xf32> -> f32
     %v0_value, %next_v0_history0, %next_v0_history1, %next_v0_history2 = func.call @qwen38_gdn_conv_step(%v0_current, %old_v0_history0, %old_v0_history1, %old_v0_history2, %v0_weight0, %v0_weight1, %v0_weight2, %v0_weight3) : (f32, f32, f32, f32, f32, f32, f32, f32) -> (f32, f32, f32, f32)
-    view.store %v0_value, %output_view[%token, %value0_channel] : f32, view<[%bounded_token_count]x[%shape_gdn_qkv_size]xf32>
+    scf.if %has_value0 {
+      view.store %v0_value, %output_view[%token, %value0_channel] : f32, view<[%bounded_token_count]x[%shape_gdn_qkv_size]xf32>
+    }
 
     %v1_current = view.load %input_view[%token, %safe_value1_channel] : view<[%bounded_token_count]x[%shape_gdn_qkv_size]xf32> -> f32
     %v1_value, %next_v1_history0, %next_v1_history1, %next_v1_history2 = func.call @qwen38_gdn_conv_step(%v1_current, %old_v1_history0, %old_v1_history1, %old_v1_history2, %v1_weight0, %v1_weight1, %v1_weight2, %v1_weight3) : (f32, f32, f32, f32, f32, f32, f32, f32) -> (f32, f32, f32, f32)
@@ -212,9 +215,11 @@ template.def<@qwen38.gdn_conv_prepare_prefill.body> device @qwen38_gdn_conv_prep
     view.store %final_qk_history0, %next_history_view[%qk_history_base] : f32, view<[%shape_gdn_history_elements]xf32>
     view.store %final_qk_history1, %next_history_view[%qk_history1_index] : f32, view<[%shape_gdn_history_elements]xf32>
     view.store %final_qk_history2, %next_history_view[%qk_history2_index] : f32, view<[%shape_gdn_history_elements]xf32>
-    view.store %final_v0_history0, %next_history_view[%v0_history_base] : f32, view<[%shape_gdn_history_elements]xf32>
-    view.store %final_v0_history1, %next_history_view[%v0_history1_index] : f32, view<[%shape_gdn_history_elements]xf32>
-    view.store %final_v0_history2, %next_history_view[%v0_history2_index] : f32, view<[%shape_gdn_history_elements]xf32>
+    scf.if %has_value0 {
+      view.store %final_v0_history0, %next_history_view[%v0_history_base] : f32, view<[%shape_gdn_history_elements]xf32>
+      view.store %final_v0_history1, %next_history_view[%v0_history1_index] : f32, view<[%shape_gdn_history_elements]xf32>
+      view.store %final_v0_history2, %next_history_view[%v0_history2_index] : f32, view<[%shape_gdn_history_elements]xf32>
+    }
     scf.if %has_value1 {
       view.store %final_v1_history0, %next_history_view[%v1_history_base] : f32, view<[%shape_gdn_history_elements]xf32>
       view.store %final_v1_history1, %next_history_view[%v1_history1_index] : f32, view<[%shape_gdn_history_elements]xf32>
@@ -336,7 +341,9 @@ func.def inline @qwen38_gdn_conv_channel_at_token(%token0: index, %channel: inde
 // Captures immutable convolution input before token workgroups can publish
 // their next history. The command schedule orders this copy before convolution.
 kernel.def export("qwen38_gdn_snapshot_history") @qwen38_gdn_snapshot_history() {
-  %groups = index.constant 30 : index
+  %history_elements = config.get @qwen.model.gdn_history_elements : index
+  %elements_per_group = index.constant 1024 : index
+  %groups = index.div %history_elements, %elements_per_group : index
   %threads = index.constant 256 : index
   %unit = index.constant 1 : index
   kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%threads, %unit, %unit) : index
@@ -350,7 +357,7 @@ kernel.def export("qwen38_gdn_snapshot_history") @qwen38_gdn_snapshot_history() 
   %group_base = index.mul %group, %threads : index
   %vector_index = index.add %group_base, %thread : index
   %element0 = index.mul %vector_index, %width : index
-  %element = index.assume %element0 [range(%element0, 0, 30716), mul(%element0, 4)] : index
+  %element = index.assume %element0 [range(%element0, 0, 30716), multiple_of(%element0, 4)] : index
   %source = buffer.view %history[%origin] : buffer -> view<[%shape_gdn_history_elements]xf32>
   %target = buffer.view %snapshot[%origin] : buffer -> view<[%shape_gdn_history_elements]xf32>
   %values = vector.load %source[%element] : view<[%shape_gdn_history_elements]xf32> -> vector<4xf32>
@@ -379,8 +386,7 @@ template.def<@qwen38.gdn_conv_prepare_prefill.parallel_body> device @qwen38_gdn_
     %c3 = index.constant 3 : index
     %c128 = config.get @qwen.model.gdn_head_size : index
     %c256 = index.constant 256 : index
-    %c384 = index.constant 384 : index
-    %q_channel_count = config.get @qwen.model.gdn_q_channels : index
+      %q_channel_count = config.get @qwen.model.gdn_q_channels : index
     %v_channel_base = config.get @qwen.model.gdn_v_base : index
     %values_per_key_head = config.get @qwen.model.gdn_value_channels_per_key_head : index
     %c0_f32 = scalar.constant 0.0 : f32
@@ -406,9 +412,10 @@ template.def<@qwen38.gdn_conv_prepare_prefill.parallel_body> device @qwen38_gdn_
     %value_head_channel_base = index.mul %head, %values_per_key_head : index
     %value0_channel_add = index.add %value_head_channel_base, %thread : index
     %value0_channel0 = index.add %v_channel_base, %value0_channel_add : index
-    %value0_channel = index.assume %value0_channel0 [range(%value0_channel0, 4096, 10239)] : index
+    %has_value0 = index.cmp ult, %thread, %values_per_key_head : index
+    %value0_channel = scf.select %has_value0, %value0_channel0, %c0 : index
     %value_thread1 = index.add %thread, %c256 : index
-    %has_value1 = index.cmp ult, %value_thread1, %c384 : index
+    %has_value1 = index.cmp ult, %value_thread1, %values_per_key_head : index
     %value1_channel_add = index.add %value_head_channel_base, %value_thread1 : index
     %value1_channel0 = index.add %v_channel_base, %value1_channel_add : index
 
@@ -418,8 +425,13 @@ template.def<@qwen38.gdn_conv_prepare_prefill.parallel_body> device @qwen38_gdn_
     %q_square = scf.select %is_q_lane, %qk_square, %c0_f32 : f32
     %k_square = scf.select %is_q_lane, %c0_f32, %qk_square : f32
 
-    %v0_value, %next_v0_history0, %next_v0_history1, %next_v0_history2 = func.call @qwen38_gdn_conv_channel_at_token(%active_token, %value0_channel, %qkv_input, %conv_weight, %conv_history) : (index, index, buffer, buffer, buffer) -> (f32, f32, f32, f32)
-    view.store %v0_value, %output_view[%active_token, %value0_channel] : f32, view<512x[%shape_gdn_qkv_size]xf32>
+    %next_v0_history0, %next_v0_history1, %next_v0_history2 = scf.if %has_value0 -> (f32, f32, f32) {
+      %v0_value, %v0_history0, %v0_history1, %v0_history2 = func.call @qwen38_gdn_conv_channel_at_token(%active_token, %value0_channel, %qkv_input, %conv_weight, %conv_history) : (index, index, buffer, buffer, buffer) -> (f32, f32, f32, f32)
+      view.store %v0_value, %output_view[%active_token, %value0_channel] : f32, view<512x[%shape_gdn_qkv_size]xf32>
+      scf.yield %v0_history0, %v0_history1, %v0_history2 : f32, f32, f32
+    } else {
+      scf.yield %c0_f32, %c0_f32, %c0_f32 : f32, f32, f32
+    }
 
     %next_v1_history0, %next_v1_history1, %next_v1_history2 = scf.if %has_value1 -> (f32, f32, f32) {
       %value1_channel = index.assume %value1_channel0 [range(%value1_channel0, 4352, 10239)] : index
@@ -456,12 +468,14 @@ template.def<@qwen38.gdn_conv_prepare_prefill.parallel_body> device @qwen38_gdn_
       view.store %next_qk_history0, %history_view[%qk_history_base] : f32, view<[%shape_gdn_history_elements]xf32>
       view.store %next_qk_history1, %history_view[%qk_history1_index] : f32, view<[%shape_gdn_history_elements]xf32>
       view.store %next_qk_history2, %history_view[%qk_history2_index] : f32, view<[%shape_gdn_history_elements]xf32>
-      %v0_history_base = index.mul %value0_channel, %c3 : index
-      %v0_history1_index = index.add %v0_history_base, %c1 : index
-      %v0_history2_index = index.add %v0_history_base, %c2 : index
-      view.store %next_v0_history0, %history_view[%v0_history_base] : f32, view<[%shape_gdn_history_elements]xf32>
-      view.store %next_v0_history1, %history_view[%v0_history1_index] : f32, view<[%shape_gdn_history_elements]xf32>
-      view.store %next_v0_history2, %history_view[%v0_history2_index] : f32, view<[%shape_gdn_history_elements]xf32>
+      scf.if %has_value0 {
+        %v0_history_base = index.mul %value0_channel, %c3 : index
+        %v0_history1_index = index.add %v0_history_base, %c1 : index
+        %v0_history2_index = index.add %v0_history_base, %c2 : index
+        view.store %next_v0_history0, %history_view[%v0_history_base] : f32, view<[%shape_gdn_history_elements]xf32>
+        view.store %next_v0_history1, %history_view[%v0_history1_index] : f32, view<[%shape_gdn_history_elements]xf32>
+        view.store %next_v0_history2, %history_view[%v0_history2_index] : f32, view<[%shape_gdn_history_elements]xf32>
+      }
       scf.if %has_value1 {
         %value1_channel = index.assume %value1_channel0 [range(%value1_channel0, 4352, 10239)] : index
         %v1_history_base = index.mul %value1_channel, %c3 : index
@@ -546,7 +560,7 @@ kernel.def export("qwen38_gdn_capture_transition_depth4") @qwen38_gdn_capture_tr
     %packet_base = index.mul %workgroup, %c256 : index
     %packet = index.add %packet_base, %workitem : index
     %element0 = index.mul %packet, %c4 : index
-    %element = index.assume %element0 [range(%element0, 0, 40956), mul(%element0, 4)] : index
+    %element = index.assume %element0 [range(%element0, 0, 40956), multiple_of(%element0, 4)] : index
     %values = vector.load %qkv_view[%element] : view<[%shape_gdn_capture_qkv_elements]xf32> -> vector<4xf32>
     vector.store %values, %transition_view[%element] : vector<4xf32>, view<[%shape_gdn_capture_elements]xf32>
   } else {
@@ -569,7 +583,7 @@ kernel.def export("qwen38_gdn_capture_transition_depth4") @qwen38_gdn_capture_tr
       }
       %gate_base = scf.select %is_alpha, %alpha_element_base, %beta_element_base : index
       %target_element0 = index.add %gate_base, %gate_element : index
-      %target_element = index.assume %target_element0 [range(%target_element0, 40960, 41340), mul(%target_element0, 4)] : index
+      %target_element = index.assume %target_element0 [range(%target_element0, 40960, 41340), multiple_of(%target_element0, 4)] : index
       vector.store %values, %transition_view[%target_element] : vector<4xf32>, view<[%shape_gdn_capture_elements]xf32>
     }
   }

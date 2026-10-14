@@ -143,10 +143,9 @@ bazel run --config=opt --override_module="hrx=$PWD/../hrx-system" //:loom-serve 
 
 `//:native` groups the native deliverables; `//:loom-serve` aliases the public
 HRX executable. Bazel manages dependencies directly, without `.deps/hrx`.
-The sibling checkout currently carries a fix to HRX's generated-file rule so
-it matches declared output names independently of repository layout. That fix
-must land upstream and be included in the pin before building without the
-local override.
+The pinned module applies a narrow checked-in patch to HRX's generated-file
+rule so it matches external-repository output names. The patch leaves the
+pinned revision unchanged and allows builds without a sibling override.
 
 ### Python wheel build
 

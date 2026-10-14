@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -52,17 +53,43 @@ def exec_loom_serve() -> NoReturn:
     package_root = Path(__file__).resolve().parent
     native_root = package_root / "_native"
     executable = native_root / "bin" / "loom-serve"
+    arguments = list(sys.argv[1:])
+    from . import pipeline_validation
+    # Native deployment documents pass through unchanged. Retain the catalog
+    # invocation accepted by earlier wheels by translating its model flags.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--model")
+    parser.add_argument("--weights")
+    parser.add_argument("--tokenizer")
+    parser.add_argument("--rows", type=int, default=4)
+    parser.add_argument("--context_capacity", type=int, default=16384)
+    parser.add_argument("--pool_capacity", type=int, default=65536)
+    parser.add_argument("--prefill_capacity", type=int, default=512)
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--mtp", nargs="?", const="true", default="false")
+    parser.add_argument("--mtp_depth", type=int)
+    legacy, remaining = parser.parse_known_args(arguments)
+    catalog = Path(legacy.model) if legacy.model else None
+    catalog_mode = (catalog is not None and catalog.is_dir()) or bool(legacy.weights or legacy.tokenizer)
+    if catalog_mode:
+        catalog = catalog or pipeline_validation.resolve_catalog("qwen")
+        requested = legacy.mtp.lower() not in {"false", "0"} or legacy.mtp_depth is not None
+        pipeline_validation.mtp_enabled(catalog, requested)
+        if not legacy.weights or not legacy.tokenizer:
+            raise ValueError("Catalog serving requires --weights and --tokenizer; native --model accepts a deployment JSON")
+        deployment = pipeline_validation.deployment_for_model(
+            catalog, pipeline_validation.ModelFiles(Path(legacy.weights), Path(legacy.tokenizer)),
+            catalog.name, rows=legacy.rows, context_capacity=legacy.context_capacity,
+            pool_capacity=legacy.pool_capacity, prefill_capacity=legacy.prefill_capacity,
+            draft_depth=(legacy.mtp_depth if legacy.mtp_depth is not None else 3) if requested else 0,
+        )
+        arguments = [f"--model={deployment}", *remaining]
+        if not any(arg == "--device" or arg.startswith("--device=") for arg in remaining):
+            arguments.append("--device=amdgpu")
+        if not any(arg == "--listen" or arg.startswith("--listen=") for arg in remaining):
+            arguments.append(f"--listen=127.0.0.1:{legacy.port}")
     if not executable.is_file():
         raise RuntimeError("HRX wheel is missing native executable: loom-serve")
-    arguments = list(sys.argv[1:])
-    if not any(argument == "--model" or argument.startswith("--model=") for argument in arguments):
-        arguments.insert(
-            0,
-            "--model="
-            + str(
-                package_root / "loom-pipeline" / "llm" / "qwen" / "qwen_27b"
-            ),
-        )
     os.execve(
         str(executable),
         [str(executable), *arguments],

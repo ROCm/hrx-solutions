@@ -3,7 +3,7 @@
 //
 //   q: 16 heads x 128
 //   k: 16 heads x 128
-//   v: 48 heads x 128
+//   v: configured value heads x 128
 //
 // The convolution history stores three contiguous F32 values per channel.
 // The recurrent state is transposed so each 128-value state column is
@@ -76,8 +76,7 @@ func.def inline @qwen38_gdn_conv_channel(%channel: index, %qkv_input: buffer, %c
 }
 
 // One workgroup owns one Q/K head. Its first 128 lanes produce Q, its second
-// 128 lanes produce K, and all lanes cooperatively produce the three matching
-// V heads. Q/K reciprocal L2 norms remain separate metadata so the convolved
+// 128 lanes produce K, and active value lanes produce the matching V heads. Q/K reciprocal L2 norms remain separate metadata so the convolved
 // values are written exactly once.
 kernel.def export("qwen38_gdn_conv_prepare_decode") @qwen38_gdn_conv_prepare_decode() {
   %unit = index.constant 1 : index
@@ -96,7 +95,6 @@ kernel.def export("qwen38_gdn_conv_prepare_decode") @qwen38_gdn_conv_prepare_dec
   %c2 = index.constant 2 : index
   %c128 = config.get @qwen.model.gdn_head_size : index
   %c256 = index.constant 256 : index
-  %c384 = index.constant 384 : index
   %q_channel_count = config.get @qwen.model.gdn_q_channels : index
   %v_channel_base = config.get @qwen.model.gdn_v_base : index
   %values_per_key_head = config.get @qwen.model.gdn_value_channels_per_key_head : index
@@ -128,10 +126,15 @@ kernel.def export("qwen38_gdn_conv_prepare_decode") @qwen38_gdn_conv_prepare_dec
   %value_thread1 = index.add %thread, %c256 : index
   %value0_channel_add = index.add %value_head_channel_base, %thread : index
   %value0_channel0 = index.add %v_channel_base, %value0_channel_add : index
-  %value0_channel = index.assume %value0_channel0 [range(%value0_channel0, 4096, 10239)] : index
-  %value0 = func.call @qwen38_gdn_conv_channel(%value0_channel, %qkv_input, %conv_weight, %conv_history) : (index, buffer, buffer, buffer) -> (f32)
-  view.store %value0, %qkv_view[%value0_channel] : f32, view<[%shape_gdn_qkv_size]xf32>
-  %has_value1 = index.cmp ult, %value_thread1, %c384 : index
+  // Ratio-one models have only 128 value lanes; the 256-thread Q/K group
+  // must not convolve or publish the inactive value lanes.
+  %has_value0 = index.cmp ult, %thread, %values_per_key_head : index
+  scf.if %has_value0 {
+    %value0_channel = index.assume %value0_channel0 [range(%value0_channel0, 4096, 10239)] : index
+    %value0 = func.call @qwen38_gdn_conv_channel(%value0_channel, %qkv_input, %conv_weight, %conv_history) : (index, buffer, buffer, buffer) -> (f32)
+    view.store %value0, %qkv_view[%value0_channel] : f32, view<[%shape_gdn_qkv_size]xf32>
+  }
+  %has_value1 = index.cmp ult, %value_thread1, %values_per_key_head : index
   scf.if %has_value1 {
     %value1_channel_add = index.add %value_head_channel_base, %value_thread1 : index
     %value1_channel0 = index.add %v_channel_base, %value1_channel_add : index

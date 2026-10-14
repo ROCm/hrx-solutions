@@ -87,6 +87,11 @@ class PackagingTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'missing setup assets.*gguf.py'):
             validate_wheel(self.wheel(missing='hrx_solutions/gguf.py'))
 
+    def test_wheel_requires_both_architecture_catalogs(self):
+        for filename in ('sources.txt', 'config.loom', 'prepare.loom', 'control.loom', 'weights.loom', 'compatibility.json'):
+            with self.subTest(filename=filename), self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
+                validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/qwen_08b/'+filename))
+
     def test_wheel_rejects_old_checker(self):
         with self.assertRaisesRegex(RuntimeError,'obsolete model execution checkers'):
             validate_wheel(self.wheel(obsolete=True))

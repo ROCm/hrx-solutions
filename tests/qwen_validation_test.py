@@ -26,7 +26,86 @@ def matching_model(contract=None):
     return GGUF(3,metadata,tensors,0,0,0)
 
 
+def selected_binding_source(text, config):
+    """Resolve static recipe branches for the existing source-binding check.
+
+    Runtime-dependent branches remain visible. This checks source contracts;
+    the existing model witness validates actual compiler materialization.
+    """
+    values = {}
+
+    def visit(lines):
+        selected = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            branch = re.search(r'scf.if (%\w+).*\{\s*$', line)
+            if branch and branch[1] in values:
+                indent = line[:len(line)-len(line.lstrip())]
+                end = i + 1
+                alternate = None
+                while end < len(lines):
+                    if lines[end] == indent + '} else {':
+                        alternate = end
+                    elif lines[end] == indent + '}':
+                        break
+                    end += 1
+                if end == len(lines):
+                    raise AssertionError('Unclosed static branch: ' + line)
+                if values[branch[1]]:
+                    body = lines[i+1:alternate if alternate is not None else end]
+                else:
+                    body = lines[alternate+1:end] if alternate is not None else []
+                resolved = visit(body)
+                selected.extend(resolved)
+                result = re.match(r'\s*(%\w+(?:, %\w+)*) = scf.if', line)
+                if result:
+                    yields = [re.match(r'\s*scf.yield (%\w+(?:, %\w+)*) :', item) for item in resolved]
+                    operands = next((match[1].split(', ') for match in reversed(yields) if match), None)
+                    if operands is None:
+                        raise AssertionError('Missing static branch yield: ' + line)
+                    for name, operand in zip(result[1].split(', '), operands):
+                        if operand in values:
+                            values[name] = values[operand]
+                i = end + 1
+                continue
+            fact = re.search(r'(%\w+) = config.get @([\w.]+) : (?:index|i32)', line)
+            constant = re.search(r'(%\w+) = (?:index|scalar).constant (\d+|true|false) :', line)
+            comparison = re.search(r'(%\w+) = index.cmp (eq|ne), (%\w+), (%\w+) : index', line)
+            if fact and fact[2] in config:
+                values[fact[1]] = int(config[fact[2]])
+            elif constant:
+                values[constant[1]] = {'true': 1, 'false': 0}.get(constant[2], constant[2])
+                values[constant[1]] = int(values[constant[1]])
+            elif comparison and comparison[3] in values and comparison[4] in values:
+                equal = values[comparison[3]] == values[comparison[4]]
+                values[comparison[1]] = equal if comparison[2] == 'eq' else not equal
+            selected.append(line)
+            i += 1
+        return selected
+
+    return '\n'.join(visit(text.splitlines())), values
+
+
 class QwenComparisonTest(unittest.TestCase):
+    def test_mixed_08b_profile_and_no_mtp_contract(self):
+        contract = profile('qwen_08b')
+        model = matching_model(contract)
+        self.assertEqual(len(model.tensors), 320)
+        self.assertEqual(model.tensors['blk.8.ffn_gate.weight'].type_name, 'Q4_K')
+        self.assertEqual(model.tensors['blk.15.attn_q.weight'].type_name, 'Q6_K')
+        self.assertNotIn('output.weight', model.tensors)
+        self.assertEqual(compare_gguf(model, contract), ())
+        changed = dict(model.tensors)
+        changed['blk.8.ffn_gate.weight'] = replace(changed['blk.8.ffn_gate.weight'], ggml_type=13)
+        self.assertIn('expected Q4_K, found Q5_K', '\n'.join(compare_gguf(replace(model, tensors=changed), contract)))
+        changed = dict(model.tensors)
+        changed['blk.24.nextn.enorm.weight'] = changed['output_norm.weight']
+        changed['output.weight'] = changed['token_embd.weight']
+        problems = '\n'.join(compare_gguf(replace(model, tensors=changed), contract))
+        self.assertIn('Unexpected model-block tensor', problems)
+        self.assertIn('Unexpected untied output.weight', problems)
+
     def setUp(self):
         self.profile=profile()
         self.model=matching_model(self.profile)
@@ -77,8 +156,12 @@ class QwenComparisonTest(unittest.TestCase):
     def test_tensor_contract_matches_catalog_bindings(self):
         # A stale profile must fail when native consumers change names/views.
         catalog=PROFILE_PATH.parent.parent
-        config=dict(re.findall(r'config.def @([\w.]+) = (\d+) : index', (PROFILE_PATH.parent/'config.loom').read_text()))
+        config=dict(re.findall(r'config.def @([\w.]+) = (\d+) : (?:index|i32)', (PROFILE_PATH.parent/'config.loom').read_text()))
         patterns = [(catalog/'programs/qwen38/model_decode.loom',None),
+                    (catalog/'programs/qwen38/embedding.loom',None),
+                    (catalog/'programs/qwen38/ffn.loom',0),
+                    (catalog/'programs/qwen38/ffn.loom',3),
+                    (catalog/'programs/qwen38/ffn.loom',64),
                     (catalog/'programs/qwen38/output_head_decode.loom',None),
                     (catalog/'programs/qwen38/gdn_layer_decode.loom',0),
                     (catalog/'programs/qwen38/attention_layer_decode.loom',3),
@@ -87,8 +170,7 @@ class QwenComparisonTest(unittest.TestCase):
         bound=set()
         regex=r'command.parameter [^,]+, "([^"]+)"(?:\[([^]]+)\])? : view<(\d+|\[%\w+\])x(i8|f32)>'
         for source,layer in patterns:
-            text=source.read_text()
-            values={name:int(config[key]) for name,key in re.findall(r'(%\w+) = config.get @([\w.]+) : index',text) if key in config}
+            text,values=selected_binding_source(source.read_text(),config)
             for name,substitution,count,kind in re.findall(regex,text):
                 if '{}' in name:
                     value=layer if substitution=='%layer' else values[substitution]

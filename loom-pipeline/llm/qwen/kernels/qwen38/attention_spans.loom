@@ -3,6 +3,8 @@
 // Licensed under the Apache License v2.0 with LLVM Exceptions.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+config.decl @qwen.model.attention_heads : index
+config.decl @qwen.model.kv_heads : index
 config.decl @qwen.model.kv_plane_token_bytes : index
 
 func.decl @qwen38_span_active(%epoch: buffer, %span: index) -> (i1)
@@ -29,7 +31,7 @@ amdgpu.target<gfx11-generic> @qwen38_attention_spans_gfx11_wave64 {subgroup_size
 kernel.def export("qwen38_attention_query_prepare_spans") @qwen38_attention_query_prepare_spans(%token_capacity: index, %span_capacity: index) {
   %tokens = index.assume %token_capacity [range(%token_capacity, 1, 512)] : index
   %spans = index.assume %span_capacity [range(%span_capacity, 1, 64)] : index
-  %heads = index.constant 24 : index
+  %heads = config.get @qwen.model.attention_heads : index
   %threads = index.constant 256 : index
   %one = index.constant 1 : index
   kernel.launch.config workgroups(%heads, %tokens, %spans) workgroup_size(%threads, %one, %one) : index
@@ -53,7 +55,7 @@ kernel.def export("qwen38_attention_query_prepare_spans") @qwen38_attention_quer
 kernel.def export("qwen38_attention_kv_prepare_spans") @qwen38_attention_kv_prepare_spans(%token_capacity: index, %span_capacity: index) {
   %tokens = index.assume %token_capacity [range(%token_capacity, 1, 512)] : index
   %spans = index.assume %span_capacity [range(%span_capacity, 1, 64)] : index
-  %heads = index.constant 4 : index
+  %heads = config.get @qwen.model.kv_heads : index
   %threads = index.constant 256 : index
   %one = index.constant 1 : index
   kernel.launch.config workgroups(%heads, %tokens, %spans) workgroup_size(%threads, %one, %one) : index
@@ -93,7 +95,7 @@ kernel.def target(@qwen38_attention_spans_gfx11_wave64) export("qwen38_attention
   %sixteen = index.constant 16 : index
   %padded_tokens = index.add %tokens, %fifteen : index
   %tiles = index.div %padded_tokens, %sixteen : index
-  %heads = index.constant 24 : index
+  %heads = config.get @qwen.model.attention_heads : index
   %threads = index.constant 256 : index
   %one = index.constant 1 : index
   kernel.launch.config workgroups(%tiles, %heads, %spans) workgroup_size(%threads, %one, %one) : index

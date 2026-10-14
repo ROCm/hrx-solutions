@@ -55,7 +55,9 @@ template.def<@qwen38.attention.query_prepare> device @qwen38_attention_query_pre
     %position = index.add %position_base, %token : index
     %position_i32 = index.cast %position : index to i32
     %projection_row_bytes = index.cast %shape_query_gate_row_bytes : index to offset
-    %activation_row_bytes = index.constant 24576 : offset
+    %c4_bytes = index.constant 4 : index
+    %activation_row_bytes0 = index.mul %shape_attention_width, %c4_bytes : index
+    %activation_row_bytes = index.cast %activation_row_bytes0 : index to offset
     %projection_origin = index.scale %token_begin, %projection_row_bytes : index, offset -> offset
     %activation_origin = index.scale %token_begin, %activation_row_bytes : index, offset -> offset
     %projection_view = buffer.view %query_gate_projection[%projection_origin] : buffer -> view<[%token_count]x[%shape_query_gate_size]xf32>
@@ -214,7 +216,9 @@ kernel.def export("qwen38_attention_prefill_reference") @qwen38_attention_prefil
   %lane = index.assume %lane0 [range(%lane0, 0, 255)] : index
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
-  %c6 = index.constant 6 : index
+  %query_heads = config.get @qwen.model.attention_heads : index
+  %key_heads = config.get @qwen.model.kv_heads : index
+  %queries_per_kv = index.div %query_heads, %key_heads : index
   %c256 = config.get @qwen.model.head_size : index
   %c1024 = config.get @qwen.model.kv_size : index
   %c0_offset = index.constant 0 : offset
@@ -241,7 +245,7 @@ kernel.def export("qwen38_attention_prefill_reference") @qwen38_attention_prefil
   %value_cache_view = buffer.view %value_cache[%c0_offset] : buffer -> view<[%cache_element_count]xf16>
   %head_base = index.mul %head, %c256 : index
   %element = index.add %head_base, %lane : index
-  %key_head = index.div %head, %c6 : index
+  %key_head = index.div %head, %queries_per_kv : index
   %key_head_base = index.mul %key_head, %c256 : index
   %query_value = view.load %query_view[%token, %element] : view<[%token_count]x[%shape_attention_width]xf32> -> f32
   %final_max, %final_sum, %final_acc = scf.for %key_token = [%c0 to %context_count step %c1](%old_max = %negative_large : f32, %old_sum = %c0_f32 : f32, %old_acc = %c0_f32 : f32) -> (f32, f32, f32) {

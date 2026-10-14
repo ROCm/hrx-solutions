@@ -10,8 +10,10 @@ This guide traces the LLM serving solution from model import through generated
 tokens. Use the [serving walkthrough](../../docs/solutions/llm-serving.md) to
 run it first, then return here to change model policy, kernels, or integration.
 
-The current pipeline ID is `qwen`; its source catalog is `qwen/qwen_27b`, specialized for Qwen3.8-27B with UD-Q5_K_XL
-GGUF weights. Its dimensions, tensor names, quantization layouts, layer order,
+The default pipeline ID `qwen` selects `qwen/qwen_27b` for Qwen3.8-27B
+UD-Q5_K_XL. Explicit `qwen-08b` selects `qwen/qwen_08b` for Qwen3.5-0.8B
+UD-Q5_K_XL, including its exact per-layer Q4_K/Q5_K/Q6_K mix and tied Q6 output.
+Dimensions, tensor names, quantization layouts, layer order,
 and chat conventions are explicit in the source. Adapting it to another model
 requires reviewing those choices, even when the checkpoint has a similar name.
 
@@ -23,7 +25,7 @@ Three layers cooperate:
 | --- | --- | --- |
 | Python tools in this repository | Model inventory, validation dispatch, launch options, managed processes, client configuration | [`setup_cli.py`](../../binding/python/setup_cli.py), [`model_store.py`](../../binding/python/model_store.py), [`pipeline_validation.py`](../../binding/python/pipeline_validation.py) |
 | Loom sources in this directory | Model geometry, tensor bindings, preparation policy, chat framing, command composition, device state layouts, numerical kernels | [`sources.txt`](qwen/qwen_27b/sources.txt), [`prepare.loom`](qwen/qwen_27b/prepare.loom), [`control.loom`](qwen/control.loom) |
-| Native code in pinned HRX | HTTP transport, tokenization capabilities, admission, scheduling, physical storage, source JIT, command materialization, queue execution | Upstream [`text/`](https://github.com/ROCm/hrx/tree/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/text), [`runtime/`](https://github.com/ROCm/hrx/tree/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/runtime), and [`http/`](https://github.com/ROCm/hrx/tree/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/http) |
+| Native code in pinned HRX | HTTP transport, tokenization capabilities, admission, scheduling, physical storage, source JIT, command materialization, queue execution | Upstream [`serve/`](https://github.com/ROCm/hrx-system/tree/28d44d696030c65fc2ec91dd5a00e3d84166d5ca/loom/src/loom/serve) |
 
 The native text server is model independent. It loads a source catalog at
 startup and compiles for the actual device. Model policy can therefore change
@@ -86,8 +88,9 @@ pipeline IDs to adapters. The Qwen adapter uses
 [`gguf.py`](../../binding/python/gguf.py) to inspect the little-endian v2/v3
 GGUF header and tensor descriptors, then
 [`qwen_validation.py`](../../binding/python/qwen_validation.py) compares them
-with [`compatibility.json`](qwen/qwen_27b/compatibility.json). The CLI records
-`pipeline: qwen` only after architecture, tensor, and tokenizer checks pass.
+with the selected [`27B`](qwen/qwen_27b/compatibility.json) or
+[`0.8B`](qwen/qwen_08b/compatibility.json) profile. The CLI records the explicit
+pipeline ID only after architecture, tensor, and tokenizer checks pass.
 
 The versioned profile is grounded in the qualified GGUF and reviewed against
 the model sources. It records `qwen35` metadata, 64 base layers with a
@@ -95,6 +98,9 @@ three-GDN/one-attention pattern, one MTP block, exact GGUF-order dimensions,
 and the GGML encoding for every required tensor. Repeated schemas expand to
 866 tensor bindings. The profile's reference checksums establish provenance;
 validation does not hash weight payloads or require identical weights.
+The 0.8B profile has 24 base layers, no MTP tensors, and 320 required tensors.
+Its layer overrides select exact encodings instead of accepting any supported
+encoding interchangeably. Its tokenizer is qualified separately.
 
 Quantization is checked per tensor. Descriptive names, sampling preferences,
 and `general.file_type` are advisory. Unknown `qwen35.*` configuration is
@@ -113,12 +119,30 @@ checked; their contents are not compared because native tokenization uses the
 external `tokenizer.json`. That file's complete canonical JSON configuration
 must match the qualified tokenizer; whitespace and key order are ignored.
 
-Validation certifies the full current catalog including MTP. Missing MTP
-bindings produce MTP diagnostics even when `serve --no-mtp` is planned.
+Validation certifies the selected catalog. The 27B profile requires MTP
+bindings even when `serve --no-mtp` is planned; the 0.8B profile has no MTP.
 It checks structural compatibility and tokenizer configuration, and permits
 compatible fine-tune weights. It does not establish numerical correctness or
 execute model/tokenizer behavior. CPU-only Python regression tests live in
 `tests/`; generic runtime and model execution tests remain in HRX.
+
+For the 0.8B checkpoint, import its matching local files and select its catalog:
+
+```sh
+loom-serve-setup models import qwen-small --alias \
+  --gguf /path/to/Qwen3.5-0.8B-UD-Q5_K_XL.gguf \
+  --tokenizer /path/to/tokenizer.json
+loom-serve-setup models validate qwen-small --pipeline qwen-08b
+loom-serve-setup serve qwen-small
+```
+
+Serving enables MTP at depth three automatically for `qwen`, and disables it
+for `qwen-08b`. `--mtp` or `--mtp-depth` explicitly requests MTP and fails before
+native execution for the 0.8B checkpoint. `--no-mtp` disables it for 27B.
+The low-level Python `loom-serve --model=<0.8B-catalog> --mtp` also rejects it.
+The native preparation policy also rejects nonzero draft depth for 0.8B with
+an unsupported-MTP diagnostic. Both catalogs accept empty model options only;
+27B supports draft depths zero through three.
 
 When changing model geometry or an encoding, update the compatibility profile
 and its provenance alongside the consuming sources. The source-binding test
@@ -135,10 +159,12 @@ catalog without inheriting the same public HTTP name.
 [`serve_start.py`](../../binding/python/serve_start.py) forwards to the `serve`
 command in `setup_cli.py`. That command reads the manifest, chooses the
 recorded pipeline (or an explicit override), locates the assets, and constructs
-the native server arguments. Normal use validates the model before launching.
+a native deployment JSON under `~/.cache/hrx-solutions/deployments/`. It passes
+that document to `loom-serve --device=amdgpu --model=<document>
+--listen=127.0.0.1:<port>`. Normal use validates the model before launching.
 
 The Qwen adapter copies the catalog into
-`~/.cache/hrx-solutions/catalogs/qwen/<model-id>-<source-fingerprint>/` and
+`~/.cache/hrx-solutions/catalogs/<pipeline-id>/<model-id>-<source-fingerprint>/` and
 rewrites `@chat_model_name` in `control.loom`. The fingerprint includes the
 source tree contents. This makes `/v1/models` and request routing use the
 imported model ID while leaving the packaged catalog available for other
@@ -148,9 +174,12 @@ The default launch goes through
 [`server_manager.py`](../../binding/python/server_manager.py): it starts a
 background process, records its identity and logs, and waits for `/v1/models`
 to advertise the requested ID. `--foreground` executes the binary directly.
-The lower-level `loom-serve` command forwards native arguments and supplies
-the default packaged catalog when `--model` is absent; it bypasses model-store
-selection and managed server startup.
+The lower-level `loom-serve` command forwards native deployment arguments.
+For compatibility, catalog-directory invocations with `--weights` and
+`--tokenizer` are translated into deployment documents; omitting the catalog
+in that form selects 27B. It bypasses model-store selection and managed startup.
+The pinned server requires positive pool capacity, so serving uses the packed
+path; zero-pool dense execution is not exposed by its registration interface.
 
 [`_launcher.py`](../../binding/python/_launcher.py) constructs the environment
 for bundled native libraries. Linux binaries also receive a relative
@@ -193,6 +222,11 @@ gate/up tensors and selects `qwen38_prepare_ffn` as their preparation root.
 [`weights_prepare.loom`](qwen/weights_prepare.loom) rearranges their Q5_K
 packets into groups of eight channels in device storage, preserving codes,
 scales, and total size. Other tensors retain their file representation.
+
+The 0.8B [`weights.loom`](qwen/qwen_08b/weights.loom) uses no transformation:
+its static recipes consume each mixed encoding in canonical checkpoint order.
+Both architecture catalogs and the shared providers are included in the wheel;
+their manifests resolve relative to their respective architecture directories.
 
 Consumers must agree with that prepared layout. A kernel change that alters
 weight interpretation must also review preparation and parameter views. The
@@ -336,7 +370,8 @@ native execution options are available through `loom-serve`.
 
 A new source catalog can be exercised with the native `--model` argument
 before integrating it with the managed CLI. In that argument, “model” means
-a source-catalog directory; in `loom-serve-start MODEL_ID`, it means an
+a deployment JSON document referencing source providers; in
+`loom-serve-start MODEL_ID`, it means an
 imported asset identity. The Python registry is an integration mechanism;
 the native server does not have a compiled-in model registration list.
 
@@ -349,12 +384,19 @@ the change. Include mixed spans and inactive or resumed rows when touching
 stateful execution. For MTP changes, include rejection and partial acceptance.
 
 The `models validate` command performs CPU structural inspection, including
-MTP tensor compatibility. Use HRX's model-specific execution checks for
-numerical, MTP, state-ownership, and performance coverage. Generic runtime and model
-tests remain in HRX; this repository maintains the deployed catalog, thin
+MTP tensor compatibility. The current HRX pin has removed the older Qwen model-specific tools, including
+`epoch_check` and `request_check`. Use the generic server with known-string
+requests and inspect `/v1/status` for registration diagnostics; successful
+startup alone does not establish numerical correctness. Generic runtime tests
+remain in HRX; this repository maintains the deployed catalog, thin
 launchers, and packaging.
 
-The pinned upstream guides provide the detailed checks and commands:
+Current deployment and HTTP contracts are documented in the pinned
+[serving models guide](https://github.com/ROCm/hrx-system/blob/28d44d696030c65fc2ec91dd5a00e3d84166d5ca/loom/docs/src/reference/serving-models.md).
+
+The following guides and chat-framing example describe the earlier source
+revision and its removed tools. They are historical context, not commands
+available at the current pin:
 
 * [Agent starting point](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/docs/AGENT_START.md)
   for the engineering loop and failure triage.
@@ -440,7 +482,7 @@ and measurement tools. State whether memory means reserved virtual space,
 committed device backing, or host process memory. Keep startup costs separate
 from steady-state request results, and report variation across repetitions.
 
-The pinned [Qwen checks and replay guide](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/models/qwen/README.md)
+The historical [Qwen checks and replay guide](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/models/qwen/README.md)
 provides existing execution comparisons and workload tools. Review their
 measurement boundaries before using them to characterize the packaged HTTP
 solution. Kernel or replay timings alone do not establish end-to-end serving

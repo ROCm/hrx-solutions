@@ -1,0 +1,153 @@
+// Copyright 2026 The IREE Authors
+//
+// Licensed under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+// Fixed specialization bounds for this model's command and kernel leaves.
+// Run-dependent token, span and cache bounds are supplied at materialization.
+// Shared motifs receive explicit operands from those leaves.
+config.def @ggml.linear_q4k_q8_1_x4.output_capacity = 3584 : index
+config.def @ggml.linear_q5k_q8_1_x4.output_capacity = 6144 : index
+config.def @ggml.linear_q6k_f32_decode.output_capacity = 1024 : index
+config.def @ggml.linear_q6k_q8_1_x4.output_capacity = 248320 : index
+config.def @qwen38.attention.decode_split_count = 10 : index
+config.def @qwen38.greedy_argmax.output_capacity = 248320 : index
+
+// Authoritative compiled shape for the Qwen3.5 0.8B UD-Q5_K_XL checkpoint.
+// Derived extents are explicit to preserve current packing, alignment and rounding.
+// Q6 F16-rounded embeddings, tied Q6 output, canonical mixed-encoding recipes.
+config.def @qwen.model.embedding_quantization = 6 : index
+config.def @qwen.model.tie_word_embeddings = 1 : index
+config.def @qwen.model.projection_implementation = 1 : index
+// Exact layer encoding masks for the 24 checkpoint blocks.
+config.def @qwen.model.ffn_gate_q4_layers = 2230016 : i32
+config.def @qwen.model.ffn_gate_q6_layers = 8421390 : i32
+config.def @qwen.model.ffn_down_q6_layers = 8964159 : i32
+config.def @qwen.model.attention_q6_layers = 8421384 : i32
+// Encoding-specific parameter extents; no runtime encoding discovery.
+config.def @qwen.model.ffn_gate_q4_weight_bytes = 2064384 : index
+config.def @qwen.model.ffn_gate_q5_weight_bytes = 2523136 : index
+config.def @qwen.model.ffn_gate_q6_weight_bytes = 3010560 : index
+config.def @qwen.model.ffn_down_q5_weight_bytes = 2523136 : index
+config.def @qwen.model.ffn_down_q6_weight_bytes = 3010560 : index
+config.def @qwen.model.query_q5_weight_bytes = 2883584 : index
+config.def @qwen.model.query_q6_weight_bytes = 3440640 : index
+config.def @qwen.model.key_q5_weight_bytes = 360448 : index
+config.def @qwen.model.key_q6_weight_bytes = 430080 : index
+config.def @qwen.model.attention_heads = 8 : index
+config.def @qwen.model.attention_partial_bytes = 82560 : index
+config.def @qwen.model.attention_partial_split_bytes = 8256 : index
+config.def @qwen.model.attention_scale = 0.0625 : f32
+config.def @qwen.model.attention_width = 2048 : index
+config.def @qwen.model.base_layers = 24 : index
+config.def @qwen.model.checkpoint_layers = 24 : index
+config.def @qwen.model.embedding_chunks = 64 : index
+config.def @qwen.model.embedding_weight_bytes = 208588800 : index
+config.def @qwen.model.ffn_capacity_bytes = 7340032 : index
+config.def @qwen.model.ffn_down_weight_bytes = 3010560 : index
+config.def @qwen.model.ffn_gate_weight_bytes = 2523136 : index
+config.def @qwen.model.ffn_prepare_group_bytes = 5632 : index
+config.def @qwen.model.ffn_prepare_words = 1408 : index
+config.def @qwen.model.ffn_q8_row_bytes = 4032 : index
+config.def @qwen.model.ffn_qk_blocks = 14 : index
+config.def @qwen.model.ffn_row_bytes = 14336 : index
+config.def @qwen.model.ffn_size = 3584 : index
+config.def @qwen.model.gdn_alpha_partial_bytes = 14336 : index
+config.def @qwen.model.gdn_alpha_weight_bytes = 11264 : index
+config.def @qwen.model.gdn_beta_partial_bytes = 229376 : index
+config.def @qwen.model.gdn_beta_weight_bytes = 11264 : index
+config.def @qwen.model.gdn_capture_bytes = 1778688 : index
+config.def @qwen.model.gdn_capture_elements = 24704 : index
+config.def @qwen.model.gdn_capture_qkv_elements = 24576 : index
+config.def @qwen.model.gdn_capture_span_bytes = 98816 : index
+config.def @qwen.model.gdn_conv_elements = 24576 : index
+config.def @qwen.model.gdn_divisor = 128.0 : f32
+config.def @qwen.model.gdn_f16_capacity_bytes = 2097152 : index
+config.def @qwen.model.gdn_gate_capacity_bytes = 32768 : index
+config.def @qwen.model.gdn_gate_weight_bytes = 1720320 : index
+config.def @qwen.model.gdn_head_size = 128 : index
+config.def @qwen.model.gdn_history_bytes = 73728 : index
+config.def @qwen.model.gdn_history_elements = 18432 : index
+config.def @qwen.model.gdn_key_heads = 16 : index
+config.def @qwen.model.gdn_layer_bytes = 1122304 : index
+config.def @qwen.model.gdn_layers = 18 : index
+config.def @qwen.model.gdn_q_channels = 2048 : index
+config.def @qwen.model.gdn_qkv_size = 6144 : index
+config.def @qwen.model.gdn_qkv_weight_bytes = 5160960 : index
+config.def @qwen.model.gdn_recurrent_bytes = 1048576 : index
+config.def @qwen.model.gdn_scale = 0.08838834764831845 : f32
+config.def @qwen.model.gdn_state_elements = 262144 : index
+config.def @qwen.model.gdn_v_base = 4096 : index
+config.def @qwen.model.gdn_value_heads = 16 : index
+config.def @qwen.model.gdn_width = 2048 : index
+config.def @qwen.model.group_count = 6 : index
+config.def @qwen.model.head_divisor = 256.0 : f32
+config.def @qwen.model.head_size = 256 : index
+config.def @qwen.model.hidden_capacity_bytes = 2097152 : index
+config.def @qwen.model.hidden_divisor = 1024.0 : f32
+config.def @qwen.model.hidden_q8_capacity_bytes = 589824 : index
+config.def @qwen.model.hidden_q8_depth4_bytes = 4608 : index
+config.def @qwen.model.hidden_q8_row_bytes = 1152 : index
+config.def @qwen.model.hidden_qk_blocks = 4 : index
+config.def @qwen.model.hidden_row_bytes = 4096 : index
+config.def @qwen.model.hidden_size = 1024 : index
+config.def @qwen.model.key_weight_bytes = 430080 : index
+config.def @qwen.model.kv_capacity_bytes = 1048576 : index
+config.def @qwen.model.kv_heads = 2 : index
+config.def @qwen.model.kv_size = 512 : index
+config.def @qwen.model.logits_row_bytes = 993280 : index
+config.def @qwen.model.mtp_concat_size = 2048 : index
+config.def @qwen.model.mtp_layer = 24 : index
+config.def @qwen.model.mtp_projection_weight_bytes = 0 : index
+config.def @qwen.model.output_weight_bytes = 208588800 : index
+config.def @qwen.model.projection_capacity_bytes = 4194304 : index
+config.def @qwen.model.projection_q8_depth4_bytes = 9216 : index
+config.def @qwen.model.projection_q8_row_bytes = 2304 : index
+config.def @qwen.model.projection_weight_bytes = 1441792 : index
+config.def @qwen.model.qkv_capacity_bytes = 12582912 : index
+config.def @qwen.model.query_gate_capacity_bytes = 8388608 : index
+config.def @qwen.model.query_gate_row_bytes = 16384 : index
+config.def @qwen.model.query_gate_size = 4096 : index
+config.def @qwen.model.query_weight_bytes = 3440640 : index
+config.def @qwen.model.rms_epsilon = 0.000001 : f32
+config.def @qwen.model.rope_half = 32 : index
+config.def @qwen.model.rope_log_step = -0.5036904811859131 : f32
+config.def @qwen.model.rope_size = 64 : index
+config.def @qwen.model.value_weight_bytes = 430080 : index
+config.def @qwen.model.vocabulary_size = 248320 : index
+config.def @qwen.model.argmax_partial_row_bytes = 244 : index
+config.def @qwen.model.draft_kv_token_bytes = 2048 : index
+config.def @qwen.model.embedding_row_bytes = 840 : index
+config.def @qwen.model.gdn_column_tiles = 32 : index
+config.def @qwen.model.gdn_convolution_taps = 4 : index
+config.def @qwen.model.gdn_gate_span_bytes = 768 : index
+config.def @qwen.model.gdn_history_values = 3 : index
+config.def @qwen.model.gdn_qk_norm_elements = 32 : index
+config.def @qwen.model.gdn_qkv_capture_bytes = 98304 : index
+config.def @qwen.model.gdn_qkv_row_bytes = 24576 : index
+config.def @qwen.model.gdn_state_bytes = 20201472 : index
+config.def @qwen.model.gdn_value_channels_per_key_head = 128 : index
+config.def @qwen.model.head_gate_size = 512 : index
+config.def @qwen.model.kv_plane_token_bytes = 1024 : index
+config.def @qwen.model.kv_row_bytes = 2048 : index
+config.def @qwen.model.output_weight_row_bytes = 840 : index
+config.def @qwen.model.projection_row_bytes = 8192 : index
+config.def @qwen.model.target_kv_planes = 12 : index
+config.def @qwen.model.target_kv_token_bytes = 12288 : index
+config.def @qwen.model.gdn_gate_row_bytes = 64 : index
+config.def @qwen.model.gdn_inverse_row_bytes = 128 : index
+config.def @qwen.model.gdn_norm_capture_bytes = 512 : index
+config.def @qwen.model.gdn_output_capture_bytes = 32768 : index
+config.def @qwen.model.gdn_gate_capture_elements = 64 : index
+config.def @qwen.model.output_projection_iterations = 1 : index
+config.def @qwen.model.head_scratch_bytes = 1024 : index
+config.def @qwen.model.ffn_prepare_row_packets = 44 : index
+config.def @qwen.model.ffn_prepare_group_packets = 352 : index
+
+// Text MRoPE uses the pinned log step below rather than recalculating it.
+config.def @qwen.model.rope_theta = 10000000.0 : f32
+config.def @qwen.model.gdn_alpha_split_bytes = 2048 : index
+
+// MTP-only geometry is an inactive compatibility binding; this checkpoint has no MTP.
+// Legacy Q5 FFN preparation extents are unused by the canonical weight policy.
