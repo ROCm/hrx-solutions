@@ -4,6 +4,9 @@ import hashlib
 import io
 import json
 import os
+import select
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -33,6 +36,58 @@ class DownloadTest(unittest.TestCase):
                 self.assertIn(str(files.weights), output.getvalue())
                 self.assertIn(str(files.tokenizer), output.getvalue())
                 self.assertEqual(files.tokenizer.is_symlink(), alias)
+
+    def test_registration_lock_releases_after_process_death(self):
+        weights = self.root / 'weights.gguf'
+        tokenizer = self.root / 'tokenizer.json'
+        write_gguf(weights)
+        tokenizer.write_text(json.dumps(self.tokenizer_data))
+        script = """
+import sys
+from pathlib import Path
+from binding.python import model_store
+original = model_store._stage_file
+def pause(*args):
+    print('locked', flush=True)
+    sys.stdin.readline()
+    return original(*args)
+model_store._stage_file = pause
+model_store.import_model('interrupted', gguf=Path(sys.argv[1]),
+                         tokenizer=Path(sys.argv[2]), model_root=Path(sys.argv[3]))
+"""
+        with subprocess.Popen([sys.executable, '-c', script, str(weights),
+                               str(tokenizer), str(self.models)],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True) as process:
+            try:
+                ready, _, _ = select.select([process.stdout], [], [], 10)
+                self.assertTrue(ready, 'registration never acquired its lock')
+                self.assertEqual(process.stdout.readline().strip(), 'locked')
+                self.assertFalse((self.models / 'interrupted').exists())
+                with self.assertRaisesRegex(model_store.ModelImportError, 'active'):
+                    model_store.import_model('interrupted', gguf=weights,
+                                             tokenizer=tokenizer, model_root=self.models)
+            finally:
+                process.kill()
+                process.wait(timeout=5)
+        with redirect_stderr(io.StringIO()):
+            model_store.import_model('interrupted', gguf=weights,
+                                     tokenizer=tokenizer, model_root=self.models)
+        self.assertEqual(model_store.registered_model('interrupted', self.models).availability,
+                         'ready')
+
+    def test_registration_reuses_stale_lock_file(self):
+        weights = self.root / 'weights.gguf'
+        tokenizer = self.root / 'tokenizer.json'
+        write_gguf(weights)
+        tokenizer.write_text(json.dumps(self.tokenizer_data))
+        self.models.mkdir()
+        (self.models / '.stale.lock').touch()
+        with redirect_stderr(io.StringIO()):
+            model_store.import_model('stale', gguf=weights,
+                                     tokenizer=tokenizer, model_root=self.models)
+        self.assertEqual(model_store.registered_model('stale', self.models).availability,
+                         'ready')
 
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -179,7 +234,8 @@ class DownloadTest(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             with self.assertRaisesRegex(model_store.ModelImportError, 'missing required tensor'):
                 model_download.download(self.recipe['id'], model_root=self.models, offline=True)
-            self.assertEqual(list(self.models.iterdir()), [])
+            # A reusable lock file may remain, but no staged or published model.
+            self.assertFalse(any(path.is_dir() for path in self.models.iterdir()))
             destination = self.models / self.recipe['id']
             destination.mkdir()
             manifest = destination / 'manifest.json'
@@ -389,4 +445,3 @@ class DownloadTest(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         self.assertIn('unknown', plan['size_note'])
         self.assertIsNone(plan['download_bytes'])
-

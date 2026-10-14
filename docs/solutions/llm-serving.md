@@ -1,14 +1,9 @@
 # LLM serving
 
-> **Upstream migration in progress:** The setup/start commands and their
-> supporting workflows remain part of this solution. The current wheel uses
-> upstream's new `loom-serve` executable. Qwen compatibility validation runs
-> on CPU. Managed Qwen startup still needs its adapter ported to model JSON
-> documents, so the start commands below describe the intended workflow and
-> are not yet an end-to-end working path with the new native server.
-
 Run a Qwen model on a local AMD GPU, query its streaming chat endpoint, and
-connect Pi.
+connect Pi. The setup/start commands generate model JSON documents for the
+packaged `loom-serve` executable. Both the 0.8B and 27B catalogs support this
+workflow; MTP is available on 27B only.
 
 For the implementation and extension points, see the
 [LLM pipeline guidebook](../../loom-pipeline/llm/README.md). The steps below
@@ -266,5 +261,5 @@ live server. In Pi, try asking it to use its Bash tool to run
 | `loom_route_error` | Read `/v1/models` and send that exact model ID. Define `MODEL_ID` in the terminal issuing the request. |
 | Missing model files or broken aliases | Check `models list` and restore the original files or Hugging Face cache referenced by the import. |
 | Unsupported format with a hash as its name | Preserve a filename ending in `.gguf`. Use the imported model path or a named Hugging Face snapshot path; resolving a snapshot symlink can expose an extensionless cache blob. Update older launchers that resolve these paths. |
-| Validation fails | Read the reported metadata, tensor, or tokenizer mismatch. Use the supported architecture and exact quantization mix with the matching tokenizer. Split GGUF files are unsupported. |
+| Validation fails | Read the reported metadata, tensor, or tokenizer mismatch. Use the supported architecture and exact quantization mix with the matching tokenizer. For split GGUFs, supply every fragment; incomplete sets and duplicate tensors are rejected. |
 | Startup fails or times out | Read the log path from startup diagnostics or `servers status SERVER_ID`. Check memory availability, compilation errors, and port ownership. Increase `--ready-timeout` if startup needs more time. |

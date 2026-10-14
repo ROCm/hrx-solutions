@@ -1,6 +1,7 @@
 """Atomic local model registration; downloaded files remain owned by HF's cache."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -87,13 +88,15 @@ def register_model(model_id: str, *, ggufs: Sequence[dict], tokenizer: dict,
     root.mkdir(parents=True, exist_ok=True)
     destination = root / model_id
     lock = root / f".{model_id}.lock"
-    try:
-        lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
-        raise ModelImportError(f"Another registration of {model_id!r} is active (lock: {lock})") from exc
+    # Keep this inode in place: unlinking it could let concurrent registrars
+    # lock different files. The OS releases the lock even after abrupt exit.
+    lock_fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
     stage = None
     try:
-        os.close(lock_fd)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ModelImportError(f"Another registration of {model_id!r} is active (lock: {lock})") from exc
         if destination.exists() or destination.is_symlink():
             raise ModelImportError(f"Model destination already exists: {destination}; choose a different --id")
         stage = Path(tempfile.mkdtemp(prefix=f".{model_id}.import-", dir=root))
@@ -147,7 +150,7 @@ def register_model(model_id: str, *, ggufs: Sequence[dict], tokenizer: dict,
     finally:
         if stage is not None and stage.exists():
             shutil.rmtree(stage, ignore_errors=True)
-        lock.unlink(missing_ok=True)
+        os.close(lock_fd)
     return ImportedModel(model_id, destination,
                          ModelFiles(destination / manifest["weights_path"], destination / "tokenizer.json",
                                     tuple(destination / name for name in manifest["gguf_files"])),

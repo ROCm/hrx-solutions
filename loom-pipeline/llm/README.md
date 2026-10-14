@@ -1,14 +1,10 @@
 # LLM pipelines: an implementation guidebook
 
-> **Upstream migration in progress:** The Python solution helpers and Qwen
-> catalog are retained. This guide describes their earlier native serving
-> contract; validation and startup adapters still need migration to the
-> current server. See the [serving walkthrough](../../docs/solutions/llm-serving.md)
-> for the current limitations.
-
 This guide traces the LLM serving solution from model import through generated
 tokens. Use the [serving walkthrough](../../docs/solutions/llm-serving.md) to
 run it first, then return here to change model policy, kernels, or integration.
+Python startup generates model JSON documents for the current native server,
+using the selected catalog, model assets, capacities, and MTP capability.
 
 The default pipeline ID `qwen` selects `qwen/qwen_27b` for Qwen3.8-27B
 UD-Q5_K_XL. Explicit `qwen-08b` selects `qwen/qwen_08b` for Qwen3.5-0.8B
