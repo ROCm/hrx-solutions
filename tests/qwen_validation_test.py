@@ -76,7 +76,8 @@ class QwenComparisonTest(unittest.TestCase):
 
     def test_tensor_contract_matches_catalog_bindings(self):
         # A stale profile must fail when native consumers change names/views.
-        catalog=PROFILE_PATH.parent
+        catalog=PROFILE_PATH.parent.parent
+        config=dict(re.findall(r'config.def @([\w.]+) = (\d+) : index', (PROFILE_PATH.parent/'config.loom').read_text()))
         patterns = [(catalog/'programs/qwen38/model_decode.loom',None),
                     (catalog/'programs/qwen38/output_head_decode.loom',None),
                     (catalog/'programs/qwen38/gdn_layer_decode.loom',0),
@@ -84,15 +85,35 @@ class QwenComparisonTest(unittest.TestCase):
                     (catalog/'programs/qwen38/attention_layer_decode.loom',64),
                     (catalog/'mtp.loom',None)]
         bound=set()
-        regex=r'command.parameter [^,]+, "([^"]+)"(?:\[%layer\])? : view<(\d+)x(i8|f32)>'
+        regex=r'command.parameter [^,]+, "([^"]+)"(?:\[([^]]+)\])? : view<(\d+|\[%\w+\])x(i8|f32)>'
         for source,layer in patterns:
-            for name,count,kind in re.findall(regex,source.read_text()):
-                name=name.replace('{}',str(layer)) if layer is not None else name
+            text=source.read_text()
+            values={name:int(config[key]) for name,key in re.findall(r'(%\w+) = config.get @([\w.]+) : index',text) if key in config}
+            for name,substitution,count,kind in re.findall(regex,text):
+                if '{}' in name:
+                    value=layer if substitution=='%layer' else values[substitution]
+                    name=name.replace('{}',str(value))
+                count=values[count[1:-1]] if count.startswith('[') else int(count)
                 bound.add(name)
                 tensor=self.model.tensors[name]
-                self.assertEqual(tensor.size_bytes,int(count)*(4 if kind=='f32' else 1),name)
+                self.assertEqual(tensor.size_bytes,count*(4 if kind=='f32' else 1),name)
         representative={name for name in self.model.tensors if not name.startswith('blk.') or name.startswith(('blk.0.','blk.3.','blk.64.'))}
         self.assertEqual(bound,representative)
+        # The architecture's cold VM companions intentionally retain static
+        # geometry. Keep their existing contract aligned with compiled shape.
+        properties={key.removeprefix('qwen.model.'):int(value) for key,value in config.items() if key.startswith('qwen.model.')}
+        for property_name,metadata_key in [('hidden_size','embedding_length'),('ffn_size','feed_forward_length'),('attention_heads','attention.head_count'),('kv_heads','attention.head_count_kv'),('head_size','attention.key_length'),('gdn_key_heads','ssm.group_count'),('gdn_value_heads','ssm.time_step_rank'),('gdn_head_size','ssm.state_size'),('gdn_convolution_taps','ssm.conv_kernel'),('rope_size','rope.dimension_count')]:
+            self.assertEqual(properties[property_name],self.profile['metadata']['qwen35.'+metadata_key],property_name)
+        self.assertEqual(properties['ffn_size'],self.profile['metadata']['qwen35.feed_forward_length'])
+        self.assertEqual(properties['base_layers'],self.profile['base_layer_count'])
+        self.assertEqual(properties['mtp_layer'],self.profile['mtp_layer'])
+        self.assertEqual(properties['group_count']*4,properties['base_layers'])
+        self.assertEqual(properties['gdn_layers'],properties['group_count']*3)
+        prepare=(PROFILE_PATH.parent/'prepare.loom').read_text()
+        storage={name:int(value) for name,value in re.findall(r'(%\w+) = scalar.constant (\d+) : i64',prepare)}
+        for variable,property_name in [('%gdn_bytes','gdn_state_bytes'),('%target_token_bytes','target_kv_token_bytes'),('%draft_token_bytes','draft_kv_token_bytes'),('%carry_stride','hidden_row_bytes'),('%residual_bytes','hidden_capacity_bytes'),('%plane_token_bytes','kv_plane_token_bytes'),('%target_planes','target_kv_planes')]:
+            self.assertEqual(storage[variable],properties[property_name],variable)
+        self.assertIn(f"scalar.constant {properties['ffn_gate_weight_bytes']} : i64",(PROFILE_PATH.parent/'weights.loom').read_text())
 
     def test_tokenizer_config_ignores_formatting_but_detects_changed_ids(self):
         with tempfile.TemporaryDirectory() as directory:

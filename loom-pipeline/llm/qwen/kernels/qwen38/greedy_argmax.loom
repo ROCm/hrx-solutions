@@ -1,3 +1,6 @@
+// Model geometry is supplied by the selected architecture catalog.
+config.decl @qwen.model.vocabulary_size : index
+
 template.decl @qwen38.greedy_argmax_f32.row(%row_count0: index, %row0: index, %output_size0: index, %workitem0: index, %logits: buffer, %token_ids: buffer)
 
 // Selects the lowest token ID having the greatest finite logit. The baseline
@@ -250,42 +253,46 @@ check.case public @qwen38_greedy_argmax_cross_tile_tie_case {
 }
 
 check.case public @qwen38_greedy_argmax_vocabulary_baseline_benchmark_case {
+  %shape_vocabulary_size = config.get @qwen.model.vocabulary_size : index
   %output_size = check.literal value(248320) : index
-  %logits = check.generate.iota offset(0.0) step(1.0) period(248320) : tensor<248320xf32>
+  %logits = check.generate.iota offset(0.0) step(1.0) period(248320) : tensor<[%shape_vocabulary_size]xf32>
   %token_id = check.generate.fill value(-1) : tensor<1xi32>
-  kernel.launch @qwen38_greedy_argmax_f32[%output_size](%output_size, %logits, %token_id) : [index](index, tensor<248320xf32>, tensor<1xi32>)
+  kernel.launch @qwen38_greedy_argmax_f32[%output_size](%output_size, %logits, %token_id) : [index](index, tensor<[%shape_vocabulary_size]xf32>, tensor<1xi32>)
   check.return
 }
 
 check.case public @qwen38_greedy_argmax_vocabulary_parallel_benchmark_case {
+  %shape_vocabulary_size = config.get @qwen.model.vocabulary_size : index
   %token_count = check.literal value(1) : index
   %output_size = check.literal value(248320) : index
-  %logits = check.generate.iota offset(0.0) step(1.0) period(248320) : tensor<248320xf32>
+  %logits = check.generate.iota offset(0.0) step(1.0) period(248320) : tensor<[%shape_vocabulary_size]xf32>
   %token_id = check.generate.fill value(-1) : tensor<1xi32>
   %partial_logits = check.generate.fill value(0.0) : tensor<61xf32>
   %partial_token_ids = check.generate.fill value(-1) : tensor<61xi32>
-  kernel.launch @qwen38_greedy_argmax_partial_rows_f32[%token_count, %output_size](%token_count, %output_size, %logits, %partial_logits, %partial_token_ids) : [index, index](index, index, tensor<248320xf32>, tensor<61xf32>, tensor<61xi32>)
+  kernel.launch @qwen38_greedy_argmax_partial_rows_f32[%token_count, %output_size](%token_count, %output_size, %logits, %partial_logits, %partial_token_ids) : [index, index](index, index, tensor<[%shape_vocabulary_size]xf32>, tensor<61xf32>, tensor<61xi32>)
   kernel.launch @qwen38_greedy_argmax_reduce_rows_f32[%token_count, %output_size](%token_count, %output_size, %partial_logits, %partial_token_ids, %token_id) : [index, index](index, index, tensor<61xf32>, tensor<61xi32>, tensor<1xi32>)
   check.return
 }
 
 check.case public @qwen38_greedy_argmax_vocabulary_rows_baseline_benchmark_case {
+  %shape_vocabulary_size = config.get @qwen.model.vocabulary_size : index
   %token_count = check.literal value(4) : index
   %output_size = check.literal value(248320) : index
-  %logits = check.generate.iota offset(0.0) step(1.0) period(248320) : tensor<4x248320xf32>
+  %logits = check.generate.iota offset(0.0) step(1.0) period(248320) : tensor<4x[%shape_vocabulary_size]xf32>
   %token_ids = check.generate.fill value(-1) : tensor<4xi32>
-  kernel.launch @qwen38_greedy_argmax_rows_f32[%token_count, %output_size](%token_count, %output_size, %logits, %token_ids) : [index, index](index, index, tensor<4x248320xf32>, tensor<4xi32>)
+  kernel.launch @qwen38_greedy_argmax_rows_f32[%token_count, %output_size](%token_count, %output_size, %logits, %token_ids) : [index, index](index, index, tensor<4x[%shape_vocabulary_size]xf32>, tensor<4xi32>)
   check.return
 }
 
 check.case public @qwen38_greedy_argmax_vocabulary_rows_parallel_benchmark_case {
+  %shape_vocabulary_size = config.get @qwen.model.vocabulary_size : index
   %token_count = check.literal value(4) : index
   %output_size = check.literal value(248320) : index
-  %logits = check.generate.iota offset(0.0) step(1.0) period(248320) : tensor<4x248320xf32>
+  %logits = check.generate.iota offset(0.0) step(1.0) period(248320) : tensor<4x[%shape_vocabulary_size]xf32>
   %token_ids = check.generate.fill value(-1) : tensor<4xi32>
   %partial_logits = check.generate.fill value(0.0) : tensor<4x61xf32>
   %partial_token_ids = check.generate.fill value(-1) : tensor<4x61xi32>
-  kernel.launch @qwen38_greedy_argmax_partial_rows_f32[%token_count, %output_size](%token_count, %output_size, %logits, %partial_logits, %partial_token_ids) : [index, index](index, index, tensor<4x248320xf32>, tensor<4x61xf32>, tensor<4x61xi32>)
+  kernel.launch @qwen38_greedy_argmax_partial_rows_f32[%token_count, %output_size](%token_count, %output_size, %logits, %partial_logits, %partial_token_ids) : [index, index](index, index, tensor<4x[%shape_vocabulary_size]xf32>, tensor<4x61xf32>, tensor<4x61xi32>)
   kernel.launch @qwen38_greedy_argmax_reduce_rows_f32[%token_count, %output_size](%token_count, %output_size, %partial_logits, %partial_token_ids, %token_ids) : [index, index](index, index, tensor<4x61xf32>, tensor<4x61xi32>, tensor<4xi32>)
   check.return
 }

@@ -1,3 +1,9 @@
+// Model geometry is supplied by the selected architecture catalog.
+config.decl @qwen.model.head_size : index
+config.decl @qwen.model.rope_half : index
+config.decl @qwen.model.rope_log_step : f32
+config.decl @qwen.model.rope_size : index
+
 template.decl @qwen38.attention.rope_text_value(%position: i32, %lane0: index, %normalized_head: buffer) -> (f32)
 
 // Shared Qwen3.8-27B text-attention helpers.
@@ -7,12 +13,13 @@ template.decl @qwen38.attention.rope_text_value(%position: i32, %lane0: index, %
 // interleaved MRoPE to a 64-wide NEOX rotation. The first 64 values use pairs
 // separated by 32; the remaining 192 values pass through.
 template.def<@qwen38.attention.rope_text_value> device @qwen38_attention_rope_text_value(%position: i32, %lane0: index, %normalized_head: buffer) -> (f32) {
+  %shape_head_size = config.get @qwen.model.head_size : index
   %lane = index.assume %lane0 [range(%lane0, 0, 255)] : index
   %c0_offset = index.constant 0 : offset
-  %head_view = buffer.view %normalized_head[%c0_offset] : buffer -> view<256xf32>
-  %value = view.load %head_view[%lane] : view<256xf32> -> f32
-  %c32 = index.constant 32 : index
-  %c64 = index.constant 64 : index
+  %head_view = buffer.view %normalized_head[%c0_offset] : buffer -> view<[%shape_head_size]xf32>
+  %value = view.load %head_view[%lane] : view<[%shape_head_size]xf32> -> f32
+  %c32 = config.get @qwen.model.rope_half : index
+  %c64 = config.get @qwen.model.rope_size : index
   %rotates = index.cmp ult, %lane, %c64 : index
   %result = scf.if %rotates -> (f32) {
     %is_low_half = index.cmp ult, %lane, %c32 : index
@@ -23,11 +30,11 @@ template.def<@qwen38.attention.rope_text_value> device @qwen38_attention_rope_te
       %low_lane = index.sub %lane, %c32 : index
       scf.yield %low_lane, %low_lane : index, index
     }
-    %partner_value = view.load %head_view[%partner] : view<256xf32> -> f32
+    %partner_value = view.load %head_view[%partner] : view<[%shape_head_size]xf32> -> f32
     %pair_i32 = index.cast %pair : index to i32
     %pair_f32 = scalar.uitofp %pair_i32 : i32 to f32
     %position_f32 = scalar.sitofp %position : i32 to f32
-    %log_frequency_step = scalar.constant -0.5036904811859131 : f32
+    %log_frequency_step = config.get @qwen.model.rope_log_step : f32
     %log_frequency = scalar.mulf %pair_f32, %log_frequency_step : f32
     %frequency = scalar.expf<afn> %log_frequency : f32
     %angle = scalar.mulf %position_f32, %frequency : f32

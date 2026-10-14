@@ -3,6 +3,10 @@
 // Licensed under the Apache License v2.0 with LLVM Exceptions.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+// Model geometry is supplied by the selected architecture catalog.
+config.decl @qwen.model.hidden_row_bytes : index
+config.decl @qwen.model.hidden_size : index
+
 template.decl @qwen38.rmsnorm_f32.row(%input_row_count: index, %input_row: index, %output_origin: offset, %epsilon: f32, %input: buffer, %weight: buffer, %output: buffer)
 
 amdgpu.target<gfx11-generic> @qwen38_output_spans_gfx11_wave32 {subgroup_size = 32}
@@ -17,11 +21,13 @@ kernel.def target(@qwen38_output_spans_gfx11_wave32) export("qwen38_output_norma
   %threads = index.constant 256 : index
   kernel.launch.config workgroups(%outputs, %one, %one) workgroup_size(%threads, %one, %one) : index
 } launch(%epoch: buffer, %epsilon: f32, %input: buffer, %weight: buffer, %output: buffer) {
+  %shape_hidden_row_bytes = config.get @qwen.model.hidden_row_bytes : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %ordinal_value = kernel.workgroup.id<x> : index
   %ordinal = index.assume %ordinal_value [range(%ordinal_value, 0, 63)] : index
   %zero_origin = index.constant 0 : offset
   %selection_origin = index.constant 1292 : offset
-  %row_bytes = index.constant 20480 : offset
+  %row_bytes = index.cast %shape_hidden_row_bytes : index to offset
   %output_origin = index.scale %ordinal, %row_bytes : index, offset -> offset
   %metadata = buffer.assume.memory_space<constant> %epoch : buffer
   %header = buffer.view %metadata[%zero_origin] : buffer -> view<3xi32>
@@ -38,11 +44,11 @@ kernel.def target(@qwen38_output_spans_gfx11_wave32) export("qwen38_output_norma
   } else {
     %lane = kernel.workitem.id<x> : index
     %threads = index.constant 256 : index
-    %hidden = index.constant 5120 : index
+    %hidden = config.get @qwen.model.hidden_size : index
     %zero = scalar.constant 0.0 : f32
-    %row = buffer.view %output[%output_origin] : buffer -> view<5120xf32>
+    %row = buffer.view %output[%output_origin] : buffer -> view<[%shape_hidden_size]xf32>
     scf.for %element = [%lane to %hidden step %threads] {
-      view.store %zero, %row[%element] : f32, view<5120xf32>
+      view.store %zero, %row[%element] : f32, view<[%shape_hidden_size]xf32>
     }
   }
   kernel.return

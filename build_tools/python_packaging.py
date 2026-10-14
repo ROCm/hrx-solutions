@@ -212,7 +212,7 @@ def stage_loom_source_catalog(package_root: Path) -> list[Path]:
         if source.is_file():
             _copy_file(source, packaged_catalog / source.relative_to(repository_catalog))
 
-    manifest = packaged_catalog / "qwen" / "sources.txt"
+    manifest = packaged_catalog / "qwen" / "qwen_27b" / "sources.txt"
     if not manifest.is_file():
         raise RuntimeError(f"Checked-in Qwen source manifest is missing: {manifest}")
     catalog_root = packaged_catalog.resolve()

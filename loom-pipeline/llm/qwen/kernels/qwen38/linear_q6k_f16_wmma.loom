@@ -1,3 +1,14 @@
+// Model geometry is supplied by the selected architecture catalog.
+config.decl @qwen.model.ffn_q8_row_bytes : index
+config.decl @qwen.model.ffn_qk_blocks : index
+config.decl @qwen.model.ffn_size : index
+config.decl @qwen.model.gdn_qkv_size : index
+config.decl @qwen.model.hidden_q8_row_bytes : index
+config.decl @qwen.model.hidden_qk_blocks : index
+
+config.decl @qwen.model.hidden_size : index
+config.decl @qwen.model.query_gate_size : index
+
 template.decl @ggml.q6k.f16_vector4(%weight: buffer, %weight_row_byte_base: offset, %q6_block: index, %q6_group: index, %packet: index) -> (vector<4xf16>)
 template.decl @qwen38.dense.signed_weight_f16_vector4(%format: index, %weight: buffer, %row_byte_base: offset, %quant_block: index, %quant_group: index, %packet: index) -> (vector<4xf16>)
 template.decl @qwen38.dense_q6k_f16_wmma.body(%weight_format: index, %weight_macro_block_byte_count: index, %token_count: index, %input_size0: index, %output_size0: index, %channel_tile: index, %token_tile: index, %channel_tile_width: index, %token_tile_width: index, %channel_group_count: index, %workgroup_size: index, %subgroup_count: index, %workitem: index, %subgroup: index, %lane: index, %input: buffer, %weight: buffer, %output: buffer)
@@ -637,6 +648,7 @@ template.def<@qwen38.dense_q6k_f16_wmma.c64t32.epilogue> device @qwen38_dense_q6
 // Assigns one 16-channel by 32-token tile to each of four waves. The waves
 // share the activation tile while retaining independent F32 accumulators.
 template.def<@qwen38.dense_q6k_f16_wmma.c64t32.body> device @qwen38_dense_q6k_f16_wmma_c64t32_body(%epilogue: index, %token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %output: buffer) {
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
@@ -789,8 +801,8 @@ kernel.def target(@qwen38_q6k_gfx11_wave64) export("qwen38_linear_q6k_f16_wmma_c
   kernel.launch.config workgroups(%c192, %c1, %c1) workgroup_size(%c256, %c1, %c1) : index
 } launch(%token_count_data: buffer, %input: buffer, %weight: buffer, %output: buffer) {
   %epilogue = index.constant 0 : index
-  %input_size = index.constant 5120 : index
-  %output_size = index.constant 12288 : index
+  %input_size = config.get @qwen.model.hidden_size : index
+  %output_size = config.get @qwen.model.query_gate_size : index
   template.apply<@qwen38.dense_q6k_f16_wmma.c64t32.body>(%epilogue, %token_count_data, %input_size, %output_size, %input, %weight, %output) : (index, buffer, index, index, buffer, buffer, buffer)
   kernel.return
 }
@@ -873,18 +885,20 @@ check.case public @qwen38_linear_q8_0_f16_wmma_x128_scalar_reference_case {
 // Finite channel-varying Q8_0 blocks and distinct activation rows exercise the
 // entire 55,705,600-byte weight range. Tolerance includes F16 operand rounding.
 check.case public @qwen38_mtp_projection_8_case {
+  %shape_gdn_qkv_size = config.get @qwen.model.gdn_qkv_size : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %tokens = check.literal value(8) : index
   %hidden = check.literal value(10240) : index
   %channels = check.literal value(5120) : index
   %control = check.generate.fill value(8) : tensor<1xi32>
   %seed = check.param.seed base(72831) count(2) : i64
-  %input = check.generate.random.uniform seed(%seed) range(-1.0 to 1.0) : tensor<8x10240xf32>
-  %weight = check.generate.random.uniform seed(%seed) range(0 to 31) : tensor<5120x320x34xi8>
-  %actual = check.generate.fill value(17.0) : tensor<8x5120xf32>
-  %expected = check.generate.fill value(-17.0) : tensor<8x5120xf32>
-  kernel.launch @qwen38_linear_q8_0_f32_reference[%tokens, %hidden, %channels](%tokens, %hidden, %channels, %input, %weight, %expected) : [index, index, index](index, index, index, tensor<8x10240xf32>, tensor<5120x320x34xi8>, tensor<8x5120xf32>)
-  kernel.launch @qwen38_linear_q8_0_f16_wmma_x128[%tokens, %hidden, %channels](%control, %hidden, %channels, %input, %weight, %actual) : [index, index, index](tensor<1xi32>, index, index, tensor<8x10240xf32>, tensor<5120x320x34xi8>, tensor<8x5120xf32>)
-  check.expect.close actual(%actual) expected(%expected) atol(0.005) rtol(0.001) nan(same) : tensor<8x5120xf32>
+  %input = check.generate.random.uniform seed(%seed) range(-1.0 to 1.0) : tensor<8x[%shape_gdn_qkv_size]xf32>
+  %weight = check.generate.random.uniform seed(%seed) range(0 to 31) : tensor<[%shape_hidden_size]x320x34xi8>
+  %actual = check.generate.fill value(17.0) : tensor<8x[%shape_hidden_size]xf32>
+  %expected = check.generate.fill value(-17.0) : tensor<8x[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_linear_q8_0_f32_reference[%tokens, %hidden, %channels](%tokens, %hidden, %channels, %input, %weight, %expected) : [index, index, index](index, index, index, tensor<8x[%shape_gdn_qkv_size]xf32>, tensor<[%shape_hidden_size]x320x34xi8>, tensor<8x[%shape_hidden_size]xf32>)
+  kernel.launch @qwen38_linear_q8_0_f16_wmma_x128[%tokens, %hidden, %channels](%control, %hidden, %channels, %input, %weight, %actual) : [index, index, index](tensor<1xi32>, index, index, tensor<8x[%shape_gdn_qkv_size]xf32>, tensor<[%shape_hidden_size]x320x34xi8>, tensor<8x[%shape_hidden_size]xf32>)
+  check.expect.close actual(%actual) expected(%expected) atol(0.005) rtol(0.001) nan(same) : tensor<8x[%shape_hidden_size]xf32>
   check.return
 }
 
@@ -892,64 +906,70 @@ check.case public @qwen38_mtp_projection_8_case {
 // Finite channel-varying Q8_0 blocks and distinct activation rows exercise the
 // entire 55,705,600-byte weight range. Tolerance includes F16 operand rounding.
 check.case public @qwen38_mtp_projection_512_case {
+  %shape_gdn_qkv_size = config.get @qwen.model.gdn_qkv_size : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %tokens = check.literal value(512) : index
   %hidden = check.literal value(10240) : index
   %channels = check.literal value(5120) : index
   %control = check.generate.fill value(512) : tensor<1xi32>
   %seed = check.param.seed base(72831) count(2) : i64
-  %input = check.generate.random.uniform seed(%seed) range(-1.0 to 1.0) : tensor<512x10240xf32>
-  %weight = check.generate.random.uniform seed(%seed) range(0 to 31) : tensor<5120x320x34xi8>
-  %actual = check.generate.fill value(17.0) : tensor<512x5120xf32>
-  %expected = check.generate.fill value(-17.0) : tensor<512x5120xf32>
-  kernel.launch @qwen38_linear_q8_0_f32_reference[%tokens, %hidden, %channels](%tokens, %hidden, %channels, %input, %weight, %expected) : [index, index, index](index, index, index, tensor<512x10240xf32>, tensor<5120x320x34xi8>, tensor<512x5120xf32>)
-  kernel.launch @qwen38_linear_q8_0_f16_wmma_x128[%tokens, %hidden, %channels](%control, %hidden, %channels, %input, %weight, %actual) : [index, index, index](tensor<1xi32>, index, index, tensor<512x10240xf32>, tensor<5120x320x34xi8>, tensor<512x5120xf32>)
-  check.expect.close actual(%actual) expected(%expected) atol(0.005) rtol(0.001) nan(same) : tensor<512x5120xf32>
+  %input = check.generate.random.uniform seed(%seed) range(-1.0 to 1.0) : tensor<512x[%shape_gdn_qkv_size]xf32>
+  %weight = check.generate.random.uniform seed(%seed) range(0 to 31) : tensor<[%shape_hidden_size]x320x34xi8>
+  %actual = check.generate.fill value(17.0) : tensor<512x[%shape_hidden_size]xf32>
+  %expected = check.generate.fill value(-17.0) : tensor<512x[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_linear_q8_0_f32_reference[%tokens, %hidden, %channels](%tokens, %hidden, %channels, %input, %weight, %expected) : [index, index, index](index, index, index, tensor<512x[%shape_gdn_qkv_size]xf32>, tensor<[%shape_hidden_size]x320x34xi8>, tensor<512x[%shape_hidden_size]xf32>)
+  kernel.launch @qwen38_linear_q8_0_f16_wmma_x128[%tokens, %hidden, %channels](%control, %hidden, %channels, %input, %weight, %actual) : [index, index, index](tensor<1xi32>, index, index, tensor<512x[%shape_gdn_qkv_size]xf32>, tensor<[%shape_hidden_size]x320x34xi8>, tensor<512x[%shape_hidden_size]xf32>)
+  check.expect.close actual(%actual) expected(%expected) atol(0.005) rtol(0.001) nan(same) : tensor<512x[%shape_hidden_size]xf32>
   check.return
 }
 
 check.case public @qwen38_linear_q8_0_f16_wmma_x128_prefill_128_case {
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %token_count = check.literal value(128) : index
   %input_size = check.literal value(5120) : index
   %output_size = check.literal value(1024) : index
   %token_count_data = check.generate.fill value(128) : tensor<1xi32>
-  %input = check.generate.fill value(0.25) : tensor<128x5120xf32>
+  %input = check.generate.fill value(0.25) : tensor<128x[%shape_hidden_size]xf32>
   %weight = check.generate.fill value(1) : tensor<1024x160x34xi8>
   %output = check.generate.fill value(0.0) : tensor<128x1024xf32>
-  kernel.launch @qwen38_linear_q8_0_f16_wmma_x128[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<128x5120xf32>, tensor<1024x160x34xi8>, tensor<128x1024xf32>)
+  kernel.launch @qwen38_linear_q8_0_f16_wmma_x128[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<128x[%shape_hidden_size]xf32>, tensor<1024x160x34xi8>, tensor<128x1024xf32>)
   check.return
 }
 
 check.case public @qwen38_linear_q8_0_q8_1_x4_prefill_128_case {
+  %shape_hidden_q8_row_bytes = config.get @qwen.model.hidden_q8_row_bytes : index
   %token_count = check.literal value(128) : index
   %input_size = check.literal value(5120) : index
   %output_size = check.literal value(1024) : index
-  %input = check.generate.fill value(1) : tensor<128x5760xi8>
+  %input = check.generate.fill value(1) : tensor<128x[%shape_hidden_q8_row_bytes]xi8>
   %weight = check.generate.fill value(1) : tensor<1024x160x34xi8>
   %output = check.generate.fill value(0.0) : tensor<128x1024xf32>
-  kernel.launch @ggml_linear_q8_0_q8_1_x4[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %input, %weight, %output) : [index, index, index](index, index, index, tensor<128x5760xi8>, tensor<1024x160x34xi8>, tensor<128x1024xf32>)
+  kernel.launch @ggml_linear_q8_0_q8_1_x4[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %input, %weight, %output) : [index, index, index](index, index, index, tensor<128x[%shape_hidden_q8_row_bytes]xi8>, tensor<1024x160x34xi8>, tensor<128x1024xf32>)
   check.return
 }
 
 check.case public @qwen38_linear_q8_0_f16_wmma_x128_prefill_512_case {
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %token_count = check.literal value(512) : index
   %input_size = check.literal value(5120) : index
   %output_size = check.literal value(1024) : index
   %token_count_data = check.generate.fill value(512) : tensor<1xi32>
-  %input = check.generate.fill value(0.25) : tensor<512x5120xf32>
+  %input = check.generate.fill value(0.25) : tensor<512x[%shape_hidden_size]xf32>
   %weight = check.generate.fill value(1) : tensor<1024x160x34xi8>
   %output = check.generate.fill value(0.0) : tensor<512x1024xf32>
-  kernel.launch @qwen38_linear_q8_0_f16_wmma_x128[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<512x5120xf32>, tensor<1024x160x34xi8>, tensor<512x1024xf32>)
+  kernel.launch @qwen38_linear_q8_0_f16_wmma_x128[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<512x[%shape_hidden_size]xf32>, tensor<1024x160x34xi8>, tensor<512x1024xf32>)
   check.return
 }
 
 check.case public @qwen38_linear_q8_0_q8_1_x4_prefill_512_case {
+  %shape_hidden_q8_row_bytes = config.get @qwen.model.hidden_q8_row_bytes : index
   %token_count = check.literal value(512) : index
   %input_size = check.literal value(5120) : index
   %output_size = check.literal value(1024) : index
-  %input = check.generate.fill value(1) : tensor<512x5760xi8>
+  %input = check.generate.fill value(1) : tensor<512x[%shape_hidden_q8_row_bytes]xi8>
   %weight = check.generate.fill value(1) : tensor<1024x160x34xi8>
   %output = check.generate.fill value(0.0) : tensor<512x1024xf32>
-  kernel.launch @ggml_linear_q8_0_q8_1_x4[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %input, %weight, %output) : [index, index, index](index, index, index, tensor<512x5760xi8>, tensor<1024x160x34xi8>, tensor<512x1024xf32>)
+  kernel.launch @ggml_linear_q8_0_q8_1_x4[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %input, %weight, %output) : [index, index, index](index, index, index, tensor<512x[%shape_hidden_q8_row_bytes]xi8>, tensor<1024x160x34xi8>, tensor<512x1024xf32>)
   check.return
 }
 
@@ -992,20 +1012,21 @@ check.case public @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_differential_case {
 // Proves that the in-place residual epilogue is bit-identical to publishing
 // the projection and adding it with the standalone layer primitive.
 check.case public @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_residual_differential_case {
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %token_count = check.literal value(32) : index
   %input_size = check.literal value(256) : index
   %output_size = check.literal value(5120) : index
   %token_count_data = check.generate.fill value(32) : tensor<1xi32>
   %input = check.generate.iota offset(-0.75) step(0.0078125) : tensor<32x256xf32>
-  %weight = check.generate.fill value(1) : tensor<5120x210xi8>
-  %projection = check.generate.fill value(0.0) : tensor<32x5120xf32>
-  %expected = check.generate.fill value(0.5) : tensor<32x5120xf32>
-  %actual = check.generate.fill value(0.5) : tensor<32x5120xf32>
-  kernel.launch @qwen38_q6k_fix_differential_headers(%weight) : (tensor<5120x210xi8>)
-  kernel.launch @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_residual[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %projection) : [index, index, index](tensor<1xi32>, index, index, tensor<32x256xf32>, tensor<5120x210xi8>, tensor<32x5120xf32>)
-  kernel.launch @qwen38_residual_add_f32_prefill[%token_count](%token_count, %expected, %projection, %expected) : [index](index, tensor<32x5120xf32>, tensor<32x5120xf32>, tensor<32x5120xf32>)
-  kernel.launch @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_residual[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %actual) : [index, index, index](tensor<1xi32>, index, index, tensor<32x256xf32>, tensor<5120x210xi8>, tensor<32x5120xf32>)
-  check.expect.close actual(%actual) expected(%expected) atol(0.0) rtol(0.0) nan(same) : tensor<32x5120xf32>
+  %weight = check.generate.fill value(1) : tensor<[%shape_hidden_size]x210xi8>
+  %projection = check.generate.fill value(0.0) : tensor<32x[%shape_hidden_size]xf32>
+  %expected = check.generate.fill value(0.5) : tensor<32x[%shape_hidden_size]xf32>
+  %actual = check.generate.fill value(0.5) : tensor<32x[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_q6k_fix_differential_headers(%weight) : (tensor<[%shape_hidden_size]x210xi8>)
+  kernel.launch @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_residual[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %projection) : [index, index, index](tensor<1xi32>, index, index, tensor<32x256xf32>, tensor<[%shape_hidden_size]x210xi8>, tensor<32x[%shape_hidden_size]xf32>)
+  kernel.launch @qwen38_residual_add_f32_prefill[%token_count](%token_count, %expected, %projection, %expected) : [index](index, tensor<32x[%shape_hidden_size]xf32>, tensor<32x[%shape_hidden_size]xf32>, tensor<32x[%shape_hidden_size]xf32>)
+  kernel.launch @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_residual[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %actual) : [index, index, index](tensor<1xi32>, index, index, tensor<32x256xf32>, tensor<[%shape_hidden_size]x210xi8>, tensor<32x[%shape_hidden_size]xf32>)
+  check.expect.close actual(%actual) expected(%expected) atol(0.0) rtol(0.0) nan(same) : tensor<32x[%shape_hidden_size]xf32>
   check.return
 }
 
@@ -1027,111 +1048,138 @@ check.case public @qwen38_linear_q6k_f16_wmma_c128_t128_differential_case {
 }
 
 check.case public @qwen38_linear_q6k_f16_wmma_prefill_512_case {
+  %shape_ffn_qk_blocks = config.get @qwen.model.ffn_qk_blocks : index
+  %shape_ffn_size = config.get @qwen.model.ffn_size : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %token_count = check.literal value(512) : index
   %input_size = check.literal value(17408) : index
   %output_size = check.literal value(5120) : index
   %token_count_data = check.generate.fill value(512) : tensor<1xi32>
-  %input = check.generate.fill value(0.25) : tensor<512x17408xf32>
-  %weight = check.generate.fill value(1) : tensor<5120x68x210xi8>
-  %output = check.generate.fill value(0.0) : tensor<512x5120xf32>
-  kernel.launch @qwen38_linear_q6k_f16_wmma_x128[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<512x17408xf32>, tensor<5120x68x210xi8>, tensor<512x5120xf32>)
+  %input = check.generate.fill value(0.25) : tensor<512x[%shape_ffn_size]xf32>
+  %weight = check.generate.fill value(1) : tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>
+  %output = check.generate.fill value(0.0) : tensor<512x[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_linear_q6k_f16_wmma_x128[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<512x[%shape_ffn_size]xf32>, tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>, tensor<512x[%shape_hidden_size]xf32>)
   check.return
 }
 
 check.case public @qwen38_linear_q6k_f16_wmma_prefill_32_case {
+  %shape_ffn_qk_blocks = config.get @qwen.model.ffn_qk_blocks : index
+  %shape_ffn_size = config.get @qwen.model.ffn_size : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %token_count = check.literal value(32) : index
   %input_size = check.literal value(17408) : index
   %output_size = check.literal value(5120) : index
   %token_count_data = check.generate.fill value(32) : tensor<1xi32>
-  %input = check.generate.fill value(0.25) : tensor<32x17408xf32>
-  %weight = check.generate.fill value(1) : tensor<5120x68x210xi8>
-  %output = check.generate.fill value(0.0) : tensor<32x5120xf32>
-  kernel.launch @qwen38_linear_q6k_f16_wmma_x64[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<32x17408xf32>, tensor<5120x68x210xi8>, tensor<32x5120xf32>)
+  %input = check.generate.fill value(0.25) : tensor<32x[%shape_ffn_size]xf32>
+  %weight = check.generate.fill value(1) : tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>
+  %output = check.generate.fill value(0.0) : tensor<32x[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_linear_q6k_f16_wmma_x64[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<32x[%shape_ffn_size]xf32>, tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>, tensor<32x[%shape_hidden_size]xf32>)
   check.return
 }
 
 check.case public @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_prefill_32_case {
+  %shape_ffn_qk_blocks = config.get @qwen.model.ffn_qk_blocks : index
+  %shape_ffn_size = config.get @qwen.model.ffn_size : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %token_count = check.literal value(32) : index
   %input_size = check.literal value(17408) : index
   %output_size = check.literal value(5120) : index
   %token_count_data = check.generate.fill value(32) : tensor<1xi32>
-  %input = check.generate.fill value(0.25) : tensor<32x17408xf32>
-  %weight = check.generate.fill value(1) : tensor<5120x68x210xi8>
-  %output = check.generate.fill value(0.0) : tensor<32x5120xf32>
-  kernel.launch @qwen38_linear_q6k_f16_wmma_c64t32_f32acc[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<32x17408xf32>, tensor<5120x68x210xi8>, tensor<32x5120xf32>)
+  %input = check.generate.fill value(0.25) : tensor<32x[%shape_ffn_size]xf32>
+  %weight = check.generate.fill value(1) : tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>
+  %output = check.generate.fill value(0.0) : tensor<32x[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_linear_q6k_f16_wmma_c64t32_f32acc[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<32x[%shape_ffn_size]xf32>, tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>, tensor<32x[%shape_hidden_size]xf32>)
   check.return
 }
 
 // Exercises the attention query projection shape used by every attention
 // layer at PP32.
 check.case public @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_query_prefill_32_case {
+  %shape_hidden_qk_blocks = config.get @qwen.model.hidden_qk_blocks : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
+  %shape_query_gate_size = config.get @qwen.model.query_gate_size : index
   %token_count = check.literal value(32) : index
   %input_size = check.literal value(5120) : index
   %output_size = check.literal value(12288) : index
   %token_count_data = check.generate.fill value(32) : tensor<1xi32>
-  %input = check.generate.fill value(0.25) : tensor<32x5120xf32>
-  %weight = check.generate.fill value(1) : tensor<12288x20x210xi8>
-  %output = check.generate.fill value(0.0) : tensor<32x12288xf32>
-  kernel.launch @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_query_pp32_report(%token_count_data, %input, %weight, %output) : (tensor<1xi32>, tensor<32x5120xf32>, tensor<12288x20x210xi8>, tensor<32x12288xf32>)
+  %input = check.generate.fill value(0.25) : tensor<32x[%shape_hidden_size]xf32>
+  %weight = check.generate.fill value(1) : tensor<[%shape_query_gate_size]x[%shape_hidden_qk_blocks]x210xi8>
+  %output = check.generate.fill value(0.0) : tensor<32x[%shape_query_gate_size]xf32>
+  kernel.launch @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_query_pp32_report(%token_count_data, %input, %weight, %output) : (tensor<1xi32>, tensor<32x[%shape_hidden_size]xf32>, tensor<[%shape_query_gate_size]x[%shape_hidden_qk_blocks]x210xi8>, tensor<32x[%shape_query_gate_size]xf32>)
   check.return
 }
 
 check.case public @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_residual_prefill_32_case {
+  %shape_ffn_qk_blocks = config.get @qwen.model.ffn_qk_blocks : index
+  %shape_ffn_size = config.get @qwen.model.ffn_size : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %token_count = check.literal value(32) : index
   %input_size = check.literal value(17408) : index
   %output_size = check.literal value(5120) : index
   %token_count_data = check.generate.fill value(32) : tensor<1xi32>
-  %input = check.generate.fill value(0.25) : tensor<32x17408xf32>
-  %weight = check.generate.fill value(1) : tensor<5120x68x210xi8>
-  %residual = check.generate.fill value(0.5) : tensor<32x5120xf32>
-  kernel.launch @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_residual[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %residual) : [index, index, index](tensor<1xi32>, index, index, tensor<32x17408xf32>, tensor<5120x68x210xi8>, tensor<32x5120xf32>)
+  %input = check.generate.fill value(0.25) : tensor<32x[%shape_ffn_size]xf32>
+  %weight = check.generate.fill value(1) : tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>
+  %residual = check.generate.fill value(0.5) : tensor<32x[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_residual[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %residual) : [index, index, index](tensor<1xi32>, index, index, tensor<32x[%shape_ffn_size]xf32>, tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>, tensor<32x[%shape_hidden_size]xf32>)
   check.return
 }
 
 check.case public @qwen38_linear_q6k_f16_wmma_prefill_128_case {
+  %shape_ffn_qk_blocks = config.get @qwen.model.ffn_qk_blocks : index
+  %shape_ffn_size = config.get @qwen.model.ffn_size : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %token_count = check.literal value(128) : index
   %input_size = check.literal value(17408) : index
   %output_size = check.literal value(5120) : index
   %token_count_data = check.generate.fill value(128) : tensor<1xi32>
-  %input = check.generate.fill value(0.25) : tensor<128x17408xf32>
-  %weight = check.generate.fill value(1) : tensor<5120x68x210xi8>
-  %output = check.generate.fill value(0.0) : tensor<128x5120xf32>
-  kernel.launch @qwen38_linear_q6k_f16_wmma_x128[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<128x17408xf32>, tensor<5120x68x210xi8>, tensor<128x5120xf32>)
+  %input = check.generate.fill value(0.25) : tensor<128x[%shape_ffn_size]xf32>
+  %weight = check.generate.fill value(1) : tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>
+  %output = check.generate.fill value(0.0) : tensor<128x[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_linear_q6k_f16_wmma_x128[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<128x[%shape_ffn_size]xf32>, tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>, tensor<128x[%shape_hidden_size]xf32>)
   check.return
 }
 
 check.case public @qwen38_linear_q6k_f16_wmma_c128_t128_prefill_128_case {
+  %shape_ffn_qk_blocks = config.get @qwen.model.ffn_qk_blocks : index
+  %shape_ffn_size = config.get @qwen.model.ffn_size : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %token_count = check.literal value(128) : index
   %input_size = check.literal value(17408) : index
   %output_size = check.literal value(5120) : index
   %token_count_data = check.generate.fill value(128) : tensor<1xi32>
-  %input = check.generate.fill value(0.25) : tensor<128x17408xf32>
-  %weight = check.generate.fill value(1) : tensor<5120x68x210xi8>
-  %output = check.generate.fill value(0.0) : tensor<128x5120xf32>
-  kernel.launch @qwen38_linear_q6k_f16_wmma_c128_t128[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<128x17408xf32>, tensor<5120x68x210xi8>, tensor<128x5120xf32>)
+  %input = check.generate.fill value(0.25) : tensor<128x[%shape_ffn_size]xf32>
+  %weight = check.generate.fill value(1) : tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>
+  %output = check.generate.fill value(0.0) : tensor<128x[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_linear_q6k_f16_wmma_c128_t128[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<128x[%shape_ffn_size]xf32>, tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>, tensor<128x[%shape_hidden_size]xf32>)
   check.return
 }
 
 check.case public @qwen38_linear_q6k_f16_wmma_c128_t128_prefill_512_case {
+  %shape_ffn_qk_blocks = config.get @qwen.model.ffn_qk_blocks : index
+  %shape_ffn_size = config.get @qwen.model.ffn_size : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %token_count = check.literal value(512) : index
   %input_size = check.literal value(17408) : index
   %output_size = check.literal value(5120) : index
   %token_count_data = check.generate.fill value(512) : tensor<1xi32>
-  %input = check.generate.fill value(0.25) : tensor<512x17408xf32>
-  %weight = check.generate.fill value(1) : tensor<5120x68x210xi8>
-  %output = check.generate.fill value(0.0) : tensor<512x5120xf32>
-  kernel.launch @qwen38_linear_q6k_f16_wmma_c128_t128[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<512x17408xf32>, tensor<5120x68x210xi8>, tensor<512x5120xf32>)
+  %input = check.generate.fill value(0.25) : tensor<512x[%shape_ffn_size]xf32>
+  %weight = check.generate.fill value(1) : tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>
+  %output = check.generate.fill value(0.0) : tensor<512x[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_linear_q6k_f16_wmma_c128_t128[%token_count, %input_size, %output_size](%token_count_data, %input_size, %output_size, %input, %weight, %output) : [index, index, index](tensor<1xi32>, index, index, tensor<512x[%shape_ffn_size]xf32>, tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>, tensor<512x[%shape_hidden_size]xf32>)
   check.return
 }
 
 check.case public @qwen38_linear_q6k_q8_1_x4_prefill_512_case {
+  %shape_ffn_q8_row_bytes = config.get @qwen.model.ffn_q8_row_bytes : index
+  %shape_ffn_qk_blocks = config.get @qwen.model.ffn_qk_blocks : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %token_count = check.literal value(512) : index
   %input_size = check.literal value(17408) : index
   %output_size = check.literal value(5120) : index
-  %input = check.generate.fill value(1) : tensor<512x19584xi8>
-  %weight = check.generate.fill value(1) : tensor<5120x68x210xi8>
-  %output = check.generate.fill value(0.0) : tensor<512x5120xf32>
-  kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %input, %weight, %output) : [index, index, index](index, index, index, tensor<512x19584xi8>, tensor<5120x68x210xi8>, tensor<512x5120xf32>)
+  %input = check.generate.fill value(1) : tensor<512x[%shape_ffn_q8_row_bytes]xi8>
+  %weight = check.generate.fill value(1) : tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>
+  %output = check.generate.fill value(0.0) : tensor<512x[%shape_hidden_size]xf32>
+  kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %input, %weight, %output) : [index, index, index](index, index, index, tensor<512x[%shape_ffn_q8_row_bytes]xi8>, tensor<[%shape_hidden_size]x[%shape_ffn_qk_blocks]x210xi8>, tensor<512x[%shape_hidden_size]xf32>)
   check.return
 }
 

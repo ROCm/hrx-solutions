@@ -1,3 +1,20 @@
+// Model geometry is supplied by the selected architecture catalog.
+config.decl @qwen.model.head_gate_size : index
+config.decl @qwen.model.head_scratch_bytes : index
+config.decl @qwen.model.kv_row_bytes : index
+
+config.decl @qwen.model.attention_width : index
+config.decl @qwen.model.query_gate_size : index
+
+config.decl @qwen.model.kv_size : index
+
+config.decl @qwen.model.attention_heads : index
+config.decl @qwen.model.attention_scale : f32
+config.decl @qwen.model.head_divisor : f32
+config.decl @qwen.model.head_size : index
+config.decl @qwen.model.kv_heads : index
+config.decl @qwen.model.query_gate_row_bytes : index
+
 template.decl @qwen38.attention.rope_text_value(%position: i32, %lane0: index, %normalized_head: buffer) -> (f32)
 
 template.decl @qwen38.attention.query_prepare(%head: index, %token0: index, %lane: index, %control: buffer, %epsilon: f32, %query_gate_projection: buffer, %norm_weight: buffer, %query: buffer, %gate: buffer, %control_origin: offset, %token_begin: index)
@@ -16,11 +33,15 @@ config.decl @qwen38.attention.cache_capacity : %value: index where [range(%value
 // Normalizes and rotates every query head while extracting its colocated
 // sigmoid gate. One workgroup owns one complete token/head pair.
 template.def<@qwen38.attention.query_prepare> device @qwen38_attention_query_prepare(%head: index, %token0: index, %lane: index, %control: buffer, %epsilon: f32, %query_gate_projection: buffer, %norm_weight: buffer, %query: buffer, %gate: buffer, %control_origin: offset, %token_begin: index) {
+  %shape_attention_width = config.get @qwen.model.attention_width : index
+  %shape_query_gate_size = config.get @qwen.model.query_gate_size : index
+  %shape_head_size = config.get @qwen.model.head_size : index
+  %shape_query_gate_row_bytes = config.get @qwen.model.query_gate_row_bytes : index
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c0_offset = index.constant 0 : offset
-  %c256 = index.constant 256 : index
-  %c512 = index.constant 512 : index
+  %c256 = config.get @qwen.model.head_size : index
+  %c512 = config.get @qwen.model.head_gate_size : index
   %control_view = buffer.view %control[%control_origin] : buffer -> view<2xi32>
   %token_count_i32 = view.load %control_view[%c0] : view<2xi32> -> i32
   %token_count0 = index.cast %token_count_i32 : i32 to index
@@ -33,40 +54,41 @@ template.def<@qwen38.attention.query_prepare> device @qwen38_attention_query_pre
     %position_base = index.assume %position_base0 [range(%position_base0, 0, 262143)] : index
     %position = index.add %position_base, %token : index
     %position_i32 = index.cast %position : index to i32
-    %projection_row_bytes = index.constant 49152 : offset
+    %projection_row_bytes = index.cast %shape_query_gate_row_bytes : index to offset
     %activation_row_bytes = index.constant 24576 : offset
     %projection_origin = index.scale %token_begin, %projection_row_bytes : index, offset -> offset
     %activation_origin = index.scale %token_begin, %activation_row_bytes : index, offset -> offset
-    %projection_view = buffer.view %query_gate_projection[%projection_origin] : buffer -> view<[%token_count]x12288xf32>
-    %weight_view = buffer.view %norm_weight[%c0_offset] : buffer -> view<256xf32>
-    %query_view = buffer.view %query[%activation_origin] : buffer -> view<[%token_count]x6144xf32>
-    %gate_view = buffer.view %gate[%activation_origin] : buffer -> view<[%token_count]x6144xf32>
+    %projection_view = buffer.view %query_gate_projection[%projection_origin] : buffer -> view<[%token_count]x[%shape_query_gate_size]xf32>
+    %weight_view = buffer.view %norm_weight[%c0_offset] : buffer -> view<[%shape_head_size]xf32>
+    %query_view = buffer.view %query[%activation_origin] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
+    %gate_view = buffer.view %gate[%activation_origin] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
     %head_projection_base = index.mul %head, %c512 : index
     %query_index = index.add %head_projection_base, %lane : index
     %gate_head_base = index.add %head_projection_base, %c256 : index
     %gate_index = index.add %gate_head_base, %lane : index
     %output_head_base = index.mul %head, %c256 : index
     %output_index = index.add %output_head_base, %lane : index
-    %raw_query = view.load %projection_view[%token, %query_index] : view<[%token_count]x12288xf32> -> f32
-    %raw_gate = view.load %projection_view[%token, %gate_index] : view<[%token_count]x12288xf32> -> f32
+    %raw_query = view.load %projection_view[%token, %query_index] : view<[%token_count]x[%shape_query_gate_size]xf32> -> f32
+    %raw_gate = view.load %projection_view[%token, %gate_index] : view<[%token_count]x[%shape_query_gate_size]xf32> -> f32
     %square = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %raw_query, %raw_query : f32
     %sum = kernel.workgroup.reduce<addf> %square : f32
-    %head_size_f32 = scalar.constant 256.0 : f32
+    %head_size_f32 = config.get @qwen.model.head_divisor : f32
     %mean = scalar.divf<nnan|ninf|nsz|arcp> %sum, %head_size_f32 : f32
     %biased_mean = scalar.addf<nnan|ninf|nsz> %mean, %epsilon : f32
     %inverse_rms = scalar.rsqrtf<nnan|ninf|nsz|afn> %biased_mean : f32
-    %weight = view.load %weight_view[%lane] : view<256xf32> -> f32
+    %weight = view.load %weight_view[%lane] : view<[%shape_head_size]xf32> -> f32
     %normalized0 = scalar.mulf<nnan|ninf|nsz> %raw_query, %inverse_rms : f32
     %normalized = scalar.mulf<nnan|ninf|nsz> %normalized0, %weight : f32
-    %scratch_bytes = index.constant 1024 : offset
+    %shape_head_scratch_bytes = config.get @qwen.model.head_scratch_bytes : index
+    %scratch_bytes = index.cast %shape_head_scratch_bytes : index to offset
     %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
-    %scratch_view = buffer.view %scratch[%c0_offset] : buffer -> view<256xf32>
-    view.store %normalized, %scratch_view[%lane] : f32, view<256xf32>
+    %scratch_view = buffer.view %scratch[%c0_offset] : buffer -> view<[%shape_head_size]xf32>
+    view.store %normalized, %scratch_view[%lane] : f32, view<[%shape_head_size]xf32>
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
     %rotated = template.apply<@qwen38.attention.rope_text_value>(%position_i32, %lane, %scratch) : (i32, index, buffer) -> (f32)
     %gate_value = scalar.logisticf<afn> %raw_gate : f32
-    view.store %rotated, %query_view[%token, %output_index] : f32, view<[%token_count]x6144xf32>
-    view.store %gate_value, %gate_view[%token, %output_index] : f32, view<[%token_count]x6144xf32>
+    view.store %rotated, %query_view[%token, %output_index] : f32, view<[%token_count]x[%shape_attention_width]xf32>
+    view.store %gate_value, %gate_view[%token, %output_index] : f32, view<[%token_count]x[%shape_attention_width]xf32>
   }
   template.return
 }
@@ -74,7 +96,7 @@ template.def<@qwen38.attention.query_prepare> device @qwen38_attention_query_pre
 kernel.def export("qwen38_attention_query_prepare_prefill") @qwen38_attention_query_prepare_prefill(%token_count: index) {
   %bounded_token_count = index.assume %token_count [range(%token_count, 1, 512)] : index
   %unit = index.constant 1 : index
-  %head_count = index.constant 24 : index
+  %head_count = config.get @qwen.model.attention_heads : index
   %workgroup_size = index.constant 256 : index
   kernel.launch.config workgroups(%head_count, %bounded_token_count, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
 } launch(%control: buffer, %epsilon: f32, %query_gate_projection: buffer, %norm_weight: buffer, %query: buffer, %gate: buffer) {
@@ -94,13 +116,15 @@ kernel.def export("qwen38_attention_query_prepare_prefill") @qwen38_attention_qu
 // Logical extent bounds positions and page maps independently of pool size;
 // concrete wrappers supply both capacities as specialization operands.
 template.def<@qwen38.attention.kv_prepare> device @qwen38_attention_kv_prepare(%logical_capacity: index, %head: index, %token0: index, %lane: index, %control: buffer, %epsilon: f32, %key_projection: buffer, %value_projection: buffer, %norm_weight: buffer, %key_cache: buffer, %value_cache: buffer, %control_origin: offset, %token_begin: index, %key_origin: offset, %value_origin: offset, %map: buffer, %map_origin: offset, %pool_capacity: index) {
+  %shape_kv_size = config.get @qwen.model.kv_size : index
+  %shape_head_size = config.get @qwen.model.head_size : index
   %zero = index.constant 0 : index
   %paged = index.cmp ne, %pool_capacity, %zero : index
   %physical_capacity = scf.select %paged, %pool_capacity, %logical_capacity : index
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c0_offset = index.constant 0 : offset
-  %c256 = index.constant 256 : index
+  %c256 = config.get @qwen.model.head_size : index
   %control_view = buffer.view %control[%control_origin] : buffer -> view<2xi32>
   %token_count_i32 = view.load %control_view[%c0] : view<2xi32> -> i32
   %token_count0 = index.cast %token_count_i32 : i32 to index
@@ -114,38 +138,40 @@ template.def<@qwen38.attention.kv_prepare> device @qwen38_attention_kv_prepare(%
     %position0 = index.add %position_base, %token : index
     %position = index.assume %position0 [lt(%position0, %logical_capacity)] : index
     %position_i32 = index.cast %position : index to i32
-    %projection_row_bytes = index.constant 4096 : offset
+    %shape_kv_row_bytes = config.get @qwen.model.kv_row_bytes : index
+    %projection_row_bytes = index.cast %shape_kv_row_bytes : index to offset
     %projection_origin = index.scale %token_begin, %projection_row_bytes : index, offset -> offset
-    %key_projection_view = buffer.view %key_projection[%projection_origin] : buffer -> view<[%token_count]x1024xf32>
-    %value_projection_view = buffer.view %value_projection[%projection_origin] : buffer -> view<[%token_count]x1024xf32>
-    %weight_view = buffer.view %norm_weight[%c0_offset] : buffer -> view<256xf32>
-    %key_cache_view = buffer.view %key_cache[%key_origin] : buffer -> view<[%physical_capacity]x1024xf16>
-    %value_cache_view = buffer.view %value_cache[%value_origin] : buffer -> view<[%physical_capacity]x1024xf16>
+    %key_projection_view = buffer.view %key_projection[%projection_origin] : buffer -> view<[%token_count]x[%shape_kv_size]xf32>
+    %value_projection_view = buffer.view %value_projection[%projection_origin] : buffer -> view<[%token_count]x[%shape_kv_size]xf32>
+    %weight_view = buffer.view %norm_weight[%c0_offset] : buffer -> view<[%shape_head_size]xf32>
+    %key_cache_view = buffer.view %key_cache[%key_origin] : buffer -> view<[%physical_capacity]x[%shape_kv_size]xf16>
+    %value_cache_view = buffer.view %value_cache[%value_origin] : buffer -> view<[%physical_capacity]x[%shape_kv_size]xf16>
     %head_base = index.mul %head, %c256 : index
     %projection_index = index.add %head_base, %lane : index
-    %raw_key = view.load %key_projection_view[%token, %projection_index] : view<[%token_count]x1024xf32> -> f32
-    %raw_value = view.load %value_projection_view[%token, %projection_index] : view<[%token_count]x1024xf32> -> f32
+    %raw_key = view.load %key_projection_view[%token, %projection_index] : view<[%token_count]x[%shape_kv_size]xf32> -> f32
+    %raw_value = view.load %value_projection_view[%token, %projection_index] : view<[%token_count]x[%shape_kv_size]xf32> -> f32
     %square = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %raw_key, %raw_key : f32
     %sum = kernel.workgroup.reduce<addf> %square : f32
-    %head_size_f32 = scalar.constant 256.0 : f32
+    %head_size_f32 = config.get @qwen.model.head_divisor : f32
     %mean = scalar.divf<nnan|ninf|nsz|arcp> %sum, %head_size_f32 : f32
     %biased_mean = scalar.addf<nnan|ninf|nsz> %mean, %epsilon : f32
     %inverse_rms = scalar.rsqrtf<nnan|ninf|nsz|afn> %biased_mean : f32
-    %weight = view.load %weight_view[%lane] : view<256xf32> -> f32
+    %weight = view.load %weight_view[%lane] : view<[%shape_head_size]xf32> -> f32
     %normalized0 = scalar.mulf<nnan|ninf|nsz> %raw_key, %inverse_rms : f32
     %normalized = scalar.mulf<nnan|ninf|nsz> %normalized0, %weight : f32
-    %scratch_bytes = index.constant 1024 : offset
+    %shape_head_scratch_bytes = config.get @qwen.model.head_scratch_bytes : index
+    %scratch_bytes = index.cast %shape_head_scratch_bytes : index to offset
     %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
-    %scratch_view = buffer.view %scratch[%c0_offset] : buffer -> view<256xf32>
-    view.store %normalized, %scratch_view[%lane] : f32, view<256xf32>
+    %scratch_view = buffer.view %scratch[%c0_offset] : buffer -> view<[%shape_head_size]xf32>
+    view.store %normalized, %scratch_view[%lane] : f32, view<[%shape_head_size]xf32>
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
     %rotated = template.apply<@qwen38.attention.rope_text_value>(%position_i32, %lane, %scratch) : (i32, index, buffer) -> (f32)
     %physical_position = func.call @qwen38_kv_position(%logical_capacity, %map, %map_origin, %position, %pool_capacity) : (index, buffer, offset, index, index) -> (index)
     %cache_index = index.add %head_base, %lane : index
     %key_f16 = scalar.fptrunc %rotated : f32 to f16
     %value_f16 = scalar.fptrunc %raw_value : f32 to f16
-    view.store %key_f16, %key_cache_view[%physical_position, %cache_index] : f16, view<[%physical_capacity]x1024xf16>
-    view.store %value_f16, %value_cache_view[%physical_position, %cache_index] : f16, view<[%physical_capacity]x1024xf16>
+    view.store %key_f16, %key_cache_view[%physical_position, %cache_index] : f16, view<[%physical_capacity]x[%shape_kv_size]xf16>
+    view.store %value_f16, %value_cache_view[%physical_position, %cache_index] : f16, view<[%physical_capacity]x[%shape_kv_size]xf16>
   }
   template.return
 }
@@ -153,7 +179,7 @@ template.def<@qwen38.attention.kv_prepare> device @qwen38_attention_kv_prepare(%
 kernel.def export("qwen38_attention_kv_prepare_prefill") @qwen38_attention_kv_prepare_prefill(%token_count: index) {
   %bounded_token_count = index.assume %token_count [range(%token_count, 1, 512)] : index
   %unit = index.constant 1 : index
-  %head_count = index.constant 4 : index
+  %head_count = config.get @qwen.model.kv_heads : index
   %workgroup_size = index.constant 256 : index
   kernel.launch.config workgroups(%head_count, %bounded_token_count, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
 } launch(%control: buffer, %epsilon: f32, %key_projection: buffer, %value_projection: buffer, %norm_weight: buffer, %key_cache: buffer, %value_cache: buffer) {
@@ -175,10 +201,11 @@ kernel.def export("qwen38_attention_kv_prepare_prefill") @qwen38_attention_kv_pr
 kernel.def export("qwen38_attention_prefill_reference") @qwen38_attention_prefill_reference(%token_count: index) {
   %bounded_token_count = index.assume %token_count [range(%token_count, 1, 512)] : index
   %unit = index.constant 1 : index
-  %head_count = index.constant 24 : index
+  %head_count = config.get @qwen.model.attention_heads : index
   %workgroup_size = index.constant 256 : index
   kernel.launch.config workgroups(%head_count, %bounded_token_count, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
 } launch(%control: buffer, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer) {
+  %shape_attention_width = config.get @qwen.model.attention_width : index
   %cache_capacity = config.get @qwen38.attention.cache_capacity : index
   %head0 = kernel.workgroup.id<x> : index
   %head = index.assume %head0 [range(%head0, 0, 23)] : index
@@ -188,12 +215,12 @@ kernel.def export("qwen38_attention_prefill_reference") @qwen38_attention_prefil
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c6 = index.constant 6 : index
-  %c256 = index.constant 256 : index
-  %c1024 = index.constant 1024 : index
+  %c256 = config.get @qwen.model.head_size : index
+  %c1024 = config.get @qwen.model.kv_size : index
   %c0_offset = index.constant 0 : offset
   %c0_f32 = scalar.constant 0.0 : f32
   %negative_large = scalar.constant -3.4028234663852886e+38 : f32
-  %attention_scale = scalar.constant 0.0625 : f32
+  %attention_scale = config.get @qwen.model.attention_scale : f32
   %control_view = buffer.view %control[%c0_offset] : buffer -> view<2xi32>
   %token_count_i32 = view.load %control_view[%c0] : view<2xi32> -> i32
   %token_count0 = index.cast %token_count_i32 : i32 to index
@@ -206,9 +233,9 @@ kernel.def export("qwen38_attention_prefill_reference") @qwen38_attention_prefil
   %position = index.assume %position0 [lt(%position0, %cache_capacity)] : index
   %context_count0 = index.add %position, %c1 : index
   %context_count = index.assume %context_count0 [range(%context_count0, 1, 262144), le(%context_count0, %cache_capacity)] : index
-  %query_view = buffer.view %query[%c0_offset] : buffer -> view<[%token_count]x6144xf32>
-  %gate_view = buffer.view %gate[%c0_offset] : buffer -> view<[%token_count]x6144xf32>
-  %output_view = buffer.view %output[%c0_offset] : buffer -> view<[%token_count]x6144xf32>
+  %query_view = buffer.view %query[%c0_offset] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
+  %gate_view = buffer.view %gate[%c0_offset] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
+  %output_view = buffer.view %output[%c0_offset] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
   %cache_element_count = index.mul %cache_capacity, %c1024 : index
   %key_cache_view = buffer.view %key_cache[%c0_offset] : buffer -> view<[%cache_element_count]xf16>
   %value_cache_view = buffer.view %value_cache[%c0_offset] : buffer -> view<[%cache_element_count]xf16>
@@ -216,7 +243,7 @@ kernel.def export("qwen38_attention_prefill_reference") @qwen38_attention_prefil
   %element = index.add %head_base, %lane : index
   %key_head = index.div %head, %c6 : index
   %key_head_base = index.mul %key_head, %c256 : index
-  %query_value = view.load %query_view[%token, %element] : view<[%token_count]x6144xf32> -> f32
+  %query_value = view.load %query_view[%token, %element] : view<[%token_count]x[%shape_attention_width]xf32> -> f32
   %final_max, %final_sum, %final_acc = scf.for %key_token = [%c0 to %context_count step %c1](%old_max = %negative_large : f32, %old_sum = %c0_f32 : f32, %old_acc = %c0_f32 : f32) -> (f32, f32, f32) {
     %token_cache_base = index.mul %key_token, %c1024 : index
     %cache_head_base = index.add %token_cache_base, %key_head_base : index
@@ -241,32 +268,36 @@ kernel.def export("qwen38_attention_prefill_reference") @qwen38_attention_prefil
     scf.yield %new_max, %new_sum, %new_acc : f32, f32, f32
   }
   %attention_value = scalar.divf<nnan|ninf|nsz|arcp> %final_acc, %final_sum : f32
-  %gate_value = view.load %gate_view[%token, %element] : view<[%token_count]x6144xf32> -> f32
+  %gate_value = view.load %gate_view[%token, %element] : view<[%token_count]x[%shape_attention_width]xf32> -> f32
   %gated = scalar.mulf<nnan|ninf|nsz> %attention_value, %gate_value : f32
-  view.store %gated, %output_view[%token, %element] : f32, view<[%token_count]x6144xf32>
+  view.store %gated, %output_view[%token, %element] : f32, view<[%token_count]x[%shape_attention_width]xf32>
   kernel.return
 }
 
 check.case public @qwen38_attention_prefill_known_case {
+  %shape_attention_width = config.get @qwen.model.attention_width : index
+  %shape_kv_size = config.get @qwen.model.kv_size : index
+  %shape_query_gate_size = config.get @qwen.model.query_gate_size : index
+  %shape_head_size = config.get @qwen.model.head_size : index
   %token_count = check.literal value(3) : index
   %epsilon = check.literal value(9.9999999999999995e-07) : f32
   %control = check.generate.iota offset(3) step(-3) : tensor<2xi32>
-  %query_gate_projection = check.generate.fill value(2.0) : tensor<3x12288xf32>
-  %key_projection = check.generate.fill value(2.0) : tensor<3x1024xf32>
-  %value_projection = check.generate.fill value(0.25) : tensor<3x1024xf32>
-  %norm_weight = check.generate.fill value(0.5) : tensor<256xf32>
-  %query = check.generate.fill value(0.0) : tensor<3x6144xf32>
-  %gate = check.generate.fill value(0.0) : tensor<3x6144xf32>
-  %key_cache = check.generate.fill value(0.0) : tensor<3x1024xf16>
-  %value_cache = check.generate.fill value(0.0) : tensor<3x1024xf16>
-  %output = check.generate.fill value(0.0) : tensor<3x6144xf32>
-  %expected_value = check.generate.fill value(0.25) : tensor<3x1024xf16>
-  %expected_output = check.generate.fill value(0.22019926949447058) : tensor<3x6144xf32>
-  kernel.launch @qwen38_attention_query_prepare_prefill[%token_count](%control, %epsilon, %query_gate_projection, %norm_weight, %query, %gate) : [index](tensor<2xi32>, f32, tensor<3x12288xf32>, tensor<256xf32>, tensor<3x6144xf32>, tensor<3x6144xf32>)
-  kernel.launch @qwen38_attention_kv_prepare_prefill[%token_count](%control, %epsilon, %key_projection, %value_projection, %norm_weight, %key_cache, %value_cache) : [index](tensor<2xi32>, f32, tensor<3x1024xf32>, tensor<3x1024xf32>, tensor<256xf32>, tensor<3x1024xf16>, tensor<3x1024xf16>)
-  kernel.launch @qwen38_attention_prefill_reference[%token_count](%control, %query, %gate, %key_cache, %value_cache, %output) : [index](tensor<2xi32>, tensor<3x6144xf32>, tensor<3x6144xf32>, tensor<3x1024xf16>, tensor<3x1024xf16>, tensor<3x6144xf32>)
-  check.expect.close actual(%value_cache) expected(%expected_value) atol(0.0) rtol(0.0) nan(same) : tensor<3x1024xf16>
-  check.expect.close actual(%output) expected(%expected_output) atol(9.9999999999999995e-07) rtol(9.9999999999999995e-07) nan(same) : tensor<3x6144xf32>
+  %query_gate_projection = check.generate.fill value(2.0) : tensor<3x[%shape_query_gate_size]xf32>
+  %key_projection = check.generate.fill value(2.0) : tensor<3x[%shape_kv_size]xf32>
+  %value_projection = check.generate.fill value(0.25) : tensor<3x[%shape_kv_size]xf32>
+  %norm_weight = check.generate.fill value(0.5) : tensor<[%shape_head_size]xf32>
+  %query = check.generate.fill value(0.0) : tensor<3x[%shape_attention_width]xf32>
+  %gate = check.generate.fill value(0.0) : tensor<3x[%shape_attention_width]xf32>
+  %key_cache = check.generate.fill value(0.0) : tensor<3x[%shape_kv_size]xf16>
+  %value_cache = check.generate.fill value(0.0) : tensor<3x[%shape_kv_size]xf16>
+  %output = check.generate.fill value(0.0) : tensor<3x[%shape_attention_width]xf32>
+  %expected_value = check.generate.fill value(0.25) : tensor<3x[%shape_kv_size]xf16>
+  %expected_output = check.generate.fill value(0.22019926949447058) : tensor<3x[%shape_attention_width]xf32>
+  kernel.launch @qwen38_attention_query_prepare_prefill[%token_count](%control, %epsilon, %query_gate_projection, %norm_weight, %query, %gate) : [index](tensor<2xi32>, f32, tensor<3x[%shape_query_gate_size]xf32>, tensor<[%shape_head_size]xf32>, tensor<3x[%shape_attention_width]xf32>, tensor<3x[%shape_attention_width]xf32>)
+  kernel.launch @qwen38_attention_kv_prepare_prefill[%token_count](%control, %epsilon, %key_projection, %value_projection, %norm_weight, %key_cache, %value_cache) : [index](tensor<2xi32>, f32, tensor<3x[%shape_kv_size]xf32>, tensor<3x[%shape_kv_size]xf32>, tensor<[%shape_head_size]xf32>, tensor<3x[%shape_kv_size]xf16>, tensor<3x[%shape_kv_size]xf16>)
+  kernel.launch @qwen38_attention_prefill_reference[%token_count](%control, %query, %gate, %key_cache, %value_cache, %output) : [index](tensor<2xi32>, tensor<3x[%shape_attention_width]xf32>, tensor<3x[%shape_attention_width]xf32>, tensor<3x[%shape_kv_size]xf16>, tensor<3x[%shape_kv_size]xf16>, tensor<3x[%shape_attention_width]xf32>)
+  check.expect.close actual(%value_cache) expected(%expected_value) atol(0.0) rtol(0.0) nan(same) : tensor<3x[%shape_kv_size]xf16>
+  check.expect.close actual(%output) expected(%expected_output) atol(9.9999999999999995e-07) rtol(9.9999999999999995e-07) nan(same) : tensor<3x[%shape_attention_width]xf32>
   check.return
 }
 

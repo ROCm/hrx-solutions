@@ -7,10 +7,23 @@
 // owns a vocabulary row and retains its decoded weight packets across all
 // activation rows. Four sixteen-lane partitions consume four blocks per
 // iteration. The fixed strides describe the model layout, not active sessions.
+// Model geometry is supplied by the selected architecture catalog.
+config.decl @qwen.model.output_projection_iterations : index
+
+config.decl @qwen.model.output_weight_row_bytes : index
+
+config.decl @qwen.model.hidden_q8_row_bytes : index
+config.decl @qwen.model.logits_row_bytes : index
+config.decl @qwen.model.vocabulary_size : index
+
 func.decl @ggml_q6k_q8_1_x4_block_lane(%weight: buffer, %weight_row_byte_base: offset, %q8_input: buffer, %q8_row_byte_base: offset, %q6_block: index, %lane: index) -> (f32)
 amdgpu.target<gfx11-generic> @qwen38_output_projection_wave64 {subgroup_size = 64}
 
 func.def inline @qwen38_output_projection_q6k_rows(%rows: index, %input: buffer, %weight: buffer, %output: buffer) {
+  %shape_output_weight_row_bytes = config.get @qwen.model.output_weight_row_bytes : index
+  %shape_hidden_q8_row_bytes = config.get @qwen.model.hidden_q8_row_bytes : index
+  %shape_logits_row_bytes = config.get @qwen.model.logits_row_bytes : index
+  %shape_vocabulary_size = config.get @qwen.model.vocabulary_size : index
   %input_noalias, %weight_noalias, %output_noalias = buffer.assume.noalias %input, %weight, %output : buffer, buffer, buffer
   %channel0 = kernel.workgroup.id<x> : index
   %channel = index.assume %channel0 [range(%channel0, 0, 248319)] : index
@@ -19,12 +32,12 @@ func.def inline @qwen38_output_projection_q6k_rows(%rows: index, %input: buffer,
   %zero = index.constant 0 : index
   %one = index.constant 1 : index
   %four = index.constant 4 : index
-  %five = index.constant 5 : index
+  %five = config.get @qwen.model.output_projection_iterations : index
   %sixteen = index.constant 16 : index
   %zeroes = vector.constant 0.0 : vector<32xf32>
-  %weight_stride = index.constant 4200 : offset
-  %input_stride = index.constant 5760 : offset
-  %output_stride = index.constant 993280 : offset
+  %weight_stride = index.cast %shape_output_weight_row_bytes : index to offset
+  %input_stride = index.cast %shape_hidden_q8_row_bytes : index to offset
+  %output_stride = index.cast %shape_logits_row_bytes : index to offset
   %weight_origin = index.scale %channel, %weight_stride : index, offset -> offset
   %block_in_iteration = index.div %lane, %sixteen : index
   %virtual0 = index.rem %lane, %sixteen : index
@@ -50,15 +63,15 @@ func.def inline @qwen38_output_projection_q6k_rows(%rows: index, %input: buffer,
     %dot = kernel.subgroup.reduce<addf> %partial : f32
     scf.if %leader {
       %output_origin = index.scale %row, %output_stride : index, offset -> offset
-      %view = buffer.view %output_noalias[%output_origin] : buffer -> view<248320xf32>
-      view.store %dot, %view[%channel] : f32, view<248320xf32>
+      %view = buffer.view %output_noalias[%output_origin] : buffer -> view<[%shape_vocabulary_size]xf32>
+      view.store %dot, %view[%channel] : f32, view<[%shape_vocabulary_size]xf32>
     }
   }
   func.return
 }
 
 kernel.def target(@qwen38_output_projection_wave64) @qwen38_output_projection_q6k_m8() {
-  %groups = index.constant 248320 : index
+  %groups = config.get @qwen.model.vocabulary_size : index
   %threads = index.constant 64 : index
   %one = index.constant 1 : index
   kernel.launch.config workgroups(%groups, %one, %one) workgroup_size(%threads, %one, %one) : index
@@ -69,7 +82,7 @@ kernel.def target(@qwen38_output_projection_wave64) @qwen38_output_projection_q6
 }
 
 kernel.def target(@qwen38_output_projection_wave64) @qwen38_output_projection_q6k_m32() {
-  %groups = index.constant 248320 : index
+  %groups = config.get @qwen.model.vocabulary_size : index
   %threads = index.constant 64 : index
   %one = index.constant 1 : index
   kernel.launch.config workgroups(%groups, %one, %one) workgroup_size(%threads, %one, %one) : index

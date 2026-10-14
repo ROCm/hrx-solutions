@@ -8,6 +8,14 @@
 // The shared body receives logical and physical extents explicitly; only
 // concrete wrappers resolve the model's cache-capacity configuration.
 
+// Model geometry is supplied by the selected architecture catalog.
+config.decl @qwen.model.attention_heads : index
+config.decl @qwen.model.head_size : index
+config.decl @qwen.model.kv_size : index
+
+config.decl @qwen.model.attention_scale : f32
+config.decl @qwen.model.attention_width : index
+
 amdgpu.target<gfx11-generic> @qwen38_attention_prefill_gfx11_wave64 {subgroup_size = 64}
 
 config.decl @qwen38.attention.cache_capacity : %value: index where [range(%value, 1, 262144)]
@@ -19,6 +27,8 @@ func.decl @qwen38_kv_position(%logical_capacity: index, %map: buffer, %map_origi
 template.decl @qwen38.attention.wmma(%logical_capacity: index, %query_tile: index, %query_head: index, %workitem: index, %subgroup: index, %lane: index, %control: buffer, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer, %control_origin: offset, %token_begin: index, %key_cache_origin: offset, %value_cache_origin: offset, %map: buffer, %map_origin: offset, %pool_capacity: index)
 
 template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capacity: index, %query_tile: index, %query_head: index, %workitem: index, %subgroup: index, %lane: index, %control: buffer, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer, %control_origin: offset, %token_begin: index, %key_cache_origin: offset, %value_cache_origin: offset, %map: buffer, %map_origin: offset, %pool_capacity: index) {
+  %shape_kv_size = config.get @qwen.model.kv_size : index
+  %shape_attention_width = config.get @qwen.model.attention_width : index
   %zero = index.constant 0 : index
   %paged = index.cmp ne, %pool_capacity, %zero : index
   %physical_capacity = scf.select %paged, %pool_capacity, %logical_capacity : index
@@ -31,8 +41,8 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
   %c15 = index.constant 15 : index
   %c16 = index.constant 16 : index
   %c64 = index.constant 64 : index
-  %c256 = index.constant 256 : index
-  %c1024 = index.constant 1024 : index
+  %c256 = config.get @qwen.model.head_size : index
+
   %c0_offset = index.constant 0 : offset
   %query_stage_bytes = index.constant 8448 : offset
   %score_stage_bytes = index.constant 6144 : offset
@@ -41,7 +51,7 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
   %tail_key_value_stage_bytes = index.constant 8192 : offset
   %c0_f16 = scalar.constant 0.0 : f16
   %c1_f32 = scalar.constant 1.0 : f32
-  %attention_scale = scalar.constant 0.0625 : f32
+  %attention_scale = config.get @qwen.model.attention_scale : f32
   %negative_large = scalar.constant -1e+30 : f32
   %output_zero0 = vector.constant 0.0 : vector<4xf16>
   %output_zero1 = vector.constant 0.0 : vector<4xf16>
@@ -104,11 +114,11 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
   %probability_transposed_layout = encoding.layout.strided [1, 24] : encoding<layout>
   %activation_row_bytes = index.constant 24576 : offset
   %activation_origin = index.scale %token_begin, %activation_row_bytes : index, offset -> offset
-  %query_view = buffer.view %query[%activation_origin] : buffer -> view<[%token_count]x6144xf32>
-  %gate_view = buffer.view %gate[%activation_origin] : buffer -> view<[%token_count]x6144xf32>
-  %key_view = buffer.view %key_cache[%key_cache_origin] : buffer -> view<[%physical_capacity]x1024xf16>
-  %value_view = buffer.view %value_cache[%value_cache_origin] : buffer -> view<[%physical_capacity]x1024xf16>
-  %output_view = buffer.view %output[%activation_origin] : buffer -> view<[%token_count]x6144xf32>
+  %query_view = buffer.view %query[%activation_origin] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
+  %gate_view = buffer.view %gate[%activation_origin] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
+  %key_view = buffer.view %key_cache[%key_cache_origin] : buffer -> view<[%physical_capacity]x[%shape_kv_size]xf16>
+  %value_view = buffer.view %value_cache[%value_cache_origin] : buffer -> view<[%physical_capacity]x[%shape_kv_size]xf16>
+  %output_view = buffer.view %output[%activation_origin] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
   %query_stage = buffer.alloca<workgroup> align(16) %query_stage_bytes : buffer
   %score_stage = buffer.alloca<workgroup> align(16) %score_stage_bytes : buffer
   %probability_stage = buffer.alloca<workgroup> align(16) %probability_stage_bytes : buffer
@@ -131,7 +141,7 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
     %query_value = scf.if %query_valid -> (f16) {
       %bounded_query_token = index.assume %query_token [lt(%query_token, %token_count)] : index
       %global_query_channel = index.add %query_head_base, %query_channel : index
-      %loaded = view.load %query_view[%bounded_query_token, %global_query_channel] : view<[%token_count]x6144xf32> -> f32
+      %loaded = view.load %query_view[%bounded_query_token, %global_query_channel] : view<[%token_count]x[%shape_attention_width]xf32> -> f32
       %scaled = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %loaded, %attention_scale : f32
       %truncated = scalar.fptrunc %scaled : f32 to f16
       scf.yield %truncated : f16
@@ -151,7 +161,7 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
     %score_init = vector.fragment<init> %score_init_values shape [%m, %n] : vector<4xf32>
     %score_fragment = scf.for %head_tile = [%c0 to %c256 step %c16](%score_accumulator = %score_init : vector<4xf32>) -> (vector<4xf32>) unroll schedule(recurrence) {
       %key_channel = index.add %key_value_head_base, %head_tile : index
-      %key_fragment = vector.fragment.load<lhs> %key_view[%score_key_origin, %key_channel] shape [%m, %k] : view<[%physical_capacity]x1024xf16> -> vector<16xf16>
+      %key_fragment = vector.fragment.load<lhs> %key_view[%score_key_origin, %key_channel] shape [%m, %k] : view<[%physical_capacity]x[%shape_kv_size]xf16> -> vector<16xf16>
       %query_fragment = vector.fragment.load<rhs> %query_transposed_view[%head_tile, %c0] shape [%k, %n] : view<256x16xf16, %query_transposed_layout> -> vector<16xf16>
       %next_score_accumulator = vector.mma %key_fragment, %query_fragment, %score_accumulator : vector<16xf16>, vector<16xf16>, vector<4xf32>
       scf.yield %next_score_accumulator : vector<4xf32>
@@ -218,7 +228,7 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
         %value_token0 = index.add %physical_key_origin, %key_tile : index
         %value_token = index.assume %value_token0 [lt(%value_token0, %last_full_key_tile_start)] : index
         %probability_fragment = vector.fragment.load<lhs> %probability_stage_view[%c0, %key_tile] shape [%m, %k] : view<16x64xf16, %probability_transposed_layout> -> vector<16xf16>
-        %value_fragment = vector.fragment.load<rhs> %value_view[%value_token, %value_channel] shape [%k, %n] : view<[%physical_capacity]x1024xf16> -> vector<16xf16>
+        %value_fragment = vector.fragment.load<rhs> %value_view[%value_token, %value_channel] shape [%k, %n] : view<[%physical_capacity]x[%shape_kv_size]xf16> -> vector<16xf16>
         %next_product_accumulator = vector.mma %probability_fragment, %value_fragment, %product_accumulator : vector<16xf16>, vector<16xf16>, vector<8xf16>
         scf.yield %next_product_accumulator : vector<8xf16>
       }
@@ -258,7 +268,7 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
         %tail_key_token0 = index.add %physical_tail_origin, %tail_key_row : index
         %tail_key_token = index.assume %tail_key_token0 [lt(%tail_key_token0, %physical_capacity)] : index
         %global_key_channel = index.add %key_value_head_base, %tail_key_channel : index
-        %loaded = view.load %key_view[%tail_key_token, %global_key_channel] : view<[%physical_capacity]x1024xf16> -> f16
+        %loaded = view.load %key_view[%tail_key_token, %global_key_channel] : view<[%physical_capacity]x[%shape_kv_size]xf16> -> f16
         scf.yield %loaded : f16
       } else {
         scf.yield %c0_f16 : f16
@@ -330,7 +340,7 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
         %tail_value_token0 = index.add %physical_tail_origin, %tail_value_row : index
         %tail_value_token = index.assume %tail_value_token0 [lt(%tail_value_token0, %physical_capacity)] : index
         %global_value_channel = index.add %key_value_head_base, %tail_value_channel : index
-        %loaded = view.load %value_view[%tail_value_token, %global_value_channel] : view<[%physical_capacity]x1024xf16> -> f16
+        %loaded = view.load %value_view[%tail_value_token, %global_value_channel] : view<[%physical_capacity]x[%shape_kv_size]xf16> -> f16
         scf.yield %loaded : f16
       } else {
         scf.yield %c0_f16 : f16
@@ -417,27 +427,27 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
   %output_channel = index.add %query_head_base, %lane_output_channel : index
   scf.if %query_valid0 {
     %bounded_query_token = index.assume %query_token0 [lt(%query_token0, %token_count)] : index
-    %gate_values = vector.load %gate_view[%bounded_query_token, %output_channel] : view<[%token_count]x6144xf32> -> vector<4xf32>
+    %gate_values = vector.load %gate_view[%bounded_query_token, %output_channel] : view<[%token_count]x[%shape_attention_width]xf32> -> vector<4xf32>
     %gated = vector.mulf<nnan|ninf|nsz> %normalized0, %gate_values : vector<4xf32>
-    vector.store %gated, %output_view[%bounded_query_token, %output_channel] : vector<4xf32>, view<[%token_count]x6144xf32>
+    vector.store %gated, %output_view[%bounded_query_token, %output_channel] : vector<4xf32>, view<[%token_count]x[%shape_attention_width]xf32>
   }
   scf.if %query_valid1 {
     %bounded_query_token = index.assume %query_token1 [lt(%query_token1, %token_count)] : index
-    %gate_values = vector.load %gate_view[%bounded_query_token, %output_channel] : view<[%token_count]x6144xf32> -> vector<4xf32>
+    %gate_values = vector.load %gate_view[%bounded_query_token, %output_channel] : view<[%token_count]x[%shape_attention_width]xf32> -> vector<4xf32>
     %gated = vector.mulf<nnan|ninf|nsz> %normalized1, %gate_values : vector<4xf32>
-    vector.store %gated, %output_view[%bounded_query_token, %output_channel] : vector<4xf32>, view<[%token_count]x6144xf32>
+    vector.store %gated, %output_view[%bounded_query_token, %output_channel] : vector<4xf32>, view<[%token_count]x[%shape_attention_width]xf32>
   }
   scf.if %query_valid2 {
     %bounded_query_token = index.assume %query_token2 [lt(%query_token2, %token_count)] : index
-    %gate_values = vector.load %gate_view[%bounded_query_token, %output_channel] : view<[%token_count]x6144xf32> -> vector<4xf32>
+    %gate_values = vector.load %gate_view[%bounded_query_token, %output_channel] : view<[%token_count]x[%shape_attention_width]xf32> -> vector<4xf32>
     %gated = vector.mulf<nnan|ninf|nsz> %normalized2, %gate_values : vector<4xf32>
-    vector.store %gated, %output_view[%bounded_query_token, %output_channel] : vector<4xf32>, view<[%token_count]x6144xf32>
+    vector.store %gated, %output_view[%bounded_query_token, %output_channel] : vector<4xf32>, view<[%token_count]x[%shape_attention_width]xf32>
   }
   scf.if %query_valid3 {
     %bounded_query_token = index.assume %query_token3 [lt(%query_token3, %token_count)] : index
-    %gate_values = vector.load %gate_view[%bounded_query_token, %output_channel] : view<[%token_count]x6144xf32> -> vector<4xf32>
+    %gate_values = vector.load %gate_view[%bounded_query_token, %output_channel] : view<[%token_count]x[%shape_attention_width]xf32> -> vector<4xf32>
     %gated = vector.mulf<nnan|ninf|nsz> %normalized3, %gate_values : vector<4xf32>
-    vector.store %gated, %output_view[%bounded_query_token, %output_channel] : vector<4xf32>, view<[%token_count]x6144xf32>
+    vector.store %gated, %output_view[%bounded_query_token, %output_channel] : vector<4xf32>, view<[%token_count]x[%shape_attention_width]xf32>
   }
   template.return
 }
@@ -447,8 +457,8 @@ kernel.def target(@qwen38_attention_prefill_gfx11_wave64) export("qwen38_attenti
   %c1 = index.constant 1 : index
   %c15 = index.constant 15 : index
   %c16 = index.constant 16 : index
-  %c24 = index.constant 24 : index
-  %c256 = index.constant 256 : index
+  %c24 = config.get @qwen.model.attention_heads : index
+  %c256 = config.get @qwen.model.head_size : index
   %padded_token_count = index.add %token_count, %c15 : index
   %query_tile_count = index.div %padded_token_count, %c16 : index
   kernel.launch.config workgroups(%query_tile_count, %c24, %c1) workgroup_size(%c256, %c1, %c1) : index
@@ -472,19 +482,21 @@ kernel.def target(@qwen38_attention_prefill_gfx11_wave64) export("qwen38_attenti
 // tail. Constant V isolates causal coverage, GQA addressing, softmax, and all
 // four output-channel tiles without requiring a separate mask allocation.
 check.case public @qwen38_attention_prefill_f16_wmma_known_case {
+  %shape_attention_width = config.get @qwen.model.attention_width : index
+  %shape_kv_size = config.get @qwen.model.kv_size : index
   %token_count = check.literal value(17) : index
   %control = check.generate.iota offset(17) step(47) : tensor<2xi32>
-  %query = check.generate.fill value(0.0) : tensor<17x6144xf32>
-  %gate = check.generate.fill value(0.5) : tensor<17x6144xf32>
-  %key_cache = check.generate.fill value(1.0) : tensor<81x1024xf16>
-  %value_cache = check.generate.fill value(0.25) : tensor<81x1024xf16>
-  %reference_output = check.generate.fill value(0.0) : tensor<17x6144xf32>
-  %tiled_output = check.generate.fill value(0.0) : tensor<17x6144xf32>
-  %expected = check.generate.fill value(0.125) : tensor<17x6144xf32>
-  kernel.launch @qwen38_attention_prefill_reference[%token_count](%control, %query, %gate, %key_cache, %value_cache, %reference_output) : [index](tensor<2xi32>, tensor<17x6144xf32>, tensor<17x6144xf32>, tensor<81x1024xf16>, tensor<81x1024xf16>, tensor<17x6144xf32>)
-  kernel.launch @qwen38_attention_prefill_f16_wmma[%token_count](%control, %query, %gate, %key_cache, %value_cache, %tiled_output) : [index](tensor<2xi32>, tensor<17x6144xf32>, tensor<17x6144xf32>, tensor<81x1024xf16>, tensor<81x1024xf16>, tensor<17x6144xf32>)
-  check.expect.close actual(%reference_output) expected(%expected) atol(9.9999999999999995e-07) rtol(9.9999999999999995e-07) nan(same) : tensor<17x6144xf32>
-  check.expect.close actual(%tiled_output) expected(%expected) atol(0.001) rtol(0.001) nan(same) : tensor<17x6144xf32>
+  %query = check.generate.fill value(0.0) : tensor<17x[%shape_attention_width]xf32>
+  %gate = check.generate.fill value(0.5) : tensor<17x[%shape_attention_width]xf32>
+  %key_cache = check.generate.fill value(1.0) : tensor<81x[%shape_kv_size]xf16>
+  %value_cache = check.generate.fill value(0.25) : tensor<81x[%shape_kv_size]xf16>
+  %reference_output = check.generate.fill value(0.0) : tensor<17x[%shape_attention_width]xf32>
+  %tiled_output = check.generate.fill value(0.0) : tensor<17x[%shape_attention_width]xf32>
+  %expected = check.generate.fill value(0.125) : tensor<17x[%shape_attention_width]xf32>
+  kernel.launch @qwen38_attention_prefill_reference[%token_count](%control, %query, %gate, %key_cache, %value_cache, %reference_output) : [index](tensor<2xi32>, tensor<17x[%shape_attention_width]xf32>, tensor<17x[%shape_attention_width]xf32>, tensor<81x[%shape_kv_size]xf16>, tensor<81x[%shape_kv_size]xf16>, tensor<17x[%shape_attention_width]xf32>)
+  kernel.launch @qwen38_attention_prefill_f16_wmma[%token_count](%control, %query, %gate, %key_cache, %value_cache, %tiled_output) : [index](tensor<2xi32>, tensor<17x[%shape_attention_width]xf32>, tensor<17x[%shape_attention_width]xf32>, tensor<81x[%shape_kv_size]xf16>, tensor<81x[%shape_kv_size]xf16>, tensor<17x[%shape_attention_width]xf32>)
+  check.expect.close actual(%reference_output) expected(%expected) atol(9.9999999999999995e-07) rtol(9.9999999999999995e-07) nan(same) : tensor<17x[%shape_attention_width]xf32>
+  check.expect.close actual(%tiled_output) expected(%expected) atol(0.001) rtol(0.001) nan(same) : tensor<17x[%shape_attention_width]xf32>
   check.return
 }
 

@@ -103,7 +103,8 @@ class _QwenPipeline:
     def catalog_for_model(self, catalog: Path, model_id: str) -> Path:
         """Make the Qwen HTTP model name match the installed model ID."""
         catalog = Path(catalog).resolve()
-        source_root = catalog.parent
+        source_root = catalog.parents[1]
+        catalog_relative = catalog.relative_to(source_root)
         control = catalog / "control.loom"
         if not control.is_file():
             raise FileNotFoundError(f"Qwen pipeline control source is missing: {control}")
@@ -116,16 +117,16 @@ class _QwenPipeline:
 
         cache_root = Path.home() / ".cache" / "hrx-solutions" / "catalogs" / self.identifier
         output = cache_root / f"{model_id}-{fingerprint}"
-        configured_control = output / "qwen" / "control.loom"
+        configured_control = output / catalog_relative / "control.loom"
         if configured_control.is_file():
-            return output / "qwen"
+            return output / catalog_relative
 
         cache_root.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix=f".{model_id}-", dir=cache_root))
         try:
             staging_catalog = staging / "llm"
             shutil.copytree(source_root, staging_catalog)
-            configured_control = staging_catalog / "qwen" / "control.loom"
+            configured_control = staging_catalog / catalog_relative / "control.loom"
             source_text = configured_control.read_text(encoding="utf-8")
             marker = 'global.rodata.def @chat_model_name = bytes('
             lines = source_text.splitlines()
@@ -142,7 +143,7 @@ class _QwenPipeline:
             os.replace(staging_catalog, output)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
-        return output / "qwen"
+        return output / catalog_relative
 
     def validate(self, model: ModelFiles) -> ValidationResult:
         try:
@@ -169,10 +170,10 @@ class _QwenPipeline:
 def _qwen_catalog() -> Path:
     # Source checkout layout. Wheel packaging can move this behind the same
     # adapter by placing assets adjacent to the Python package.
-    repo_catalog = Path(__file__).resolve().parents[2] / "loom-pipeline" / "llm" / "qwen"
+    repo_catalog = Path(__file__).resolve().parents[2] / "loom-pipeline" / "llm" / "qwen" / "qwen_27b"
     if repo_catalog.is_dir():
         return repo_catalog
-    return Path(__file__).resolve().parent / "loom-pipeline" / "llm" / "qwen"
+    return Path(__file__).resolve().parent / "loom-pipeline" / "llm" / "qwen" / "qwen_27b"
 
 
 

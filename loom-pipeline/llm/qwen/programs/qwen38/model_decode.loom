@@ -5,6 +5,13 @@
 // Preparation unrolls this fixed model structure, specializes every layer and
 // state ordinal, and packs all nested allocations into one transient root.
 
+// Model geometry is supplied by the selected architecture catalog.
+config.decl @qwen.model.projection_row_bytes : index
+
+config.decl @qwen.model.embedding_weight_bytes : index
+config.decl @qwen.model.group_count : index
+config.decl @qwen.model.hidden_row_bytes : index
+
 command.program.decl @qwen38_gdn_layer_decode(%layer: index, %gdn_ordinal: index) launch(%parameters: buffer, %residual: buffer, %gdn_state: buffer) where [range(%layer, 0, 63), range(%gdn_ordinal, 0, 47)]
 command.program.decl @qwen38_attention_layer_decode(%layer: index, %attention_ordinal: index) launch(%parameters: buffer, %residual: buffer, %control: buffer, %attention_cache: buffer, %attention_output: buffer) where [range(%layer, 0, 64), range(%attention_ordinal, 0, 15)]
 command.program.decl @qwen38_output_head_greedy_with_hidden(%residual_offset: offset) launch(%parameters: buffer, %residual: buffer, %normalized: buffer, %token_id: buffer)
@@ -15,8 +22,9 @@ kernel.decl @qwen38_decode_commit_token() launch(%control: buffer, %token_ids: b
 // the issue-time control buffer by every attention layer, allowing one
 // materialized command buffer to serve the full decode sequence.
 command.program.def public @qwen38_text_decode_body() launch(%parameters: buffer, %residual: buffer, %control: buffer, %gdn_state: buffer, %attention_cache: buffer) {
+  %shape_projection_row_bytes = config.get @qwen.model.projection_row_bytes : index
   %group_begin = index.constant 0 : index
-  %group_end = index.constant 16 : index
+  %group_end = config.get @qwen.model.group_count : index
   %group_step = index.constant 1 : index
   %layers_per_group = index.constant 4 : index
   %gdn_layers_per_group = index.constant 3 : index
@@ -26,7 +34,7 @@ command.program.def public @qwen38_text_decode_body() launch(%parameters: buffer
 
   // All attention layers reuse this intermediate. Nested layer allocations
   // remain semantic and are packed with it during command preparation.
-  %attention_bytes = index.constant 24576 : offset
+  %attention_bytes = index.cast %shape_projection_row_bytes : index to offset
   %attention_output = buffer.alloca<global> align(256) %attention_bytes : buffer
 
   scf.for %group = [%group_begin to %group_end step %group_step] unroll {
@@ -50,9 +58,10 @@ command.program.def public @qwen38_text_decode_body() launch(%parameters: buffer
 // Consumes one device-local token, advances the base model, and publishes the
 // next greedy token plus the normalized hidden row required by NextN/MTP.
 command.program.def @qwen38_text_decode_transition() launch(%parameters: buffer, %residual: buffer, %control: buffer, %gdn_state: buffer, %attention_cache: buffer, %normalized_hidden: buffer, %token_id: buffer, %progress: buffer) {
+  %shape_embedding_weight_bytes = config.get @qwen.model.embedding_weight_bytes : index
   %c0_offset = index.constant 0 : offset
-  %embedding_weight = command.parameter %parameters, "token_embd.weight" : view<874086400xi8>
-  kernel.launch @qwen38_token_embedding_q5k_f32_decode(%token_id, %embedding_weight, %residual) : (buffer, view<874086400xi8>, buffer)
+  %embedding_weight = command.parameter %parameters, "token_embd.weight" : view<[%shape_embedding_weight_bytes]xi8>
+  kernel.launch @qwen38_token_embedding_q5k_f32_decode(%token_id, %embedding_weight, %residual) : (buffer, view<[%shape_embedding_weight_bytes]xi8>, buffer)
   command.program.launch @qwen38_text_decode_body[](%parameters, %residual, %control, %gdn_state, %attention_cache) : [](buffer, buffer, buffer, buffer, buffer)
   command.program.launch @qwen38_output_head_greedy_with_hidden[%c0_offset](%parameters, %residual, %normalized_hidden, %token_id) : [offset](buffer, buffer, buffer, buffer)
   kernel.launch @qwen38_decode_commit_token(%control, %token_id, %progress) : (buffer, buffer, buffer)
@@ -63,7 +72,8 @@ command.program.def @qwen38_text_decode_transition() launch(%parameters: buffer,
 // host. The position update makes the materialized command buffer a complete
 // reusable generation transition.
 command.program.def public @qwen38_text_decode_greedy() launch(%parameters: buffer, %residual: buffer, %control: buffer, %gdn_state: buffer, %attention_cache: buffer, %token_id: buffer, %progress: buffer) {
-  %hidden_bytes = index.constant 20480 : offset
+  %shape_hidden_row_bytes = config.get @qwen.model.hidden_row_bytes : index
+  %hidden_bytes = index.cast %shape_hidden_row_bytes : index to offset
   %normalized_hidden = buffer.alloca<global> align(256) %hidden_bytes : buffer
   command.program.launch @qwen38_text_decode_transition[](%parameters, %residual, %control, %gdn_state, %attention_cache, %normalized_hidden, %token_id, %progress) : [](buffer, buffer, buffer, buffer, buffer, buffer, buffer, buffer)
   command.return

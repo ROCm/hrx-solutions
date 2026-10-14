@@ -41,9 +41,10 @@ def _model_files(model_id: str, model_root: Optional[Path]) -> ModelFiles:
 def _catalog(pipeline: str) -> Path:
     """Resolve the selected pipeline catalog in source or installed layouts."""
     package = Path(__file__).resolve().parent
+    catalog_path = Path(pipeline) / "qwen_27b" if pipeline == "qwen" else Path(pipeline)
     candidates = (
-        package / "loom-pipeline" / "llm" / pipeline,
-        package.parents[1] / "loom-pipeline" / "llm" / pipeline,
+        package / "loom-pipeline" / "llm" / catalog_path,
+        package.parents[1] / "loom-pipeline" / "llm" / catalog_path,
     )
     for candidate in candidates:
         if candidate.is_dir():

@@ -55,6 +55,14 @@ def exec_loom_serve() -> NoReturn:
     if not executable.is_file():
         raise RuntimeError("HRX wheel is missing native executable: loom-serve")
     arguments = list(sys.argv[1:])
+    if not any(argument == "--model" or argument.startswith("--model=") for argument in arguments):
+        arguments.insert(
+            0,
+            "--model="
+            + str(
+                package_root / "loom-pipeline" / "llm" / "qwen" / "qwen_27b"
+            ),
+        )
     os.execve(
         str(executable),
         [str(executable), *arguments],

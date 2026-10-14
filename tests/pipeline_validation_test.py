@@ -72,7 +72,7 @@ class PipelineValidationTest(unittest.TestCase):
             with self.subTest(flag=flag),redirect_stderr(io.StringIO()),self.assertRaises(SystemExit) as caught:
                 setup_cli.build_parser().parse_args(['models','validate','test-model','--pipeline','qwen',flag,value])
             self.assertEqual(caught.exception.code,2)
-        source=Path(__file__).resolve().parents[1]/'loom-pipeline/llm/qwen'
+        source=Path(__file__).resolve().parents[1]/'loom-pipeline/llm/qwen/qwen_27b'
         with patch.object(Path,'home',return_value=self.root):
             configured=pipeline_validation.catalog_for_model('qwen',source,'test-model')
             self.assertIn('746573742d6d6f64656c',(configured/'control.loom').read_text())

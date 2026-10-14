@@ -3,6 +3,12 @@
 // Licensed under the Apache License v2.0 with LLVM Exceptions.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+// Model geometry is supplied by the selected architecture catalog.
+config.decl @qwen.model.embedding_weight_bytes : index
+config.decl @qwen.model.hidden_row_bytes : index
+config.decl @qwen.model.hidden_size : index
+config.decl @qwen.model.rms_epsilon : f32
+
 config.decl @runner.qwen38.prefill_token_count : %value: index where [range(%value, 1, 512)]
 config.decl @runner.qwen38.span_capacity : %value: index where [range(%value, 1, 64)]
 
@@ -17,6 +23,9 @@ kernel.decl @qwen38_output_normalize_spans(%output_capacity: index) launch(%epoc
 // final span rows reach the vocabulary head. The caller consumes output_count
 // IDs; output padding and head grouping are internal to this fixed schedule.
 command.program.def public @qwen38_epoch() launch(%parameters: buffer, %residual: buffer, %epoch: buffer, %rows: buffer, %state: buffer, %input_tokens: buffer, %output_tokens: buffer) {
+  %shape_embedding_weight_bytes = config.get @qwen.model.embedding_weight_bytes : index
+  %shape_hidden_row_bytes = config.get @qwen.model.hidden_row_bytes : index
+  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %tokens = config.get @runner.qwen38.prefill_token_count : index
   %spans = config.get @runner.qwen38.span_capacity : index
   %zero = index.constant 0 : index
@@ -25,16 +34,16 @@ command.program.def public @qwen38_epoch() launch(%parameters: buffer, %residual
   %padded_spans = index.add %spans, %three : index
   %groups = index.div %padded_spans, %four : index
   %outputs = index.mul %groups, %four : index
-  %hidden_row_bytes = index.constant 20480 : offset
+  %hidden_row_bytes = index.cast %shape_hidden_row_bytes : index to offset
   %hidden_bytes = index.scale %outputs, %hidden_row_bytes : index, offset -> offset
   %normalized = buffer.alloca<global> align(256) %hidden_bytes : buffer
-  %embedding = command.parameter %parameters, "token_embd.weight" : view<874086400xi8>
-  kernel.launch @qwen38_token_embedding_q5k_f32_prefill[%tokens](%input_tokens, %embedding, %residual) : [index](buffer, view<874086400xi8>, buffer)
+  %embedding = command.parameter %parameters, "token_embd.weight" : view<[%shape_embedding_weight_bytes]xi8>
+  kernel.launch @qwen38_token_embedding_q5k_f32_prefill[%tokens](%input_tokens, %embedding, %residual) : [index](buffer, view<[%shape_embedding_weight_bytes]xi8>, buffer)
   // Verification is disabled; its capture binding has no consumers.
   command.program.launch @qwen38_text_prefill_body_impl[%tokens, %tokens, %zero, %spans](%parameters, %residual, %epoch, %state, %state, %normalized, %rows) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer, buffer, buffer)
-  %epsilon = scalar.constant 0.000001 : f32
-  %norm_weight = command.parameter %parameters, "output_norm.weight" : view<5120xf32>
-  kernel.launch @qwen38_output_normalize_spans[%outputs](%epoch, %epsilon, %residual, %norm_weight, %normalized) : [index](buffer, f32, buffer, view<5120xf32>, buffer)
+  %epsilon = config.get @qwen.model.rms_epsilon : f32
+  %norm_weight = command.parameter %parameters, "output_norm.weight" : view<[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_output_normalize_spans[%outputs](%epoch, %epsilon, %residual, %norm_weight, %normalized) : [index](buffer, f32, buffer, view<[%shape_hidden_size]xf32>, buffer)
   %origin = index.constant 0 : offset
   command.program.launch @qwen38_output_projection_greedy[%outputs, %origin, %origin](%parameters, %normalized, %output_tokens) : [index, offset, offset](buffer, buffer, buffer)
   command.return

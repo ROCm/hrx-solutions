@@ -83,7 +83,7 @@ class PackagingTest(unittest.TestCase):
         self.assertEqual(libraries,2)
         self.assertGreater(size,0)
         with self.assertRaisesRegex(RuntimeError,'missing setup assets.*compatibility.json'):
-            validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/compatibility.json'))
+            validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/qwen_27b/compatibility.json'))
         with self.assertRaisesRegex(RuntimeError,'missing setup assets.*gguf.py'):
             validate_wheel(self.wheel(missing='hrx_solutions/gguf.py'))
 

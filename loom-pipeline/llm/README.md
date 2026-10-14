@@ -10,7 +10,7 @@ This guide traces the LLM serving solution from model import through generated
 tokens. Use the [serving walkthrough](../../docs/solutions/llm-serving.md) to
 run it first, then return here to change model policy, kernels, or integration.
 
-The current pipeline is `qwen`, specialized for Qwen3.8-27B with UD-Q5_K_XL
+The current pipeline ID is `qwen`; its source catalog is `qwen/qwen_27b`, specialized for Qwen3.8-27B with UD-Q5_K_XL
 GGUF weights. Its dimensions, tensor names, quantization layouts, layer order,
 and chat conventions are explicit in the source. Adapting it to another model
 requires reviewing those choices, even when the checkpoint has a similar name.
@@ -22,7 +22,7 @@ Three layers cooperate:
 | Layer | Owns | Start reading |
 | --- | --- | --- |
 | Python tools in this repository | Model inventory, validation dispatch, launch options, managed processes, client configuration | [`setup_cli.py`](../../binding/python/setup_cli.py), [`model_store.py`](../../binding/python/model_store.py), [`pipeline_validation.py`](../../binding/python/pipeline_validation.py) |
-| Loom sources in this directory | Model geometry, tensor bindings, preparation policy, chat framing, command composition, device state layouts, numerical kernels | [`sources.txt`](qwen/sources.txt), [`prepare.loom`](qwen/prepare.loom), [`control.loom`](qwen/control.loom) |
+| Loom sources in this directory | Model geometry, tensor bindings, preparation policy, chat framing, command composition, device state layouts, numerical kernels | [`sources.txt`](qwen/qwen_27b/sources.txt), [`prepare.loom`](qwen/qwen_27b/prepare.loom), [`control.loom`](qwen/control.loom) |
 | Native code in pinned HRX | HTTP transport, tokenization capabilities, admission, scheduling, physical storage, source JIT, command materialization, queue execution | Upstream [`text/`](https://github.com/ROCm/hrx/tree/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/text), [`runtime/`](https://github.com/ROCm/hrx/tree/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/runtime), and [`http/`](https://github.com/ROCm/hrx/tree/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/http) |
 
 The native text server is model independent. It loads a source catalog at
@@ -86,7 +86,7 @@ pipeline IDs to adapters. The Qwen adapter uses
 [`gguf.py`](../../binding/python/gguf.py) to inspect the little-endian v2/v3
 GGUF header and tensor descriptors, then
 [`qwen_validation.py`](../../binding/python/qwen_validation.py) compares them
-with [`compatibility.json`](qwen/compatibility.json). The CLI records
+with [`compatibility.json`](qwen/qwen_27b/compatibility.json). The CLI records
 `pipeline: qwen` only after architecture, tensor, and tokenizer checks pass.
 
 The versioned profile is grounded in the qualified GGUF and reviewed against
@@ -159,12 +159,12 @@ for bundled native libraries. Linux binaries also receive a relative
 
 ### The source catalog is the runtime input
 
-[`qwen/sources.txt`](qwen/sources.txt) lists the configuration, VM functions,
+[`qwen/qwen_27b/sources.txt`](qwen/qwen_27b/sources.txt) lists the configuration, VM functions,
 command programs, and kernel providers needed for serving. Every path is
-relative to `qwen/`; the `../motifs/ggml/` entries are part of the package.
+relative to `qwen/qwen_27b/`; the `../../motifs/ggml/` entries are part of the package.
 Copy the whole `llm/` tree when moving a catalog so those paths still resolve.
 
-[`prepare.loom`](qwen/prepare.loom) is the cold startup entry. It receives
+[`prepare.loom`](qwen/qwen_27b/prepare.loom) is the cold startup entry. It receives
 prefill, context, pool, row, and checkpoint capacities, the MTP selection,
 token/span shapes, and the checkpoint path. It then:
 
@@ -180,14 +180,15 @@ The startup VM is temporary. Its returned control data survives and is later
 interpreted by `control.loom`. Native code owns allocation and execution
 lifetimes; the model source supplies sizes, layouts, and stage meaning.
 
-[`config.loom`](qwen/config.loom) holds fixed specialization bounds such as
-hidden and feed-forward sizes. Run-dependent capacities come from preparation.
+[`config.loom`](qwen/qwen_27b/config.loom) holds the authoritative compiled model properties and
+explicit geometry extents, including layer repetition, hidden/feed-forward
+dimensions, parameter views, state sizes and normalization coefficients. Run-dependent capacities come from preparation.
 Changing a CLI capacity changes specialization and storage requirements; it
 does not change the model's underlying architecture.
 
 ### Weight layout is source policy
 
-[`weights.loom`](qwen/weights.loom) recognizes the target and MTP feed-forward
+[`weights.loom`](qwen/qwen_27b/weights.loom) recognizes the target and MTP feed-forward
 gate/up tensors and selects `qwen38_prepare_ffn` as their preparation root.
 [`weights_prepare.loom`](qwen/weights_prepare.loom) rearranges their Q5_K
 packets into groups of eight channels in device storage, preserving codes,
@@ -453,12 +454,16 @@ and hardware. Limit each conclusion to what that experiment measures.
 
 ## Provenance
 
-The source files are copied byte-for-byte from the HRX repository at commit
+The source files originate in the HRX repository at commit
 [`6f6176173bb543d0c330a35b78a1837582a76870`](https://github.com/ROCm/hrx/tree/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve).
 Qwen sources originate in `experimental/loom_serve/models/qwen/`; shared
 quantization motifs originate in `experimental/loom_serve/motifs/ggml/`.
-`qwen/sources.txt` retains the pinned runtime source set, with shared motif
-paths adjusted to resolve within this repository layout.
+`qwen/qwen_27b/sources.txt` selects architecture configuration and static
+preparation/weight policy beside shared Qwen programs and kernels. The explicit
+compiled shape is in `qwen/qwen_27b/config.loom`; shared providers consume that
+configuration. Algorithms, quantization, prepared layouts and schedules retain
+the pinned implementation. The architecture catalog exposes the shared control
+source through `control.loom` for native cold loading.
 
 ## License notices
 

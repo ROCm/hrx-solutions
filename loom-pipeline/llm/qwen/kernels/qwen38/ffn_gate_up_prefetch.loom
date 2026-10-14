@@ -11,11 +11,13 @@
 // The partial 192-thread packet round is ordered before the complete 512-thread
 // round so only the latter remains outstanding across the unrolled matrix work.
 
+// Model geometry is supplied by the selected architecture catalog.
+
 template.decl @ggml.q5k.scale_min(%weight: buffer, %block_byte_base: offset, %group: index) -> (f32, f32)
 func.decl @qwen38_q5k_f16_vector4_prescaled(%weight: buffer, %row_byte_base: offset, %q5_block: index, %q5_group: index, %packet: index, %d_scale: f32, %dmin_scale: f32) -> (vector<4xf16>)
 amdgpu.target<gfx11-generic> @qwen38_ffn_block_prefetch_gfx11_wave32 {subgroup_size = 32}
-config.decl @qwen38.ffn.input_size : %value: index where [range(%value, 256, 32768), mul(%value, 256)]
-config.decl @qwen38.ffn.output_size : %value: index where [range(%value, 64, 32768), mul(%value, 64)]
+config.decl @qwen.model.hidden_size : %value: index where [range(%value, 256, 32768), mul(%value, 256)]
+config.decl @qwen.model.ffn_size : %value: index where [range(%value, 64, 32768), mul(%value, 64)]
 
 template.decl @qwen38.ffn_gate_up_q5k.block_prefetch.body(%input_size: index, %output_size: index, %weight_channels: index, %token_count_data: buffer, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer)
 
@@ -24,6 +26,7 @@ template.decl @qwen38.ffn_gate_up_q5k.block_prefetch.body(%input_size: index, %o
 // Callers establish complete 256-input and 64-output tiles and the canonical
 // or eight-channel weight order before applying this motif.
 template.def<@qwen38.ffn_gate_up_q5k.block_prefetch.body> device @qwen38_ffn_gate_up_q5k_block_prefetch_body(%input_size: index, %output_size: index, %weight_channels: index, %token_count_data: buffer, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer) {
+
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
@@ -308,7 +311,7 @@ template.def<@qwen38.ffn_gate_up_q5k.block_prefetch.body> device @qwen38_ffn_gat
 
 kernel.def target(@qwen38_ffn_block_prefetch_gfx11_wave32) export("qwen38_ffn_gate_up_q5k_f16_wmma_block_prefetch") @qwen38_ffn_gate_up_q5k_f16_wmma_block_prefetch(%token_count0: index) {
   %token_count = index.assume %token_count0 [range(%token_count0, 0, 512)] : index
-  %output_size = config.get @qwen38.ffn.output_size : index
+  %output_size = config.get @qwen.model.ffn_size : index
   %c1 = index.constant 1 : index
   %c63 = index.constant 63 : index
   %c64 = index.constant 64 : index
@@ -321,8 +324,8 @@ kernel.def target(@qwen38_ffn_block_prefetch_gfx11_wave32) export("qwen38_ffn_ga
   %token_tiles = index.div %padded_token_count, %c128 : index
   kernel.launch.config workgroups(%output_tiles, %token_tiles, %c1) workgroup_size(%c512, %c1, %c1) : index
 } launch(%token_count_data: buffer, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer) {
-  %input_size = config.get @qwen38.ffn.input_size : index
-  %output_size = config.get @qwen38.ffn.output_size : index
+  %input_size = config.get @qwen.model.hidden_size : index
+  %output_size = config.get @qwen.model.ffn_size : index
   %weight_channels = index.constant 1 : index
   template.apply<@qwen38.ffn_gate_up_q5k.block_prefetch.body>(%input_size, %output_size, %weight_channels, %token_count_data, %input, %gate_weight, %up_weight, %output) : (index, index, index, buffer, buffer, buffer, buffer, buffer)
   kernel.return
@@ -331,7 +334,7 @@ kernel.def target(@qwen38_ffn_block_prefetch_gfx11_wave32) export("qwen38_ffn_ga
 // Prepared eight-channel block order shares the canonical contraction schedule.
 kernel.def target(@qwen38_ffn_block_prefetch_gfx11_wave32) export("qwen38_ffn_gate_up_q5k_f16_wmma_block_prefetch_channel8") @qwen38_ffn_gate_up_q5k_f16_wmma_block_prefetch_channel8(%token_count0: index) {
   %token_count = index.assume %token_count0 [range(%token_count0, 0, 512)] : index
-  %output_size = config.get @qwen38.ffn.output_size : index
+  %output_size = config.get @qwen.model.ffn_size : index
   %c1 = index.constant 1 : index
   %c63 = index.constant 63 : index
   %c64 = index.constant 64 : index
@@ -344,8 +347,8 @@ kernel.def target(@qwen38_ffn_block_prefetch_gfx11_wave32) export("qwen38_ffn_ga
   %token_tiles = index.div %padded_token_count, %c128 : index
   kernel.launch.config workgroups(%output_tiles, %token_tiles, %c1) workgroup_size(%c512, %c1, %c1) : index
 } launch(%token_count_data: buffer, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer) {
-  %input_size = config.get @qwen38.ffn.input_size : index
-  %output_size = config.get @qwen38.ffn.output_size : index
+  %input_size = config.get @qwen.model.hidden_size : index
+  %output_size = config.get @qwen.model.ffn_size : index
   %weight_channels = index.constant 8 : index
   template.apply<@qwen38.ffn_gate_up_q5k.block_prefetch.body>(%input_size, %output_size, %weight_channels, %token_count_data, %input, %gate_weight, %up_weight, %output) : (index, index, index, buffer, buffer, buffer, buffer, buffer)
   kernel.return

@@ -6,7 +6,7 @@ import struct
 
 from binding.python.gguf import tensor_size
 
-PROFILE_PATH = Path(__file__).resolve().parents[1] / 'loom-pipeline/llm/qwen/compatibility.json'
+PROFILE_PATH = Path(__file__).resolve().parents[1] / 'loom-pipeline/llm/qwen/qwen_27b/compatibility.json'
 
 
 def profile():
