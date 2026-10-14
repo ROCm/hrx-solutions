@@ -1,0 +1,431 @@
+{
+  "profile_version": 1,
+  "identifier": "qwen38-27b-ud-q5-k-xl-v1",
+  "reference": {
+    "gguf_repo": "unsloth/Qwen3.8-27B-GGUF",
+    "gguf_revision": "408fcc1807ab264d8cd644a7c4c0f58fbd32eebc",
+    "gguf_filename": "Qwen3.8-27B-UD-Q5_K_XL.gguf",
+    "gguf_sha256": "176a6a3f034e9cdc447c10cd00329fc9b31002e6589b9295f2ad4f1eefe0f6ab",
+    "tokenizer_repo": "Qwen/Qwen3.8-27B",
+    "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+  },
+  "metadata": {
+    "general.architecture": "qwen35",
+    "qwen35.block_count": 65,
+    "qwen35.context_length": 262144,
+    "qwen35.embedding_length": 5120,
+    "qwen35.feed_forward_length": 17408,
+    "qwen35.attention.head_count": 24,
+    "qwen35.attention.head_count_kv": 4,
+    "qwen35.rope.dimension_sections": [
+      11,
+      11,
+      10,
+      0
+    ],
+    "qwen35.rope.freq_base": 10000000.0,
+    "qwen35.attention.layer_norm_rms_epsilon": 9.999999974752427e-07,
+    "qwen35.attention.key_length": 256,
+    "qwen35.attention.value_length": 256,
+    "qwen35.nextn_predict_layers": 1,
+    "qwen35.ssm.conv_kernel": 4,
+    "qwen35.ssm.state_size": 128,
+    "qwen35.ssm.group_count": 16,
+    "qwen35.ssm.time_step_rank": 48,
+    "qwen35.ssm.inner_size": 6144,
+    "qwen35.full_attention_interval": 4,
+    "qwen35.rope.dimension_count": 64,
+    "tokenizer.ggml.model": "gpt2",
+    "tokenizer.ggml.pre": "qwen35",
+    "tokenizer.ggml.eos_token_id": 248046,
+    "tokenizer.ggml.padding_token_id": 248055,
+    "tokenizer.ggml.bos_token_id": 248044,
+    "general.quantization_version": 2
+  },
+  "optional_metadata": {
+    "qwen35.attention.recurrent_layers": [
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ],
+    "qwen35.rope.scaling.type": "none",
+    "qwen35.rope.scaling.factor": 1.0,
+    "qwen35.rope.scale_linear": 1.0,
+    "qwen35.attention.scale": 0.0625
+  },
+  "metadata_arrays": {
+    "tokenizer.ggml.tokens": {
+      "count": 248320,
+      "type": 8
+    },
+    "tokenizer.ggml.token_type": {
+      "count": 248320,
+      "type": 5
+    },
+    "tokenizer.ggml.merges": {
+      "count": 247587,
+      "type": 8
+    }
+  },
+  "tokenizer_canonical_sha256": "8541ccaa962ac3d4c0e7bdb68a0a09651b140218e1408ea6cc4f25cc655762fa",
+  "base_layer_count": 64,
+  "full_attention_interval": 4,
+  "mtp_layer": 64,
+  "tensors": {
+    "global": {
+      "output.weight": {
+        "shape": [
+          5120,
+          248320
+        ],
+        "type": "Q6_K"
+      },
+      "output_norm.weight": {
+        "shape": [
+          5120
+        ],
+        "type": "F32"
+      },
+      "token_embd.weight": {
+        "shape": [
+          5120,
+          248320
+        ],
+        "type": "Q5_K"
+      }
+    },
+    "gdn": {
+      "attn_gate.weight": {
+        "shape": [
+          5120,
+          6144
+        ],
+        "type": "Q5_K"
+      },
+      "attn_norm.weight": {
+        "shape": [
+          5120
+        ],
+        "type": "F32"
+      },
+      "attn_qkv.weight": {
+        "shape": [
+          5120,
+          10240
+        ],
+        "type": "Q5_K"
+      },
+      "ffn_down.weight": {
+        "shape": [
+          17408,
+          5120
+        ],
+        "type": "Q6_K"
+      },
+      "ffn_gate.weight": {
+        "shape": [
+          5120,
+          17408
+        ],
+        "type": "Q5_K"
+      },
+      "ffn_up.weight": {
+        "shape": [
+          5120,
+          17408
+        ],
+        "type": "Q5_K"
+      },
+      "post_attention_norm.weight": {
+        "shape": [
+          5120
+        ],
+        "type": "F32"
+      },
+      "ssm_a": {
+        "shape": [
+          48
+        ],
+        "type": "F32"
+      },
+      "ssm_alpha.weight": {
+        "shape": [
+          5120,
+          48
+        ],
+        "type": "Q5_K"
+      },
+      "ssm_beta.weight": {
+        "shape": [
+          5120,
+          48
+        ],
+        "type": "Q4_K"
+      },
+      "ssm_conv1d.weight": {
+        "shape": [
+          4,
+          10240
+        ],
+        "type": "F32"
+      },
+      "ssm_dt.bias": {
+        "shape": [
+          48
+        ],
+        "type": "F32"
+      },
+      "ssm_norm.weight": {
+        "shape": [
+          128
+        ],
+        "type": "F32"
+      },
+      "ssm_out.weight": {
+        "shape": [
+          6144,
+          5120
+        ],
+        "type": "Q6_K"
+      }
+    },
+    "attention": {
+      "attn_k.weight": {
+        "shape": [
+          5120,
+          1024
+        ],
+        "type": "Q6_K"
+      },
+      "attn_k_norm.weight": {
+        "shape": [
+          256
+        ],
+        "type": "F32"
+      },
+      "attn_norm.weight": {
+        "shape": [
+          5120
+        ],
+        "type": "F32"
+      },
+      "attn_output.weight": {
+        "shape": [
+          6144,
+          5120
+        ],
+        "type": "Q6_K"
+      },
+      "attn_q.weight": {
+        "shape": [
+          5120,
+          12288
+        ],
+        "type": "Q6_K"
+      },
+      "attn_q_norm.weight": {
+        "shape": [
+          256
+        ],
+        "type": "F32"
+      },
+      "attn_v.weight": {
+        "shape": [
+          5120,
+          1024
+        ],
+        "type": "Q8_0"
+      },
+      "ffn_down.weight": {
+        "shape": [
+          17408,
+          5120
+        ],
+        "type": "Q6_K"
+      },
+      "ffn_gate.weight": {
+        "shape": [
+          5120,
+          17408
+        ],
+        "type": "Q5_K"
+      },
+      "ffn_up.weight": {
+        "shape": [
+          5120,
+          17408
+        ],
+        "type": "Q5_K"
+      },
+      "post_attention_norm.weight": {
+        "shape": [
+          5120
+        ],
+        "type": "F32"
+      }
+    },
+    "mtp": {
+      "attn_k.weight": {
+        "shape": [
+          5120,
+          1024
+        ],
+        "type": "Q6_K"
+      },
+      "attn_k_norm.weight": {
+        "shape": [
+          256
+        ],
+        "type": "F32"
+      },
+      "attn_norm.weight": {
+        "shape": [
+          5120
+        ],
+        "type": "F32"
+      },
+      "attn_output.weight": {
+        "shape": [
+          6144,
+          5120
+        ],
+        "type": "Q6_K"
+      },
+      "attn_q.weight": {
+        "shape": [
+          5120,
+          12288
+        ],
+        "type": "Q6_K"
+      },
+      "attn_q_norm.weight": {
+        "shape": [
+          256
+        ],
+        "type": "F32"
+      },
+      "attn_v.weight": {
+        "shape": [
+          5120,
+          1024
+        ],
+        "type": "Q8_0"
+      },
+      "ffn_down.weight": {
+        "shape": [
+          17408,
+          5120
+        ],
+        "type": "Q6_K"
+      },
+      "ffn_gate.weight": {
+        "shape": [
+          5120,
+          17408
+        ],
+        "type": "Q5_K"
+      },
+      "ffn_up.weight": {
+        "shape": [
+          5120,
+          17408
+        ],
+        "type": "Q5_K"
+      },
+      "nextn.eh_proj.weight": {
+        "shape": [
+          10240,
+          5120
+        ],
+        "type": "Q8_0"
+      },
+      "nextn.enorm.weight": {
+        "shape": [
+          5120
+        ],
+        "type": "F32"
+      },
+      "nextn.hnorm.weight": {
+        "shape": [
+          5120
+        ],
+        "type": "F32"
+      },
+      "nextn.shared_head_norm.weight": {
+        "shape": [
+          5120
+        ],
+        "type": "F32"
+      },
+      "post_attention_norm.weight": {
+        "shape": [
+          5120
+        ],
+        "type": "F32"
+      }
+    }
+  }
+}

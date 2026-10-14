@@ -11,11 +11,11 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import tempfile
-from typing import Optional, Protocol, Union
+from typing import Protocol
 
-from ._launcher import native_environment
+from .gguf import inspect_gguf
+from .qwen_validation import compare_gguf, compare_tokenizer, load_profile
 
 
 @dataclass(frozen=True)
@@ -33,10 +33,6 @@ class ValidationResult:
     compatible: bool
     pipeline: str
     message: str
-    returncode: Optional[int] = None
-    stdout: str = ""
-    stderr: str = ""
-    command: tuple[str, ...] = ()
 
 
 class Pipeline(Protocol):
@@ -44,13 +40,7 @@ class Pipeline(Protocol):
 
     identifier: str
 
-    def validate(
-        self,
-        model: ModelFiles,
-        *,
-        checker: Optional[Union[str, os.PathLike[str]]] = None,
-        timeout: float = 1800,
-    ) -> ValidationResult: ...
+    def validate(self, model: ModelFiles) -> ValidationResult: ...
 
 
 _PIPELINES: dict[str, Pipeline] = {}
@@ -85,16 +75,8 @@ def catalog_for_model(pipeline: str, catalog: Path, model_id: str) -> Path:
 def validate_model(
     model: ModelFiles,
     pipeline: str,
-    *,
-    checker: Optional[Union[str, os.PathLike[str]]] = None,
-    timeout: float = 1800,
 ) -> ValidationResult:
-    """Validate local model files with the selected registered pipeline.
-
-    ``checker`` is an optional pipeline-specific executable override. The
-    generic function only resolves the pipeline and checks that model files
-    exist; each adapter owns the interpretation and checker invocation.
-    """
+    """Inspect local model files with the selected registered pipeline."""
     implementation = _PIPELINES.get(pipeline)
     if implementation is None:
         choices = ", ".join(available_pipelines()) or "none registered"
@@ -110,11 +92,11 @@ def validate_model(
             "Model validation requires existing weights and tokenizer files; missing: "
             + ", ".join(missing),
         )
-    return implementation.validate(model, checker=checker, timeout=timeout)
+    return implementation.validate(model)
 
 
 class _QwenPipeline:
-    """First adapter, backed by HRX's Qwen epoch_check correctness witness."""
+    """Header-only compatibility with the packaged Qwen architecture contract."""
 
     identifier = "qwen"
 
@@ -162,126 +144,26 @@ class _QwenPipeline:
             shutil.rmtree(staging, ignore_errors=True)
         return output / "qwen"
 
-    def validate(
-        self,
-        model: ModelFiles,
-        *,
-        checker: Optional[Union[str, os.PathLike[str]]] = None,
-        timeout: float = 1800,
-    ) -> ValidationResult:
-        executable = _find_qwen_checker(checker)
-        if executable is None:
-            return ValidationResult(
-                False,
-                self.identifier,
-                "The Qwen compatibility checker (HRX epoch_check) is unavailable. "
-                "Build //experimental/loom_serve/models/qwen:epoch_check from the "
-                "pinned HRX checkout, or set HRX_QWEN_EPOCH_CHECK to its executable.",
-            )
-
-        catalog = _qwen_catalog()
-        if not catalog.is_dir():
-            return ValidationResult(
-                False,
-                self.identifier,
-                f"Qwen pipeline source catalog is unavailable at {catalog}. "
-                "Install the Qwen pipeline assets with the hrx-solutions package.",
-            )
-
-        command = (
-            str(executable),
-            f"--model={catalog}",
-            # Keep the visible filenames when these point through Hugging
-            # Face snapshot symlinks. The checker chooses the input format
-            # from the filename extension, while the resolved blob name has
-            # no extension.
-            f"--weights={Path(model.weights).absolute()}",
-            f"--tokenizer={Path(model.tokenizer).absolute()}",
-            "--epoch=32:8",
-        )
+    def validate(self, model: ModelFiles) -> ValidationResult:
         try:
-            result = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=native_environment(),
-            )
-        except subprocess.TimeoutExpired as exc:
+            profile = load_profile(_qwen_catalog())
+            weights = inspect_gguf(model.weights)
+            problems = compare_gguf(weights, profile) + compare_tokenizer(model.tokenizer, profile)
+        except (OSError, ValueError) as exc:
+            return ValidationResult(False, self.identifier, f"Could not inspect Qwen model assets: {exc}")
+        if problems:
+            details = "\n".join(f"  - {problem}" for problem in problems[:32])
+            if len(problems) > 32:
+                details += f"\n  - ... {len(problems) - 32} additional mismatches"
             return ValidationResult(
-                False,
-                self.identifier,
-                f"Qwen compatibility check exceeded {timeout:g} seconds. "
-                "Confirm the GPU is available and retry with a longer timeout.",
-                stdout=_as_text(exc.stdout),
-                stderr=_as_text(exc.stderr),
-                command=command,
+                False, self.identifier,
+                f"Model does not match {profile['identifier']} ({len(problems)} mismatches):\n{details}",
             )
-        except OSError as exc:
-            return ValidationResult(
-                False,
-                self.identifier,
-                f"Could not run Qwen compatibility checker {executable}: {exc}",
-                command=command,
-            )
-
-        combined = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part)
-        if result.returncode == 0:
-            return ValidationResult(
-                True,
-                self.identifier,
-                "Model passed the Qwen pipeline compatibility check.",
-                returncode=0,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                command=command,
-            )
-        details = combined or "The checker exited without diagnostic output."
         return ValidationResult(
-            False,
-            self.identifier,
-            f"Model failed the Qwen pipeline compatibility check (exit {result.returncode}). "
-            f"Checker output: {details}",
-            returncode=result.returncode,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            command=command,
+            True, self.identifier,
+            f"Model matches {profile['identifier']}: 64 base layers and MTP, "
+            f"{len(weights.tensors)} tensors checked from GGUF descriptors; matching tokenizer configuration.",
         )
-
-
-def _find_qwen_checker(
-    override: Optional[Union[str, os.PathLike[str]]],
-) -> Optional[Path]:
-    candidates: list[str] = []
-    packaged = Path(__file__).resolve().parent / "_native" / "bin" / "loom-qwen-epoch-check"
-    candidates.append(str(packaged))
-    if override is not None:
-        candidates.append(os.fspath(override))
-    configured = os.environ.get("HRX_QWEN_EPOCH_CHECK")
-    if configured:
-        candidates.append(configured)
-    for name in ("loom-qwen-epoch-check", "qwen-epoch-check"):
-        found = shutil.which(name)
-        if found:
-            candidates.append(found)
-
-    # Developer checkout convenience. Release wheels can provide the checker
-    # on PATH or through HRX_QWEN_EPOCH_CHECK without depending on this layout.
-    repo = Path(__file__).resolve().parents[2]
-    hrx = repo / ".deps" / "hrx"
-    candidates.extend(
-        str(hrx / relative)
-        for relative in (
-            "bazel-bin/experimental/loom_serve/models/qwen/epoch_check",
-            "bazel-bin/experimental/loom_serve/models/qwen/epoch_check_/epoch_check",
-        )
-    )
-    for candidate in candidates:
-        path = Path(candidate).expanduser()
-        if path.is_file() and os.access(path, os.X_OK):
-            return path.resolve()
-    return None
 
 
 def _qwen_catalog() -> Path:
@@ -292,11 +174,6 @@ def _qwen_catalog() -> Path:
         return repo_catalog
     return Path(__file__).resolve().parent / "loom-pipeline" / "llm" / "qwen"
 
-
-def _as_text(value: Optional[Union[str, bytes]]) -> str:
-    if value is None:
-        return ""
-    return value.decode(errors="replace") if isinstance(value, bytes) else value
 
 
 register_pipeline(_QwenPipeline())

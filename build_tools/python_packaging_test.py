@@ -1,0 +1,95 @@
+"""Model validation assets and removal of the obsolete native checker."""
+
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+import zipfile
+
+from build_tools import python_packaging as packaging
+from build_tools.validate_wheel import validate_wheel
+from build_tools.versioning import read_package_version
+
+
+class PackagingTest(unittest.TestCase):
+    def setUp(self):
+        temporary=tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root=Path(temporary.name)
+
+    def test_build_targets_only_server(self):
+        hrx=self.root/'hrx'
+        hrx.mkdir()
+        (hrx/'.bazelversion').write_text('8.3.1')
+        with patch.object(packaging,'discover_hrx_source',return_value=hrx), patch.object(packaging,'_query_bazel_output',return_value=self.root/'server') as query, patch.object(packaging.subprocess,'run') as run:
+            outputs=packaging.build_native_executables(self.root/'bazel',self.root/'rocm')
+        self.assertEqual(set(outputs),{'loom-text-server'})
+        self.assertEqual(packaging.BAZEL_TARGETS,('//experimental/loom_serve/text:server',))
+        self.assertEqual(query.call_count,1)
+        self.assertEqual(run.call_args.args[0][-1],packaging.BAZEL_TARGETS[0])
+        self.assertNotIn('epoch_check',' '.join(run.call_args.args[0]))
+
+    def test_staging_removes_stale_binary_and_preserves_runtime(self):
+        rocm=self.root/'rocm'
+        for name in packaging.ROCM_RUNTIME_ROOTS:
+            path=rocm/name
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_text(name)
+        hrx=self.root/'hrx'
+        hrx.mkdir()
+        (hrx/'LICENSE').write_text('license')
+        server=self.root/'server'
+        server.write_text('server')
+        native=self.root/'_native'
+        (native/'bin').mkdir(parents=True)
+        (native/'bin/loom-qwen-epoch-check').write_text('stale checker')
+        (native/'lib').mkdir()
+        (native/'lib/stale.so').write_text('stale library')
+        outputs=packaging.stage_native_payload(native,{'loom-text-server':server},rocm,hrx,needed_libraries=lambda _:())
+        self.assertEqual({path.name for path in (native/'bin').iterdir()},{'loom-text-server'})
+        self.assertFalse((native/'lib/stale.so').exists())
+        self.assertTrue((native/'bin/loom-text-server').stat().st_mode & 0o111)
+        for name in packaging.ROCM_RUNTIME_ROOTS:
+            self.assertIn(native/name,outputs)
+
+    def wheel(self, *, obsolete=False, missing=None):
+        package=self.root/'staged'
+        catalog=packaging.stage_loom_source_catalog(package)
+        members={
+            'hrx_solutions/_native/bin/loom-text-server':b'server',
+            'hrx_solutions/_native/lib/libhsa-runtime64.so.1':b'hsa',
+            'hrx_solutions/_native/lib/libhsa-amd-aqlprofile64.so.1':b'profile',
+        }
+        members.update({'hrx_solutions/'+path.relative_to(package).as_posix():path.read_bytes() for path in catalog})
+        for name in ('pipeline_validation.py','setup_cli.py','model_store.py','gguf.py','qwen_validation.py'):
+            members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
+        version=read_package_version()
+        prefix=f'hrx_solutions-{version}.dist-info/'
+        members[prefix+'METADATA']=(f'Metadata-Version: 2.1\nName: hrx-solutions\nVersion: {version}\nDescription-Content-Type: text/markdown\n\n'+(packaging.REPO_ROOT/'PYPI_README.md').read_text()).encode()
+        members[prefix+'entry_points.txt']=b'[console_scripts]\nloom-serve-setup = hrx_solutions.setup_cli:main\n'
+        if obsolete:
+            members['hrx_solutions/_native/bin/loom-qwen-epoch-check']=b'obsolete'
+        if missing:
+            del members[missing]
+        wheel=self.root/'fixture.whl'
+        with zipfile.ZipFile(wheel,'w') as archive:
+            for name,data in members.items():
+                archive.writestr(name,data)
+        return wheel
+
+    def test_wheel_contains_new_validation_assets(self):
+        libraries,size=validate_wheel(self.wheel())
+        self.assertEqual(libraries,2)
+        self.assertGreater(size,0)
+        with self.assertRaisesRegex(RuntimeError,'missing setup assets.*compatibility.json'):
+            validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/compatibility.json'))
+        with self.assertRaisesRegex(RuntimeError,'missing setup assets.*gguf.py'):
+            validate_wheel(self.wheel(missing='hrx_solutions/gguf.py'))
+
+    def test_wheel_rejects_old_checker(self):
+        with self.assertRaisesRegex(RuntimeError,'obsolete model execution checkers'):
+            validate_wheel(self.wheel(obsolete=True))
+
+
+if __name__ == '__main__':
+    unittest.main()

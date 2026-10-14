@@ -135,7 +135,7 @@ its exact filename. The setup command checks the Bazel version from
 `.bazelrc.local`. Its `--help` includes commands to install the pinned Bazelisk.
 
 The build fetches the HRX commit pinned in [deps.lock](deps.lock), builds the
-native server and compatibility checker, and packages them with this
+native server, and packages it with this
 repository's pipeline sources. The package version comes from
 [version.json](version.json) for both local builds and CI. See
 [RELEASING.md](RELEASING.md) for release preparation, tags, GitHub assets, and

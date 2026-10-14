@@ -297,13 +297,9 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     result = pipeline_validation.validate_model(
-        files, args.pipeline, checker=args.checker, timeout=args.timeout
+        files, args.pipeline
     )
     print(result.message)
-    if result.stdout:
-        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-    if result.stderr:
-        print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
     if result.compatible:
         model_store.record_pipeline(args.model_id, args.pipeline, args.model_root)
     return 0 if result.compatible else 1
@@ -627,11 +623,9 @@ def build_parser() -> argparse.ArgumentParser:
     importing.add_argument("--model-root", type=Path)
     importing.set_defaults(handler=_cmd_import)
 
-    validating = model_commands.add_parser("validate", help="check model compatibility with a pipeline")
+    validating = model_commands.add_parser("validate", help="inspect GGUF architecture and tensor encodings for a pipeline")
     validating.add_argument("model_id")
     validating.add_argument("--pipeline", required=True)
-    validating.add_argument("--checker", help="optional pipeline checker executable")
-    validating.add_argument("--timeout", type=float, default=1800)
     validating.add_argument("--model-root", type=Path)
     validating.set_defaults(handler=_cmd_validate)
 

@@ -68,12 +68,14 @@ def validate_wheel(path: Path) -> tuple[int, int]:
 
         required_files = {
             PACKAGE_PREFIX + "_native/bin/loom-text-server",
-            PACKAGE_PREFIX + "_native/bin/loom-qwen-epoch-check",
             PIPELINE_PREFIX + "LICENSE-APACHE-2.0",
             PIPELINE_PREFIX + "qwen/sources.txt",
             PIPELINE_PREFIX + "qwen/prepare.loom",
             PIPELINE_PREFIX + "qwen/control.loom",
             PIPELINE_PREFIX + "qwen/weights.loom",
+            PIPELINE_PREFIX + "qwen/compatibility.json",
+            PACKAGE_PREFIX + "gguf.py",
+            PACKAGE_PREFIX + "qwen_validation.py",
             PACKAGE_PREFIX + "pipeline_validation.py",
             PACKAGE_PREFIX + "setup_cli.py",
             PACKAGE_PREFIX + "model_store.py",
@@ -81,6 +83,13 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         missing = sorted(required_files - names)
         if missing:
             raise RuntimeError("wheel is missing setup assets: " + ", ".join(missing))
+
+        obsolete_checkers = sorted(
+            name for name in names
+            if Path(name).name in {"loom-qwen-epoch-check", "qwen-epoch-check", "epoch_check"}
+        )
+        if obsolete_checkers:
+            raise RuntimeError("wheel contains obsolete model execution checkers: " + ", ".join(obsolete_checkers))
 
         entry_points_paths = [
             name for name in names if name.endswith(".dist-info/entry_points.txt")

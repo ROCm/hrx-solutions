@@ -24,7 +24,6 @@ from setuptools.command.build_py import build_py
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BAZEL_TARGETS = (
     "//experimental/loom_serve/text:server",
-    "//experimental/loom_serve/models/qwen:epoch_check",
 )
 PLATFORM_LINK_OPTIONS = []
 if platform.system() == "Linux":
@@ -200,9 +199,6 @@ def build_native_executables(bazel: Path, rocm_root: Path) -> dict[str, Path]:
     return {
         "loom-text-server": _query_bazel_output(
             bazel, source_root, BAZEL_TARGETS[0], build_options, build_environment
-        ),
-        "loom-qwen-epoch-check": _query_bazel_output(
-            bazel, source_root, BAZEL_TARGETS[1], build_options, build_environment
         ),
     }
 

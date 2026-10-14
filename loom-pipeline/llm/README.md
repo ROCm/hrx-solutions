@@ -75,11 +75,49 @@ code must be absolute while preserving their visible filenames. Extensions
 matter for weight files, and the symlinks must preserve them.
 
 [`pipeline_validation.py`](../../binding/python/pipeline_validation.py) maps
-pipeline IDs to adapters. The Qwen adapter invokes `loom-qwen-epoch-check` with
-the catalog, weight path, tokenizer path, and `--epoch=32:8`. This is a real
-GPU execution check. The CLI records `pipeline: qwen` in the model manifest
-only when the checker succeeds. It is a compatibility witness for that run;
-it does not exercise every server option or replace the upstream model tests.
+pipeline IDs to adapters. The Qwen adapter uses
+[`gguf.py`](../../binding/python/gguf.py) to inspect the little-endian v2/v3
+GGUF header and tensor descriptors, then
+[`qwen_validation.py`](../../binding/python/qwen_validation.py) compares them
+with [`compatibility.json`](qwen/compatibility.json). The CLI records
+`pipeline: qwen` only after architecture, tensor, and tokenizer checks pass.
+
+The versioned profile is grounded in the qualified GGUF and reviewed against
+the model sources. It records `qwen35` metadata, 64 base layers with a
+three-GDN/one-attention pattern, one MTP block, exact GGUF-order dimensions,
+and the GGML encoding for every required tensor. Repeated schemas expand to
+866 tensor bindings. The profile's reference checksums establish provenance;
+validation does not hash weight payloads or require identical weights.
+
+Quantization is checked per tensor. Descriptive names, sampling preferences,
+and `general.file_type` are advisory. Unknown `qwen35.*` configuration is
+rejected unless its semantics are explicitly supported by the profile.
+Unrelated metadata and structurally valid auxiliary tensors outside `blk.*`
+are accepted; additional model-block tensors are rejected. Supported optional
+settings must preserve the source's layer pattern, RoPE behavior, and attention
+scale. Float comparisons use a relative tolerance of one part per million.
+
+The reader bounds traversal to a 64 MiB header, 100,000 metadata/tensor entries,
+one million elements per metadata array, and 1 MiB per string. It skips large
+metadata array contents and verifies tensor storage ranges from file size,
+without reading or mapping payloads. Split models and tensor encodings absent
+from the pinned HRX parser are rejected. Vocabulary array counts/types are
+checked; their contents are not compared because native tokenization uses the
+external `tokenizer.json`. That file's complete canonical JSON configuration
+must match the qualified tokenizer; whitespace and key order are ignored.
+
+Validation certifies the full current catalog including MTP. Missing MTP
+bindings produce MTP diagnostics even when `serve --no-mtp` is planned.
+It checks structural compatibility and tokenizer configuration, and permits
+compatible fine-tune weights. It does not establish numerical correctness or
+execute model/tokenizer behavior. CPU-only Python regression tests live in
+`tests/`; generic runtime and model execution tests remain in HRX.
+
+When changing model geometry or an encoding, update the compatibility profile
+and its provenance alongside the consuming sources. The source-binding test
+checks representative parameter names and encoded byte lengths against the
+profile to catch drift; review logical shapes, quantization consumers, and
+metadata semantics as well.
 
 The **model ID** is the identity of an imported checkpoint. The **pipeline ID**
 selects its implementation. Keeping both lets multiple imports use the same
@@ -302,9 +340,9 @@ model execution, retained continuation, and the HTTP behavior affected by
 the change. Include mixed spans and inactive or resumed rows when touching
 stateful execution. For MTP changes, include rejection and partial acceptance.
 
-The bundled `models validate` command runs one epoch-check configuration and
-does not enable MTP. Use HRX's model-specific checks for broader numerical,
-MTP, state-ownership, and performance coverage. Generic runtime and model
+The `models validate` command performs CPU structural inspection, including
+MTP tensor compatibility. Use HRX's model-specific execution checks for
+numerical, MTP, state-ownership, and performance coverage. Generic runtime and model
 tests remain in HRX; this repository maintains the deployed catalog, thin
 launchers, and packaging.
 
@@ -359,8 +397,8 @@ contracts. Trace the change through these steps:
    changes, use the upstream
    [`check_tools.py` harness](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/models/qwen/check_tools.py),
    supplying the edited catalog, to check generated calls and tool-result
-   follow-ups. The bundled `models validate` command checks model execution;
-   it does not establish that the new chat framing is correct.
+   follow-ups. The `models validate` command checks structural compatibility
+   of model assets; use the execution checks above to verify new chat framing.
 6. **Check the delivered solution.** Rebuild and reinstall the wheel, restart
    the server, and repeat the relevant request through the packaged launcher.
    Confirm the advertised model ID and active catalog. An already-running

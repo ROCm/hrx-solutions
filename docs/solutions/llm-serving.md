@@ -19,7 +19,7 @@ HRX runtime. The table describes the packaged example and its checks:
 | Chat | Streaming responses with greedy generation (`stream: true`, `temperature: 0`). The current Qwen policy rejects thinking mode. |
 | Tools | Function-tool schemas, generated calls, and assistant/tool follow-up history, with Qwen-specific framing and parsing in Loom source. Pi configuration is included. |
 | Speculation | The launcher enables multi-token prediction (MTP) at depth three by default; `--no-mtp` disables it. |
-| Compatibility check | `models validate` runs the GPU epoch checker with `--epoch=32:8`, without MTP. HTTP, tool-use, and MTP checks are separate [upstream checks](../../loom-pipeline/llm/README.md#developing-and-checking-a-change). |
+| Compatibility check | `models validate` inspects GGUF architecture metadata and exact tensor shapes/types on CPU, including MTP tensors, and checks the matching tokenizer configuration. Numerical, HTTP, tool-use, and MTP execution checks remain [upstream checks](../../loom-pipeline/llm/README.md#developing-and-checking-a-change). |
 
 See the [pinned upstream text guide](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/text/README.md)
 for hardware notes and the chat protocol contract. Adapting this example to
@@ -103,10 +103,31 @@ loom-serve-setup models validate "$MODEL_ID" --pipeline qwen
 loom-serve-setup models list
 ```
 
-Validation runs the bundled Qwen correctness checker on the GPU and records
-the pipeline after success. It can take time to load weights and compile
-kernels; the default timeout is 1,800 seconds. This checks execution against
-the pipeline, beyond the file-format checks performed during import.
+Validation reads the GGUF header, metadata, and tensor directory on CPU and
+records the pipeline after success. It checks the packaged architecture
+contract, exact tensor dimensions and GGML quantization types, and the matching
+`tokenizer.json` configuration. It does not read tensor payloads or require a
+GPU, native checker, compilation, or an HRX checkout.
+
+The qualified file identifies its architecture as `qwen35` and declares 65
+blocks: 64 base layers plus one MTP block. Validation requires both base and
+MTP tensors because the default server configuration uses MTP. A file without
+the MTP block fails with an explicit MTP diagnostic, even if serving is later
+requested with `--no-mtp`. The quantization mix is checked per tensor; a
+filename or `general.file_type` summary does not establish compatibility.
+
+For example, a different quantization may report:
+
+```text
+blk.3.attn_v.weight: expected Q8_0, found Q6_K
+```
+
+Compatible fine-tunes may have different weight values and model names while
+retaining this configuration and encoding contract. The tokenizer must match
+the qualified configuration, including vocabulary, token IDs, merges, and
+other tokenization settings; JSON formatting and key order may differ.
+Structural validation does not establish checkpoint identity or numerical
+correctness. Use the upstream execution checks when changing model math.
 
 ## 3. Start the server
 
@@ -191,5 +212,5 @@ live server. In Pi, try asking it to use its Bash tool to run
 | `loom_route_error` | Read `/v1/models` and send that exact model ID. Define `MODEL_ID` in the terminal issuing the request. |
 | Missing model files or broken aliases | Check `models list` and restore the original files or Hugging Face cache referenced by the import. |
 | Unsupported format with a hash as its name | Preserve a filename ending in `.gguf`. Use the imported model path or a named Hugging Face snapshot path; resolving a snapshot symlink can expose an extensionless cache blob. Update older launchers that resolve these paths. |
-| Validation fails | Read the checker output. Check the driver/device access and the exact checkpoint/tokenizer pair before changing the pipeline. |
+| Validation fails | Read the reported metadata, tensor, or tokenizer mismatch. Use the supported architecture and exact quantization mix with the matching tokenizer. Split GGUF files are unsupported. |
 | Startup fails or times out | Read the log path from startup diagnostics or `servers status SERVER_ID`. Check memory availability, compilation errors, and port ownership. Increase `--ready-timeout` if startup needs more time. |

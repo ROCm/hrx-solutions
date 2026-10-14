@@ -7,7 +7,7 @@ reusable compiler, execution, and memory services. Developers and agents can
 run, inspect, and adapt these examples for their own workloads.
 
 The current package provides Loom Serve for streaming LLM chat on AMD GPUs.
-It includes native server and compatibility-checker executables, the Qwen
+It includes the native server, Python GGUF compatibility validation, the Qwen
 Loom source catalog, and the required ROCm runtime libraries. Model weights
 are downloaded separately.
 
