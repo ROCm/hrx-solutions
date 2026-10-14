@@ -52,15 +52,18 @@ jobs:
           shopt -s nullglob
           wheels=("${RUNNER_TEMP}/model-wheel/"*.whl)
           test "${#wheels[@]}" -eq 1
-          bash build_tools/model-smoke.sh "${wheels[0]}" "${RUNNER_TEMP}/model-diagnostics"
+          bash build_tools/model-smoke.sh "${wheels[0]}" "${GITHUB_WORKSPACE}/build/model-diagnostics"
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: model-smoke-diagnostics
+          # Relative paths avoid host/container translation of only the first
+          # entry in this multi-line action input.
           path: |
-            ${{ runner.temp }}/model-diagnostics/*.log
-            ${{ runner.temp }}/model-diagnostics/*.json
-            ${{ runner.temp }}/model-diagnostics/response.sse
-            ${{ runner.temp }}/model-diagnostics/loom/logs/*.log
+            build/model-diagnostics/*.log
+            build/model-diagnostics/*.json
+            build/model-diagnostics/response.sse
+            build/model-diagnostics/loom/logs/*.log
+            build/model-diagnostics/loom/servers/*.json
           if-no-files-found: warn
