@@ -40,6 +40,14 @@ jobs:
           apt-get install -y --no-install-recommends python3 python3-venv curl jq ca-certificates git
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install ROCm diagnostic tool
+        run: bash .github/scripts/install_rocminfo.sh
+      - name: Check gfx1151 with rocminfo
+        timeout-minutes: 2
+        run: |
+          mkdir -p build
+          timeout --kill-after=10s 60s /opt/rocm-7.2.4/bin/rocminfo 2>&1 | tee build/rocminfo.log
+          grep -Eq 'Name:[[:space:]]+gfx1151([[:space:]]|$)' build/rocminfo.log
       - name: Download repaired wheel
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -61,6 +69,7 @@ jobs:
           # Relative paths avoid host/container translation of only the first
           # entry in this multi-line action input.
           path: |
+            build/rocminfo.log
             build/model-diagnostics/*.log
             build/model-diagnostics/*.json
             build/model-diagnostics/response.sse
