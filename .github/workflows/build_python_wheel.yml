@@ -32,15 +32,25 @@ jobs:
     name: ${{ inputs.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      PYTHONNOUSERSITE: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install Python test requirements
-        run: python3 -m pip install 'packaging>=24.2' 'setuptools>=77' 'wheel>=0.45'
-      - name: Run Python unit tests
         run: |
-          python3 -m unittest discover -s build_tools -p '*_test.py' -v
-          python3 -m unittest discover -s tests -p '*_test.py' -v
+          env -u PYTHONPATH -u PYTHONHOME python3 -m venv "${RUNNER_TEMP}/hem-source-venv"
+          env -u PYTHONPATH -u PYTHONHOME "${RUNNER_TEMP}/hem-source-venv/bin/python" -m pip install \
+            'setuptools>=77' 'wheel>=0.45' 'packaging>=24.2'
+      - name: Run Python unit tests
+        env:
+          LOOM_SERVE_DIR: ${{ runner.temp }}/hem-source-state
+        run: |
+          unset PYTHONPATH PYTHONHOME
+          python="${RUNNER_TEMP}/hem-source-venv/bin/python"
+          "$python" -c 'import os,site,sys,setuptools,packaging; from pathlib import Path; assert sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE; assert "include-system-site-packages = false" in (Path(sys.prefix)/"pyvenv.cfg").read_text(); assert not os.environ.get("PYTHONPATH") and not os.environ.get("PYTHONHOME"); assert all(Path(m.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()) for m in (setuptools,packaging)); print(sys.executable, setuptools.__file__, packaging.__file__)'
+          "$python" -m unittest discover -s build_tools -p '*_test.py' -v
+          "$python" -m unittest discover -s tests -p '*_test.py' -v
       - name: Build and repair wheel in manylinux container
         env:
           HRX_RELEASE_TYPE: ${{ inputs.release_type }}

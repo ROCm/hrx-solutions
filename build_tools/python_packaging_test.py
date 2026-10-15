@@ -7,7 +7,7 @@ from unittest.mock import patch
 import zipfile
 
 from build_tools import python_packaging as packaging
-from build_tools.validate_wheel import HEM_MODULES, REQUIRED_ENTRY_POINTS, validate_wheel
+from build_tools.validate_wheel import HEM_MODULES, OBSOLETE_MODULES, OBSOLETE_ENTRY_POINTS, REQUIRED_ENTRY_POINTS, validate_wheel
 from build_tools.versioning import read_package_version
 
 
@@ -62,7 +62,7 @@ class PackagingTest(unittest.TestCase):
             'hrx_solutions/_native/lib/libhsa-amd-aqlprofile64.so.1':b'profile',
         }
         members.update({'hrx_solutions/'+path.relative_to(package).as_posix():path.read_bytes() for path in catalog})
-        for name in ('pipeline_validation.py','setup_cli.py','model_store.py','model_download.py','gguf.py','qwen_validation.py','loom_serve.py','serve_start.py', *(name+'.py' for name in HEM_MODULES)):
+        for name in ('pipeline_validation.py','runtime_paths.py','model_store.py','model_download.py','gguf.py','qwen_validation.py','loom_serve.py', *(name+'.py' for name in HEM_MODULES)):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         version=read_package_version()
         prefix=f'hrx_solutions-{version}.dist-info/'
@@ -114,6 +114,25 @@ class PackagingTest(unittest.TestCase):
                         archive.writestr(name, data)
                 with self.assertRaisesRegex(RuntimeError, command):
                     validate_wheel(wheel)
+
+    def test_wheel_rejects_retired_manager_surface(self):
+        for module in OBSOLETE_MODULES:
+            wheel = self.wheel()
+            with zipfile.ZipFile(wheel, 'a') as archive:
+                archive.writestr('hrx_solutions/' + module + '.py', b'retired')
+            with self.subTest(module=module), self.assertRaisesRegex(RuntimeError, 'retired manager modules'):
+                validate_wheel(wheel)
+        for command in OBSOLETE_ENTRY_POINTS:
+            wheel = self.wheel()
+            with zipfile.ZipFile(wheel) as archive:
+                members = {name: archive.read(name) for name in archive.namelist()}
+            entrypoint = next(name for name in members if name.endswith('/entry_points.txt'))
+            members[entrypoint] += f'{command} = hrx_solutions.setup_cli:main\n'.encode()
+            with zipfile.ZipFile(wheel, 'w') as archive:
+                for name, data in members.items():
+                    archive.writestr(name, data)
+            with self.subTest(command=command), self.assertRaisesRegex(RuntimeError, 'retired commands'):
+                validate_wheel(wheel)
 
     def test_wheel_rejects_old_checker(self):
         with self.assertRaisesRegex(RuntimeError,'obsolete model execution checkers'):

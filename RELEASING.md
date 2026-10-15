@@ -123,12 +123,13 @@ same release tag are serialized without cancelling an active run. The
 `release_type` CI input selects the **TheRock toolchain channel**, independently
 of the HRX Solutions package version.
 
-Check the GitHub assets and PyPI project after success. For example:
+Check the GitHub assets and PyPI project after success. Set `RELEASE_VERSION`
+to the exact published version, then check the installed commands:
 
 ```bash
-python -m pip install --upgrade 'hrx-solutions==0.3.0'
+python -m pip install --upgrade "hrx-solutions==${RELEASE_VERSION:?set the published version}"
 loom-serve --help
-loom-serve-setup --help
+loom-hem --help
 ```
 
 Pin the exact version for an installation check, including prerelease suffixes.

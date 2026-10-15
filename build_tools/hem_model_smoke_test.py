@@ -1,11 +1,13 @@
 """Failure propagation in the installed real-model smoke harness."""
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import time
 import tempfile
+import sqlite3
 import unittest
 from contextlib import redirect_stderr
 import io
@@ -46,6 +48,123 @@ class SmokeFailureTest(unittest.TestCase):
         self.assertFalse(self.gate.results['success'])
 
 
+class AcquisitionPathTest(unittest.TestCase):
+    def test_download_subprocess_uses_selected_venv_hf_with_clean_or_hostile_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            gate = hem_model_smoke.Gate(argparse.Namespace(run=root))
+            source = Path(__file__).resolve().parents[1]
+            empty = root / 'empty-bin'
+            global_bin = root / 'global-bin'
+            empty.mkdir()
+            global_bin.mkdir()
+            global_hf = global_bin / 'hf'
+            global_hf.write_text('#!' + sys.executable + '\nraise SystemExit(73)\n')
+            global_hf.chmod(0o700)
+            for namespace in ('a', 'b'):
+                binary = root / namespace / 'venv/bin'
+                binary.mkdir(parents=True)
+                gate.states[namespace] = binary / 'python'
+                hf = binary / 'hf'
+                hf.write_text(
+                    '#!' + sys.executable + '\nimport json,os,sys,site\n'
+                    'print(json.dumps(dict(hf=sys.argv[0], home=os.environ["HOME"],'
+                    'xdg=os.environ["XDG_CONFIG_HOME"], cache=os.environ["HF_HUB_CACHE"],'
+                    'credentials_preserved=os.environ.get("HF_TOKEN")=="synthetic-test-token",'
+                    'python_overrides_absent="PYTHONPATH" not in os.environ and "PYTHONHOME" not in os.environ,'
+                    'user_site=site.ENABLE_USER_SITE)))\n')
+                hf.chmod(0o700)
+                cli = binary / 'loom-hem'
+                cli.write_text(
+                    '#!' + sys.executable + '\nimport json,sys\n'
+                    f'sys.path.insert(0,{str(source)!r})\n'
+                    'from binding.python.model_download import _run_hf\n'
+                    'assert sys.argv[1:3]==["model","download"]\n'
+                    '# Exercise the actual download subprocess primitive, without network or weights.\n'
+                    'print(json.dumps(dict(completed=True,hf=json.loads(_run_hf(["hf","--help"])))))\n')
+                cli.chmod(0o700)
+                for inherited_path in (empty, global_bin):
+                    with self.subTest(namespace=namespace, inherited_path=inherited_path), mock.patch.dict(
+                            os.environ, dict(PATH=str(inherited_path), HOME=str(root / 'home'),
+                            XDG_CONFIG_HOME=str(root / 'xdg'), HF_HUB_CACHE=str(root / 'cache'),
+                            HF_TOKEN='synthetic-test-token', PYTHONPATH='must-be-cleared',
+                            PYTHONHOME='must-be-cleared')):
+                        result = gate.command(namespace, 'model', 'download', 'qwen35-08b-q5-k-xl')
+                        self.assertEqual(result['hf']['hf'], str(hf))
+                        self.assertEqual(result['hf']['home'], str(root / 'home'))
+                        self.assertEqual(result['hf']['xdg'], str(root / 'xdg'))
+                        self.assertEqual(result['hf']['cache'], str(root / 'cache'))
+                        self.assertTrue(result['hf']['credentials_preserved'])
+                        self.assertTrue(result['hf']['python_overrides_absent'])
+                        self.assertFalse(result['hf']['user_site'])
+
+
+class CiProfileTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        database = self.root / 'a/state/control.sqlite3'
+        database.parent.mkdir(parents=True)
+        with sqlite3.connect(database) as connection:
+            connection.execute('CREATE TABLE instances (id TEXT)')
+        self.gate = hem_model_smoke.Gate(argparse.Namespace(
+            run=self.root, acquire08=False, model08=self.root / 'immutable-model'))
+
+    def test_required_profile_imports_only_qualified08_and_retires_before_shutdown(self):
+        calls = []
+        def record(name):
+            return lambda *args, **kwargs: calls.append((name, args))
+        def command(*args, **kwargs):
+            calls.append(('command', args))
+            return {'items': []}
+        with mock.patch.object(self.gate, 'start_server', side_effect=record('server')), \
+             mock.patch.object(self.gate, 'import_model', side_effect=record('import')), \
+             mock.patch.object(self.gate, 'start_instance', side_effect=record('activate')), \
+             mock.patch.object(self.gate, 'query', side_effect=record('query')), \
+             mock.patch.object(self.gate, 'shutdown', side_effect=record('shutdown')), \
+             mock.patch.object(self.gate, 'command', side_effect=command):
+            self.gate.run_ci08()
+        self.assertEqual([name for name, args in calls],
+                         ['server', 'import', 'activate', 'query', 'command', 'command', 'shutdown'])
+        self.assertEqual(calls[1][1][-2:], ('Qwen3.5-0.8B-UD-Q5_K_XL.gguf', 'qwen-08b'))
+        self.assertEqual(calls[4][1][1:3], ('instance', 'stop'))
+        self.assertTrue(self.gate.results['success'])
+
+    def test_ci_acquisition_selects_pinned08_recipe(self):
+        self.gate.args.acquire08 = True
+        def command(*args, **kwargs):
+            if args[1:3] == ('model', 'download'):
+                return {'completed': True, 'validation': {'valid': True}}
+            return {'items': []}
+        with mock.patch.object(self.gate, 'start_server'), \
+             mock.patch.object(self.gate, 'import_model') as imported, \
+             mock.patch.object(self.gate, 'start_instance'), \
+             mock.patch.object(self.gate, 'query'), \
+             mock.patch.object(self.gate, 'shutdown'), \
+             mock.patch.object(self.gate, 'command', side_effect=command) as invoked:
+            self.gate.run_ci08()
+        imported.assert_not_called()
+        self.assertEqual(invoked.call_args_list[0].args,
+                         ('a', 'model', 'download', 'qwen35-08b-q5-k-xl',
+                          '--id', 'small-a', '--pipeline', 'qwen-08b'))
+        self.assertTrue(self.gate.results['success'])
+
+    def test_diagnostics_are_bounded_redacted_and_exclude_weights(self):
+        (self.root / 'query.sse').write_text('x' * 80000 + ' hf_secret123 token-value')
+        (self.root / 'model.gguf').write_bytes(b'weights')
+        with mock.patch.dict('os.environ', {'HF_TOKEN': 'token-value'}):
+            self.gate.artifacts()
+        diagnostic = self.root / 'diagnostics'
+        text = (diagnostic / 'query.sse').read_text()
+        self.assertLessEqual((diagnostic / 'query.sse').stat().st_size, 65536)
+        self.assertNotIn('hf_secret123', text)
+        self.assertNotIn('token-value', text)
+        self.assertFalse((diagnostic / 'model.gguf').exists())
+        with sqlite3.connect(diagnostic / 'a-control.sqlite3') as connection:
+            self.assertEqual(connection.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+
+
 class SmokePendingLaunchTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -61,11 +180,21 @@ class SmokePendingLaunchTest(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         self.case = self.fixture.case
         cli = self.case.root / 'loom-hem'
-        cli.write_text(self.fixture.cli.read_text().replace('binding.python', 'hrx_solutions'))
+        # Source-only fixture: the detached bootstrap must resolve binding.python
+        # from this checkout too, without PYTHONPATH or an installed wheel.
+        cli.write_text(self.fixture.cli.read_text().replace(
+            'import functools,sys',
+            'import functools,sys,os\nos.chdir(' + repr(str(Path(__file__).resolve().parents[1])) + ')'))
         cli.chmod(0o700)
         self.gate = hem_model_smoke.Gate(argparse.Namespace(run=self.case.root))
         python = self.case.root / 'python'
-        python.write_text('#!' + sys.executable + '\nimport os,sys\nos.execv(sys.executable,[sys.executable,*sys.argv[1:]])\n')
+        python.write_text(
+            '#!' + sys.executable + '\nimport sys\n'
+            f'sys.path.insert(0,{str(Path(__file__).resolve().parents[1])!r})\n'
+            'assert sys.argv[1] == "-c"\n'
+            'code=sys.argv[2].replace("hrx_solutions", "binding.python")\n'
+            'sys.argv=["-c",*sys.argv[3:]]\n'
+            'exec(code)\n')
         python.chmod(0o700)
         self.gate.states['a'] = python
         self.gate.namespace_roots['a'] = '.'

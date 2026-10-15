@@ -1,7 +1,8 @@
 """Public server CLI CPU gates with a separately exec'd native ELF fixture.
 
-Only package payload discovery is injected for source checks. Installed checks
-can set HEM_TEST_PACKAGE=hrx_solutions; no behavior/HTTP/process action is mocked.
+Only package payload discovery is injected for both source and installed checks.
+HEM_TEST_PACKAGE selects the Python implementation; the immutable installed
+native payload is never replaced. No behavior/HTTP/process action is mocked.
 """
 from contextlib import contextmanager
 import importlib
@@ -93,8 +94,6 @@ class ServerCliTest(unittest.TestCase):
             f'from {PACKAGE} import hem_cli,hem_server_cli; '
             'hem_server_cli.ProcessManager=functools.partial(hem_server_cli.ProcessManager,package_root=sys.argv[1]); '
             'raise SystemExit(hem_cli.main(sys.argv[2:]))', str(self.package)]
-        if PACKAGE == 'hrx_solutions':
-            self.launcher = [str(Path(sys.executable).with_name('loom-hem'))]
         self.records = []
 
     def tearDown(self):

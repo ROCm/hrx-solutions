@@ -16,6 +16,7 @@ from pathlib import Path
 import hrx_solutions
 
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--wheel", type=Path, required=True, help="exact wheel installed in this venv")
 parser.add_argument("--native-lifecycle", action="store_true",
                     help="also run an empty AMDGPU server (requires an available AMD GPU)")
 args = parser.parse_args()
@@ -41,14 +42,20 @@ for name in (
 entrypoints = {entry.name: entry.value for entry in
                importlib.metadata.distribution("hrx-solutions").entry_points
                if entry.group == "console_scripts"}
-for command, target in {
+required_entrypoints = {
     "loom-hem": "hrx_solutions.hem_cli:main",
     "loom-serve": "hrx_solutions.loom_serve:main",
-    "loom-serve-setup": "hrx_solutions.setup_cli:main",
-    "loom-serve-start": "hrx_solutions.serve_start:main",
-}.items():
+}
+assert entrypoints == required_entrypoints, entrypoints
+for command, target in required_entrypoints.items():
     assert entrypoints[command] == target
     assert (Path(sys.prefix) / "bin" / command).is_file()
+for name in ("setup_cli", "serve_start", "connection_manager", "server_manager", "remote_registry", "state_store"):
+    assert importlib.util.find_spec("hrx_solutions." + name) is None, name
+for name in ("loom-serve-setup", "loom-serve-start"):
+    assert not (Path(sys.prefix) / "bin" / name).exists(), name
+from check_installed_cpu import verify_wheel_payload
+provenance = verify_wheel_payload(args.wheel.resolve(strict=True), package_root)
 assert (package_root / "_native/bin/loom-serve").is_file()
 assert (package_root / "_native/share/loom-serve/LICENSE").is_file()
 assert not (package_root / "_native/bin/loom-qwen-epoch-check").exists()
@@ -208,3 +215,7 @@ if args.native_lifecycle:
     check_native_lifecycle()
     print("Installed native lifecycle, payload identity and replacement retention passed")
 print("Installed Hem inventory, entrypoint and CPU descriptor checks passed")
+
+provenance.update(python=sys.executable, package=str(package_root), entrypoints=entrypoints,
+                  native_lifecycle=args.native_lifecycle, success=True)
+Path("installed-wheel-evidence.json").write_text(json.dumps(provenance, indent=2) + "\n")

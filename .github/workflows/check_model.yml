@@ -1,7 +1,7 @@
 # Copyright 2026 The HRX Authors
 # Licensed under the MIT License.
 # SPDX-License-Identifier: MIT
-name: Check model setup and query
+name: Check Hem dynamic model lifecycle
 
 on:
   workflow_call:
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   model:
-    name: Test model setup and query (gfx1151)
+    name: Test Hem 0.8B lifecycle (gfx1151)
     runs-on: linux-gfx1151-gpu-rocm
     timeout-minutes: 20
     # Matches the successful gfx1151 configuration in ROCm/hrx-system ci_iree.yml.
@@ -30,7 +30,7 @@ jobs:
       - name: Install test prerequisites
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends python3 python3-venv curl jq ca-certificates git
+          apt-get install -y --no-install-recommends python3 python3-venv curl ca-certificates git
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install ROCm diagnostic tool
@@ -40,20 +40,28 @@ jobs:
         run: |
           mkdir -p build
           timeout --kill-after=10s 60s /opt/rocm-7.2.4/bin/rocminfo 2>&1 | tee build/rocminfo.log
+          tail -c 65536 build/rocminfo.log > build/rocminfo-tail.log
           grep -Eq 'Name:[[:space:]]+gfx1151([[:space:]]|$)' build/rocminfo.log
       - name: Download repaired wheel
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: hrx-solutions-wheel-linux-x86_64
           path: ${{ runner.temp }}/model-wheel
-      - name: Set up and query 0.8B
+      - name: Qualify exact pinned 0.8B with Hem
         env:
           HF_HUB_CACHE: ${{ runner.temp }}/huggingface/hub
         run: |
           shopt -s nullglob
           wheels=("${RUNNER_TEMP}/model-wheel/"*.whl)
           test "${#wheels[@]}" -eq 1
-          bash build_tools/model-smoke.sh "${wheels[0]}" "${GITHUB_WORKSPACE}/build/model-diagnostics"
+          bash build_tools/model-smoke.sh "${wheels[0]}" "${RUNNER_TEMP}/model-diagnostics"
+      - name: Collect bounded diagnostics
+        if: always()
+        run: |
+          mkdir -p build/model-diagnostics
+          if [[ -d "${RUNNER_TEMP}/model-diagnostics/lifecycle/diagnostics" ]]; then
+            cp -a "${RUNNER_TEMP}/model-diagnostics/lifecycle/diagnostics/." build/model-diagnostics/
+          fi
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -62,10 +70,6 @@ jobs:
           # Relative paths avoid host/container translation of only the first
           # entry in this multi-line action input.
           path: |
-            build/rocminfo.log
-            build/model-diagnostics/*.log
-            build/model-diagnostics/*.json
-            build/model-diagnostics/response.sse
-            build/model-diagnostics/loom/logs/*.log
-            build/model-diagnostics/loom/servers/*.json
+            build/rocminfo-tail.log
+            build/model-diagnostics/*
           if-no-files-found: warn

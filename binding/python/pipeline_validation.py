@@ -17,7 +17,7 @@ from typing import Protocol, Optional
 import sys
 import threading
 
-from .state_store import runtime_cache_dir
+from .runtime_paths import runtime_cache_dir
 from .gguf import GGUF, inspect_gguf_set
 from .model_store import ModelFiles
 from .qwen_validation import compare_gguf, compare_tokenizer, load_profile

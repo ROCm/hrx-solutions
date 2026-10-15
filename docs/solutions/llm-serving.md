@@ -1,301 +1,348 @@
 # LLM serving
 
-Run a Qwen model on a local AMD GPU, query its streaming chat endpoint, and
-connect Pi. The setup/start commands generate model JSON documents for the
-packaged `loom-serve` executable. Both the 0.8B and 27B catalogs support this
-workflow; MTP is available on 27B only.
+Loom Hem acquires and validates model files, starts empty Loom Serve processes,
+and loads models through the native HTTP interface. Its commands use
+`loom-hem <type> <command>`. A **model** is a local asset set, a **pipeline** is
+its packaged implementation, a **server** is an owned native process with saved
+launch settings, and an **instance** is a model registration on a server.
 
-For the implementation and extension points, see the
-[LLM pipeline guidebook](../../loom-pipeline/llm/README.md). The steps below
-use Bash and the `hrx-solutions` command-line tools.
+| Type | Commands |
+| --- | --- |
+| `model` | `available`, `download`, `import`, `validate`, `list`, `show` |
+| `pipeline` | `list`, `show` |
+| `server` | `start`, `list`, `show`, `status`, `logs`, `reconcile`, `shutdown` |
+| `instance` | `start`, `stop`, `list`, `show`, `status`, `logs`, `export` |
 
-## Isolated Loom state
-
-Set `LOOM_SERVE_DIR` to keep model registrations, server/connection records,
-logs, locks, and generated catalogs/deployments in a separate directory:
-
-```bash
-export LOOM_SERVE_DIR=/path/to/test-run/loom
-loom-serve-setup models download qwen35-08b-q5-k-xl --id ci-qwen08
-loom-serve-start ci-qwen08 --json
-# Use the returned server_id to stop it in the same environment:
-loom-serve-setup servers stop SERVER_ID --json
-```
-
-Use the same environment for setup, start, status and stop. This setting leaves
-`HOME`, XDG settings, installed packages, Hugging Face's cache/credentials, and
-Pi configuration unchanged. Model aliases continue to point into the HF cache.
-An explicit `--model-root` still overrides the model directory. With the variable
-unset, existing paths remain unchanged: `~/.loom` for state/models and
-`~/.cache/hrx-solutions` for generated catalogs/deployments. No files are migrated.
-
-The local/CI smoke script installs a supplied wheel into a dedicated venv,
-downloads the bundled 0.8B recipe, starts it, checks one streamed `Hello!`
-response and stops it:
-
-```bash
-bash build_tools/model-smoke.sh /path/to/hrx_solutions.whl /path/to/new-run
-```
-
-The run directory must be new or empty. The script leaves its venv, Loom state,
-logs and `response.sse` for inspection; the caller removes the directory after
-all servers have stopped. A temporary run directory works equally well for a
-local test. Linux AMD GPU access, Python 3 with venv, curl, jq and CA certificates
-are required. HF downloads use the normal cache (or caller-provided HF settings).
-The manual **Check model setup and query** workflow builds a fresh repaired wheel
-and invokes this same script on gfx1151, uploading only logs and response files.
+Use `loom-hem TYPE COMMAND --help` for exact arguments. The native
+`loom-serve` command remains available for direct foreground execution.
+For implementation and extension points, see the
+[LLM pipeline guidebook](../../loom-pipeline/llm/README.md).
 
 ## Current example
 
-This worked solution demonstrates source-defined model execution on the shared
-HRX runtime. The table describes the packaged example and its checks:
+The wheel includes Qwen pipelines and their compatibility contracts, the native
+server and its user-space ROCm runtime libraries. Weights remain external.
 
-| Area | Current coverage |
+| Area | Coverage |
 | --- | --- |
-| Model | Qwen3.8-27B UD-Q5_K_XL with its matching tokenizer (`qwen`, the default), or Qwen3.5-0.8B UD-Q5_K_XL with its own tokenizer (`qwen-08b`, explicit selection). The 27B reference is pinned below. |
-| Platform | Linux x86-64 and Python 3.9 or newer. The pinned sources have been exercised upstream on `gfx1100` and `gfx1151`; other devices need validation. |
-| Chat | Streaming responses with greedy generation (`stream: true`, `temperature: 0`). The current Qwen policy rejects thinking mode. |
-| Tools | Function-tool schemas, generated calls, and assistant/tool follow-up history, with Qwen-specific framing and parsing in Loom source. Pi configuration is included. |
-| Speculation | MTP defaults to depth three for 27B; `--no-mtp` disables it. The 0.8B checkpoint has no MTP weights, so automatic MTP is disabled and explicit `--mtp` requests are rejected. |
-| Compatibility check | `models validate` inspects GGUF architecture metadata and exact tensor shapes/types on CPU, including MTP tensors, and checks the matching tokenizer configuration. Numerical, HTTP, tool-use, and MTP execution checks remain [upstream checks](../../loom-pipeline/llm/README.md#developing-and-checking-a-change). |
+| Models | Qwen3.5-0.8B UD-Q5_K_XL (`qwen-08b`) and Qwen3.8-27B UD-Q5_K_XL (`qwen`), each with its matching tokenizer. |
+| Platform | Linux x86-64, Python 3.9 or newer, a supported AMD GPU and compatible driver. The source pipelines have been exercised on gfx1100 and gfx1151; other devices need validation. |
+| Chat | Streaming chat, greedy generation (`stream: true`, `temperature: 0`); the Qwen policy rejects thinking mode. |
+| Speculation | MTP defaults to depth three on 27B; 0.8B does not support MTP. |
+| Validation | CPU inspection of GGUF metadata, tensor shapes/types and tokenizer configuration. This is structural qualification, without inference or full checkpoint hashing. |
 
-See the [pinned upstream text guide](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/text/README.md)
-for hardware notes and the chat protocol contract. Adapting this example to
-another architecture or quantization requires reviewing its source and
-validating the new checkpoint/tokenizer pair.
+Install the [wheel](../../README.md#install-from-pypi) in a virtual environment.
+The inference machine needs GPU-accessible memory for weights, retained state
+and execution workspace, plus disk space for the checkpoint. Serving requires
+no separate ROCm SDK installation. Generic numerical, HTTP and tool execution
+checks belong to the [upstream pipeline checks](../../loom-pipeline/llm/README.md#developing-and-checking-a-change).
 
-## Requirements
+## Acquire a model
 
-On the machine running inference:
-
-* Linux x86-64, Python 3.9 or newer, and an installed
-  [HRX Solutions wheel](../../README.md#install-from-pypi).
-* An AMD GPU accessible through a compatible installed driver, with coverage
-  as described above. The wheel includes its ROCm runtime libraries; running
-  it does not require a separate ROCm SDK installation.
-* Enough GPU-accessible memory for the weights, retained model state, and
-  execution workspace, plus disk space for the downloaded checkpoint.
-* The GGUF checkpoint and matching `tokenizer.json` below, or another pair
-  validated against this pipeline.
-
-Activate the environment containing the wheel before running these commands.
-Keep model files outside the source checkout.
-
-## 1. Download a known recipe or import local files
-
-A **recipe ID** selects bundled, qualified download coordinates. A **model ID**
-names a registered checkpoint and becomes its HTTP identity. A **pipeline ID**
-selects its implementation. Here the default model ID is `qwen38-27b-q5-k-xl`
-and the pipeline is `qwen`.
-
-### Download from Hugging Face
-
-Install the `hf` CLI into your environment:
+First inspect the packaged choices:
 
 ```bash
-python -m pip install -U huggingface_hub
+loom-hem model available
+loom-hem pipeline list
+loom-hem pipeline show qwen-08b
 ```
 
-For Python 3.9 environments, use `python -m pip install 'huggingface_hub[cli]>=0.34,<1'`.
-The wheel remains compatible with Python 3.9; it invokes the external CLI
-rather than importing the Hub Python client. The 0.34–0.36 CLI supports file
-downloads but lacks remote dry-run metadata. Newer CLIs exposing `--dry-run`
-can also preview uncached download sizes. [CLI reference](https://huggingface.co/docs/huggingface_hub/en/guides/cli),
-[0.36 CLI implementation](https://github.com/huggingface/huggingface_hub/blob/v0.36.0/src/huggingface_hub/cli/download.py),
-[0.36 Python requirements](https://github.com/huggingface/huggingface_hub/blob/v0.36.0/setup.py).
-
-For repositories requiring authentication, run `hf auth login` or set
-`HF_TOKEN`. Credentials never appear in the announced subcommands. Recipes
-ship with the wheel and pin GGUF and tokenizer repositories independently;
-adding qualified recipes requires a package release.
+A recipe pins GGUF and tokenizer download coordinates. Install the external `hf`
+CLI if you want downloads (`python -m pip install huggingface_hub`; Python 3.9
+users can use `'huggingface_hub[cli]>=0.34,<1'`). Preserve your usual HF login,
+cache and credential environment. Hem prints resolved `hf download` commands.
 
 ```bash
-loom-serve-setup models available
-loom-serve-setup models available --json
-MODEL_ID="qwen38-27b-q5-k-xl"
-loom-serve-setup models download "$MODEL_ID" --dry-run
-loom-serve-setup models download "$MODEL_ID"
+loom-hem model download qwen35-08b-q5-k-xl --id qwen08 --dry-run
+loom-hem model download qwen35-08b-q5-k-xl --id qwen08
 ```
 
-The bundled recipes include both supported model sizes:
+`--dry-run` previews without acquiring files or publishing model records.
+`--offline` requires all recipe files already cached. Downloaded files are
+referenced from the HF cache: keep them available and unchanged.
 
-| Recipe ID | Model | Pipeline | MTP |
-| --- | --- | --- | --- |
-| `qwen38-27b-q5-k-xl` | Qwen3.8-27B UD-Q5_K_XL | `qwen` | Available |
-| `qwen35-08b-q5-k-xl` | Qwen3.5-0.8B UD-Q5_K_XL | `qwen-08b` | Unsupported |
-
-For the smaller model, run `loom-serve-setup models download qwen35-08b-q5-k-xl`.
-The recipe automatically validates and records the `qwen-08b` pipeline;
-serving selects its no-MTP default.
-
-`models available` shows recipe descriptions, variant/quantization, pipeline,
-repositories, filenames/fragments, pinned revisions, and local cache status
-(`cached`, `partially cached`, or `not downloaded`). It separately lists local
-model IDs and registration status (`ready`, `broken alias`, or `not registered`).
-It checks the local cache without contacting Hugging Face.
-
-`models download` invokes `hf download` and streams subcommand output and stage
-updates to stderr. `--json` keeps stdout machine readable. Downloaded files
-remain owned by the Hugging Face cache and are always symlinked into Loom's
-model store, avoiding a second copy of large weights. Cache locations follow
-`HF_HUB_CACHE`, legacy `HUGGINGFACE_HUB_CACHE`, `HF_HOME`, and `XDG_CACHE_HOME`.
-Keep those cache files available: loading checks every referenced file and
-reports broken/unreadable aliases without reading or hashing tensor payloads.
-[Hub cache layout](https://huggingface.co/docs/huggingface_hub/en/guides/manage-cache).
-
-Downloads validate the complete GGUF descriptor set and tokenizer configuration
-on CPU before publishing the registration atomically. Checkpoint hashes are
-not calculated or compared. Multi-file recipes validate their fragments
-together. The tokenizer's existing configuration comparison is retained.
-
-Use `--id my-qwen` to choose another local/HTTP identity. Existing installations
-are preserved; repeating a download succeeds only when its recorded recipe,
-cache aliases and CPU compatibility match. Conflicts require another ID.
-
-`--offline` uses only locally cached pinned files and reports all missing
-filenames without invoking network operations. `--dry-run` shows the source
-and storage plan without downloading files or publishing a registration;
-combine it with `--offline` for a strictly local preview. Cached sizes are
-exact; remote sizes depend on the installed CLI and may be estimates or
-unknown. Downloaded weights consume cache space, not another model-store copy.
-
-### Use files already on disk
-
-Supply the GGUF and its matching tokenizer. Replace these example paths:
+Alternatively import your own checkpoint and its matching tokenizer:
 
 ```bash
-MODEL_ID="qwen38-27b-q5-k-xl"
-loom-serve-setup models import "$MODEL_ID" --alias \
-  --gguf /path/to/Qwen3.8-27B-UD-Q5_K_XL.gguf \
-  --tokenizer /path/to/tokenizer.json
+loom-hem model import qwen08 \
+  --gguf /srv/models/qwen08/Qwen3.5-0.8B-UD-Q5_K_XL.gguf \
+  --tokenizer /srv/models/qwen08/tokenizer.json \
+  --alias --pipeline qwen-08b
 ```
 
-Omit `--alias` to copy the files. Both workflows create a model directory under
-`~/.loom/models/$MODEL_ID/` containing `model.gguf`, `tokenizer.json`, and a
-manifest recording the registration. Supply multiple paths after `--gguf`
-for a fragmented local model. `models import` accepts local files only; the
-former Hugging Face source, revision and token flags have been removed. Use
-`models available` and `models download RECIPE` for supported downloads.
+Choose either download or import for a given ID. `--alias` references external
+files; omit it to copy files into owned storage. Multiple fragments can follow
+`--gguf`. Each model has its own `models/MODEL_ID/` directory, keeping files
+such as `tokenizer.json` separate. Inspection shows both scoped and external
+locations. Never move, modify or evict an aliased file while it may be in use.
 
-## 2. Validate compatibility
-
-Recipe downloads already perform this validation. Run it explicitly after a
-local import or to recheck an existing registration.
+Import and download validate against packaged pipelines before marking a model
+ready. A unique compatible pipeline is selected; `--pipeline` constrains that
+selection. An unknown or ambiguous match blocks serving. Names alone do not
+establish compatibility. Completed assets and an inspectable invalid/incomplete
+record survive failure. Repeating the same acquisition can retry; conflicting
+assets under an existing ID are refused. Use another ID for a different asset
+set. There are no replacement, deletion or shared-cache pruning commands.
 
 ```bash
-MODEL_ID="qwen38-27b-q5-k-xl"
-loom-serve-setup models validate "$MODEL_ID" --pipeline qwen
-loom-serve-setup models list
+loom-hem model list
+loom-hem model show qwen08 --json
+loom-hem model validate qwen08 --pipeline qwen-08b
 ```
 
-Validation reads the GGUF header, metadata, and tensor directory on CPU and
-records the pipeline after success. It checks the packaged architecture
-contract, exact tensor dimensions and GGML quantization types, and the matching
-`tokenizer.json` configuration. It does not read tensor payloads or require a
-GPU, native checker, compilation, or an HRX checkout.
+Inventory reports accessibility and validation state, including broken aliases;
+it does not imply the model is loaded. `show` includes paths, ownership,
+provenance and current referencing instances. Every start and export repeats
+structural validation rather than trusting a saved result.
 
-The qualified file identifies its architecture as `qwen35` and declares 65
-blocks: 64 base layers plus one MTP block. Validation requires both base and
-MTP tensors because the default server configuration uses MTP. A file without
-the MTP block fails with an explicit MTP diagnostic, even if serving is later
-requested with `--no-mtp`. The quantization mix is checked per tensor; a
-filename or `general.file_type` summary does not establish compatibility.
+## Start a server, then load an instance
 
-For example, a different quantization may report:
-
-```text
-blk.3.attn_v.weight: expected Q8_0, found Q6_K
-```
-
-Compatible fine-tunes may have different weight values and model names while
-retaining this configuration and encoding contract. The tokenizer must match
-the qualified configuration, including vocabulary, token IDs, merges, and
-other tokenization settings; JSON formatting and key order may differ.
-Structural validation does not establish checkpoint identity or numerical
-correctness. Use the upstream execution checks when changing model math.
-
-## 3. Start the server
+Create a named server definition with an explicit device and loopback listener:
 
 ```bash
-MODEL_ID="qwen38-27b-q5-k-xl"
-loom-serve-start "$MODEL_ID" --port 8080
-loom-serve-setup servers list
+loom-hem server start --name local --device amdgpu --listen 127.0.0.1:8080
+loom-hem server show local
+loom-hem server status local --json
+loom-hem instance start qwen08 --name chat-small --server local
 ```
 
-The server runs in the background. Start waits for readiness, then prints the
-server ID, endpoint, PID, and log path. It uses the pipeline recorded during
-validation and advertises the imported model ID at `/v1/models`.
-
-The default settings are four resident rows, an 8,192-token context capacity,
-a 32,768-token shared pool, and a 128-token prefill capacity, with MTP as
-described above. Use `loom-serve-setup serve --help` for configuration options.
-For example, `--no-mtp` disables multi-token prediction, and
-`--ready-timeout 600` allows more time for startup. Add `--foreground` to run
-interactively; use Ctrl-C to stop that process.
-
-## 4. Send a chat request
-
-This block also works in a fresh terminal. If you chose a different ID, set
-`MODEL_ID` to the exact name returned by `/v1/models`:
+The server starts empty. Instance start validates, registers with admission
+closed, activates parameters, waits for ready/idle/active status without an
+error, then opens admission. Success means the instance can accept requests;
+there is no start `--no-wait`. A registration name defaults to its model ID.
+Use different instance names to serve the same assets with different settings.
 
 ```bash
-MODEL_ID="qwen38-27b-q5-k-xl"
-curl -fsS http://127.0.0.1:8080/v1/models
-curl -fsSN http://127.0.0.1:8080/v1/chat/completions \
+curl --fail-with-body -sS http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  --data-binary @- <<EOF
-{
-  "model": "$MODEL_ID",
-  "messages": [{"role": "user", "content": "Reply exactly: HRX READY"}],
-  "max_tokens": 16,
-  "temperature": 0,
-  "stream": true
-}
-EOF
+  -d '{"model":"chat-small","messages":[{"role":"user","content":"Say Hello!"}],"stream":true,"temperature":0,"max_tokens":32}'
 ```
 
-Expect server-sent events containing response chunks and a final `[DONE]`.
-The current endpoint requires `stream: true` and supports greedy generation
-(`temperature: 0`). It implements the chat interface used here; clients must
-use those supported options.
+`--name local` refuses an existing definition. After shutdown,
+`loom-hem server start local` reuses its saved settings and starts empty again;
+it does not reload old instances. A verified healthy live server is reused.
+A live unhealthy server or uncertain ownership blocks duplicate launch. To
+change launch settings, create another server name and choose an unused port.
 
-### Inspect and stop a server
+Instance commands accept `--server NAME` or mutually exclusive `--url URL`.
+With neither, exactly one configured server must exist. A URL does not grant
+ownership of its process or transfer model files. Registration requires the
+local matching build and asset context; remote provisioning is not provided.
+Keep lifecycle writers coordinated: avoid concurrent direct curl changes while
+Hem is changing registrations.
 
-Replace `SERVER_ID` with the ID printed at startup or by `servers list`:
+## Configure an instance
+
+Flags override the JSON configuration file, which overrides pipeline defaults.
+Server device/listener settings are separate from per-instance capacities.
+
+| Flag | JSON key | Default |
+| --- | --- | --- |
+| `--rows` | `rows` | 4 |
+| `--context-capacity` | `context_capacity` | 8192 |
+| `--pool-capacity` | `pool_capacity` | 32768 |
+| `--prefill-capacity` | `prefill_capacity` | 128 |
+| `--mtp` / `--no-mtp` | `mtp` | Enabled on 27B; disabled on 0.8B |
+| `--mtp-depth` | `mtp_depth` | 3 on 27B; not applicable on 0.8B |
+
+Capacity limits and capabilities appear in `pipeline show`. Capacity settings
+are not a memory-fit guarantee. Unknown or duplicate JSON keys, wrong types,
+unsupported MTP and contradictory resolved settings fail with diagnostics.
+For example, explicitly setting depth while MTP resolves disabled is ambiguous
+and rejected, even when depth came from the file and `--no-mtp` from flags.
+Remove the explicit depth or enable supported MTP. A default depth is simply
+suppressed when MTP is disabled.
+
+For an optional 27B profile, create a flat JSON file:
 
 ```bash
-loom-serve-setup servers status SERVER_ID
-loom-serve-setup servers stop SERVER_ID
+cat > qwen27.json <<'JSON'
+{"rows":4,"context_capacity":8192,"pool_capacity":32768,"prefill_capacity":128,"mtp":true,"mtp_depth":3}
+JSON
+loom-hem model download qwen38-27b-q5-k-xl --id qwen27
+loom-hem instance start qwen27 --name chat-large --server local \
+  --config qwen27.json --context-capacity 16384
 ```
 
-Server records live in `~/.loom/servers/`, and logs in `~/.loom/logs/`.
-Start and server-management commands accept `--json` for automation.
+Here only context capacity changes to 16384. Stop the smaller instance first if
+needed; Hem reports native resource accounting but cannot promise both fit.
+To disable MTP in this profile, remove `mtp_depth` before passing `--no-mtp`.
 
-## Connect Pi locally
-
-With Pi already installed and the server running, configure its provider:
+## Inspect and stop
 
 ```bash
-MODEL_ID="qwen38-27b-q5-k-xl"
-loom-serve-setup pi-config "$MODEL_ID" \
-  --base-url http://127.0.0.1:8080/v1
-loom-serve-setup pi-config "$MODEL_ID" \
-  --base-url http://127.0.0.1:8080/v1 --check
-
-pi --provider hrx-loom --model "$MODEL_ID"
+loom-hem server list --json
+loom-hem server show local
+loom-hem server status local
+loom-hem server logs local
+loom-hem instance list --server local --json
+loom-hem instance show chat-small --server local
+loom-hem instance status chat-small --server local
+loom-hem instance logs chat-small --server local --follow
 ```
 
-The setup command updates `~/.pi/agent/models.json`. `--check` verifies the
-saved configuration without changing it; the chat request above checks the
-live server. In Pi, try asking it to use its Bash tool to run
-`printf PI_TOOL_OK` and report the output.
+Server `show` displays saved launch settings. Server `status` and `list` report
+observed process/HTTP health, native resources and current launch evidence.
+Instance inspection combines native observations with the exact submitted
+settings, document and dependencies when a matching tracked submission exists.
+Native state is authoritative; an external registration has no invented local
+model association. Follow streams write diagnostics to stderr; Ctrl-C ends
+following without stopping the server or instance. Server logs also support
+`--follow`.
 
-## Troubleshooting
+```bash
+loom-hem instance stop chat-small --server local
+loom-hem server shutdown local
+```
 
-| Symptom | Check |
+Stop gracefully unregisters and waits for that incarnation to retire, releasing
+its current dependency references. `instance stop ... --no-wait` returns once
+the native request is accepted; inspect status for retirement. `--abort`
+explicitly requests cancellation instead of graceful drain. Server shutdown
+drains/unregisters all instances, waits for retirement and only then terminates
+the verified owned process. A graceful timeout leaves the server alive with a
+pending marker, possibly with some instances already retired. Inspect and
+repeat shutdown to continue, or explicitly escalate:
+
+```bash
+loom-hem server shutdown local --abort
+```
+
+Lifecycle commands default to one 10-second budget, including coordination,
+validation and completion. `--timeout SECONDS` overrides it for server start,
+instance start/stop and server shutdown. Downloads and log following have no
+such lifecycle budget. Timeouts preserve evidence; they do not imply rollback.
+
+| Exit | Meaning |
 | --- | --- |
-| `loom_route_error` | Read `/v1/models` and send that exact model ID. Define `MODEL_ID` in the terminal issuing the request. |
-| Missing model files or broken aliases | Check `models list` and restore the original files or Hugging Face cache referenced by the import. |
-| Unsupported format with a hash as its name | Preserve a filename ending in `.gguf`. Use the imported model path or a named Hugging Face snapshot path; resolving a snapshot symlink can expose an extensionless cache blob. Update older launchers that resolve these paths. |
-| Validation fails | Read the reported metadata, tensor, or tokenizer mismatch. Use the supported architecture and exact quantization mix with the matching tokenizer. For split GGUFs, supply every fragment; incomplete sets and duplicate tensors are rejected. |
-| Startup fails or times out | Read the log path from startup diagnostics or `servers status SERVER_ID`. Check memory availability, compilation errors, and port ownership. Increase `--ready-timeout` if startup needs more time. |
+| 0 | Completed, or explicitly requested asynchronous stop was accepted. |
+| 1 | Known operational failure or unhealthy observation. |
+| 2 | Invalid arguments/configuration. |
+| 3 | Known accepted action remains pending when the budget expires. |
+| 4 | Outcome or ownership is uncertain; inspect before retrying. |
+
+`--json` produces one JSON result on stdout. Progress, equivalents and errors
+use stderr. Failure JSON includes `accepted`: `true`, `false` or `null` when
+acceptance has not been established. Acceptance describes the reported action,
+not completion of the entire lifecycle. Uncertainty takes precedence over a
+pending timeout. Never blindly replay an uncertain registration or undrain.
+
+## State and recovery
+
+By default Hem uses `~/.loom/control.sqlite3`. Set an absolute `LOOM_SERVE_DIR`
+before the first command to put the database, models, locks, retained runtime
+artifacts and logs in another state namespace. Use the same environment for
+all commands in a lifecycle. This does not change HOME/XDG, HF credentials/cache
+or other applications' configuration.
+
+SQLite holds only current models, servers and instances with minimal pending
+markers, not an operation history or command log. Transactions and durable
+staged/atomic file publication protect updates. Inventory is authoritative;
+a directory or symlink alone is not a registered model. Keep this state on a
+local filesystem supporting SQLite and file locking; do not manually edit its
+rows or remove files while instances may still depend on them.
+
+Process identity includes boot/start identity and retained build information,
+not just a PID. Hem verifies owned processes and their listener association
+before lifecycle changes; stale PIDs or an endpoint answering HTTP do not grant
+ownership. A new matching process is never silently adopted. Multiple saved
+servers can run on distinct loopback ports. There is no background management
+daemon or automatic restart/reload.
+
+```bash
+loom-hem server reconcile local --json
+loom-hem server status local --json
+loom-hem instance list --server local --json
+```
+
+Reconciliation updates local evidence after observation. It never relaunches,
+replays registration, activates/undrains, signals processes or deletes files.
+After a crash, an uncertain observation retains dependencies and blocks unsafe
+duplicate work. Resolve ownership/native status before retrying. Package/build
+changes may require graceful shutdown and a new empty server; a mismatching
+live serving build refuses new managed registration.
+
+## Native equivalents and export
+
+Hem prints resolved native, HF and curl equivalents to stderr before operations,
+including inspectable request-body paths and resolved endpoints. Local validation
+and bookkeeping are identified separately. These displays are explanations,
+not permission prompts or a dry run. A verified process-handle signal cannot be
+faithfully represented by an unchecked `kill PID` command.
+
+For a deliberate curl workflow, export a drained registration document:
+
+```bash
+loom-hem instance export qwen08 --name chat-small --output chat-small.json
+curl --fail-with-body -sS http://127.0.0.1:8080/v1/models/register \
+  -H 'Content-Type: application/json' --data-binary @chat-small.json
+curl -fsS http://127.0.0.1:8080/v1/status
+# Inspect preparation before activating; wait for ready/idle/active/no error afterward.
+curl --fail-with-body -sS http://127.0.0.1:8080/v1/models/activate \
+  -H 'Content-Type: application/json' -d '{"model":"chat-small"}'
+curl -fsS http://127.0.0.1:8080/v1/status
+# Only after the readiness conditions hold:
+curl --fail-with-body -sS http://127.0.0.1:8080/v1/models/undrain \
+  -H 'Content-Type: application/json' -d '{"model":"chat-small"}'
+curl --fail-with-body -sS http://127.0.0.1:8080/v1/models/unregister \
+  -H 'Content-Type: application/json' -d '{"model":"chat-small","mode":"drain"}'
+```
+
+Use a fresh instance name if the earlier example is still registered. These
+are separate steps with status inspection between them, not an unattended
+startup script. Export accepts a model ID, start's configuration flags and
+`--name`; it needs no server and performs validation without registration.
+
+**You own export dependencies and compatibility.** Preserve the referenced
+weights, tokenizer and pipeline sources for the entire native registration
+lifetime, and use a compatible server. Export reserves nothing and records no
+history. Paths are server-local; posting JSON does not transfer files. Package
+upgrades or external file changes can invalidate paths: revalidate/regenerate
+before use. Direct curl does not run Hem's Python compatibility validation.
+
+## Check an installed wheel locally
+
+The repository's GPU smoke entry point exercises a fresh installed wheel using
+an isolated venv/state namespace on gfx1151:
+
+```bash
+bash build_tools/model-smoke.sh /path/to/hrx_solutions.whl /path/to/new-run \
+  /srv/models/qwen08
+```
+
+The optional last argument must contain the exact
+`Qwen3.5-0.8B-UD-Q5_K_XL.gguf` and adjacent `tokenizer.json`; those files are
+immutable inputs. Without it, the helper acquires the pinned
+`qwen35-08b-q5-k-xl` recipe through Hem, preserving normal HF credentials/cache.
+Python 3 with venv, Linux shell tools and the supported GPU/driver are required.
+The run directory must be new or empty. Serialize overlapping real-model checks
+with a shared GPU lock chosen by the caller.
+
+The check starts empty, imports/downloads and validates, registers/activates the
+instance, waits for readiness and open admission, checks a bounded `Hello!`
+response, retires the instance and shuts down the owned process. Lifecycle
+budgets stay at 10 seconds; acquisition has its own 600-second cap and the query
+has a 30-second bound. Results live in `lifecycle/results.json`; bounded redacted
+evidence is under `lifecycle/diagnostics/`. On failure, cleanup uses only the
+owned namespace and public reconcile/abort-shutdown commands, retaining failure
+evidence and reporting unresolved cleanup. Confirm owned processes have exited
+before removing the run directory. This check does not prove support for other
+GPUs or replace the resource-qualified 27B/concurrent-isolation gates.
+
+## Migrating from the setup helpers
+
+`loom-serve-setup` and `loom-serve-start` entry points are removed. Use Hem's
+four resource types for acquisition and lifecycle; direct `loom-serve` remains.
+Old state files and external checkpoints remain untouched and are not adopted
+or replayed. Prefer a fresh state namespace (for example, set
+`LOOM_SERVE_DIR="$HOME/.loom-hem"` before running Hem), or choose fresh model IDs
+whose directories do not already exist. An untracked populated model directory
+is refused rather than overwritten. Explicitly import each checkpoint/tokenizer
+pair, inspect it, create a new empty server and start its instances. Arrange for
+old services to be stopped through their original tooling before uninstalling
+that tooling, or use an unused port for Hem. Hem does not manage legacy or
+arbitrary external processes merely because their endpoint responds.
+
+Remote setup/tunnels and application configuration are outside Hem's four-type
+interface. Configure clients yourself against the streaming chat endpoint;
+there is no Pi configuration, remote provisioning or automatic migration command.

@@ -3,11 +3,11 @@
 This guide traces the LLM serving solution from model import through generated
 tokens. Use the [serving walkthrough](../../docs/solutions/llm-serving.md) to
 run it first, then return here to change model policy, kernels, or integration.
-Python startup generates model JSON documents for the current native server,
+Hem generates model registration JSON for an already running native server,
 using the selected catalog, model assets, capacities, and MTP capability.
 
-The default pipeline ID `qwen` selects `qwen/qwen_27b` for Qwen3.8-27B
-UD-Q5_K_XL. Explicit `qwen-08b` selects `qwen/qwen_08b` for Qwen3.5-0.8B
+The pipeline ID `qwen` selects `qwen/qwen_27b` for Qwen3.8-27B
+UD-Q5_K_XL. The ID `qwen-08b` selects `qwen/qwen_08b` for Qwen3.5-0.8B
 UD-Q5_K_XL, including its exact per-layer Q4_K/Q5_K/Q6_K mix and tied Q6 output.
 Dimensions, tensor names, quantization layouts, layer order,
 and chat conventions are explicit in the source. Adapting it to another model
@@ -19,12 +19,12 @@ Three layers cooperate:
 
 | Layer | Owns | Start reading |
 | --- | --- | --- |
-| Python tools in this repository | Model inventory, validation dispatch, launch options, managed processes, client configuration | [`setup_cli.py`](../../binding/python/setup_cli.py), [`model_store.py`](../../binding/python/model_store.py), [`pipeline_validation.py`](../../binding/python/pipeline_validation.py) |
+| Python tools in this repository | Model inventory, validation, dynamic registration and owned processes | [`hem_cli.py`](../../binding/python/hem_cli.py), [`model_store.py`](../../binding/python/model_store.py), [`pipeline_validation.py`](../../binding/python/pipeline_validation.py) |
 | Loom sources in this directory | Model geometry, tensor bindings, preparation policy, chat framing, command composition, device state layouts, numerical kernels | [`sources.txt`](qwen/qwen_27b/sources.txt), [`prepare.loom`](qwen/qwen_27b/prepare.loom), [`control.loom`](qwen/control.loom) |
 | Native code in pinned HRX | HTTP transport, tokenization capabilities, admission, scheduling, physical storage, source JIT, command materialization, queue execution | Upstream [`serve/`](https://github.com/ROCm/hrx-system/tree/28d44d696030c65fc2ec91dd5a00e3d84166d5ca/loom/src/loom/serve) |
 
-The native text server is model independent. It loads a source catalog at
-startup and compiles for the actual device. Model policy can therefore change
+The native text server is model independent. It can start empty and load source catalogs through dynamic model
+registration, compiling for the actual device. Model policy can therefore change
 within the existing execution contract without rebuilding that executable.
 A wheel still needs to be rebuilt and reinstalled to distribute changed
 sources to its users.
@@ -64,24 +64,28 @@ layouts, semantics, and fit with the native execution contract.
 ## 1. Import, validate, and select a pipeline
 
 [`model_download.py`](../../binding/python/model_download.py) supplies bundled
-qualified recipes for `models available` and `models download`. Recipes reuse
+qualified recipes for `loom-hem model available` and `loom-hem model download`. Recipes reuse
 the compatibility profile's independently pinned GGUF/tokenizer sources.
 Cache status is inspected locally and is separate from Loom registration.
 Downloads use one streamed `hf download` path and always alias HF-owned
 cache files. Offline operation and dry-run previews are supported.
 
-[`model_store.py`](../../binding/python/model_store.py) registers those cache
-aliases or imports user-owned local GGUF/tokenizer files. Local imports copy
-by default; `--alias` avoids a second copy of large weights. No weight payload
-hashes are computed. Registration stages a directory, validates downloaded
-assets on CPU, and publishes with a rename. Existing model IDs are preserved.
-A single-file registration has this layout:
+[`hem_models.py`](../../binding/python/hem_models.py) coordinates acquisition
+using the file helpers in [`model_store.py`](../../binding/python/model_store.py)
+and current records in [`hem_state.py`](../../binding/python/hem_state.py).
+Local imports copy by default; `--alias` avoids a second copy of large weights.
+No weight payload hashes are computed. Acquisition stages files durably,
+publishes the reserved directory without replacement, then qualifies the assets
+on CPU. Invalid or interrupted acquisitions retain inspectable evidence.
+Conflicting mappings under an existing model ID are refused.
+
+SQLite at the state root's `control.sqlite3` is authoritative, rather than a
+per-model manifest. A single-file registration has this layout:
 
 ```text
 ~/.loom/models/<model-id>/
   model.gguf
   tokenizer.json
-  manifest.json
 ```
 
 Fragmented models have one `.gguf` alias/file per fragment and a small native
@@ -93,7 +97,8 @@ and inconsistent metadata. All fragment files are checked before loading.
 
 Paths passed to native code must be absolute while preserving their visible
 filenames. Extensions matter for weight files, and aliases must preserve them.
-Older single-file manifests remain readable; obsolete hash fields are ignored.
+Legacy manifests remain untouched but are not adopted by Hem; explicit import
+establishes new inventory records. Each model ID owns a separate directory.
 
 [`pipeline_validation.py`](../../binding/python/pipeline_validation.py) maps
 pipeline IDs to adapters. The Qwen adapter uses
@@ -132,7 +137,7 @@ external `tokenizer.json`. That file's complete canonical JSON configuration
 must match the qualified tokenizer; whitespace and key order are ignored.
 
 Validation certifies the selected catalog. The 27B profile requires MTP
-bindings even when `serve --no-mtp` is planned; the 0.8B profile has no MTP.
+bindings even when `instance start --no-mtp` is planned; the 0.8B profile has no MTP.
 It checks structural compatibility and tokenizer configuration, and permits
 compatible fine-tune weights. It does not establish numerical correctness or
 execute model/tokenizer behavior. CPU-only Python regression tests live in
@@ -141,11 +146,12 @@ execute model/tokenizer behavior. CPU-only Python regression tests live in
 For the 0.8B checkpoint, import its matching local files and select its catalog:
 
 ```sh
-loom-serve-setup models import qwen-small --alias \
+loom-hem model import qwen-small --alias \
   --gguf /path/to/Qwen3.5-0.8B-UD-Q5_K_XL.gguf \
   --tokenizer /path/to/tokenizer.json
-loom-serve-setup models validate qwen-small --pipeline qwen-08b
-loom-serve-setup serve qwen-small
+loom-hem model validate qwen-small --pipeline qwen-08b
+loom-hem server start --name local --device amdgpu --listen 127.0.0.1:8080
+loom-hem instance start qwen-small --server local
 ```
 
 Serving enables MTP at depth three automatically for `qwen`, and disables it
@@ -168,30 +174,31 @@ catalog without inheriting the same public HTTP name.
 
 ## 2. Launch and materialize the model
 
-[`serve_start.py`](../../binding/python/serve_start.py) forwards to the `serve`
-command in `setup_cli.py`. That command reads the manifest, chooses the
-recorded pipeline (or an explicit override), locates the assets, and constructs
-a native deployment JSON under `~/.cache/hrx-solutions/deployments/`. It passes
-that document to `loom-serve --device=amdgpu --model=<document>
---listen=127.0.0.1:<port>`. Normal use validates the model before launching.
+[`hem_process.py`](../../binding/python/hem_process.py) launches an empty owned
+native server and retains a verified build/source closure. It records current
+process identity and waits for associated HTTP readiness. Model acquisition is
+separate from this server lifecycle.
 
-The Qwen adapter copies the catalog into
-`~/.cache/hrx-solutions/catalogs/<pipeline-id>/<model-id>-<source-fingerprint>/` and
-rewrites `@chat_model_name` in `control.loom`. The fingerprint includes the
-source tree contents. This makes `/v1/models` and request routing use the
-imported model ID while leaving the packaged catalog available for other
-imports.
+[`hem_instances.py`](../../binding/python/hem_instances.py) validates the assets
+and resolves flags over configuration-file settings over pipeline defaults.
+It retains the named source bundle and exact registration document, posts a
+drained registration, activates parameters, waits for ready/idle/active status
+without an error, then opens admission. Dependencies remain retained until
+confirmed retirement; uncertain outcomes preserve evidence for inspection.
+The [operator walkthrough](../../docs/solutions/llm-serving.md) describes these
+commands, configuration and recovery behavior.
 
-The default launch goes through
-[`server_manager.py`](../../binding/python/server_manager.py): it starts a
-background process, records its identity and logs, and waits for `/v1/models`
-to advertise the requested ID. `--foreground` executes the binary directly.
-The lower-level `loom-serve` command forwards native deployment arguments.
-For compatibility, catalog-directory invocations with `--weights` and
-`--tokenizer` are translated into deployment documents; omitting the catalog
-in that form selects 27B. It bypasses model-store selection and managed startup.
-The pinned server requires positive pool capacity, so serving uses the packed
-path; zero-pool dense execution is not exposed by its registration interface.
+The Qwen adapter makes a source-fingerprinted catalog with `@chat_model_name`
+configured for the instance name. This keeps public HTTP routing distinct from
+the local model ID and leaves packaged sources unchanged. Managed launches
+retain their own source/build copies independently of package replacement.
+
+The lower-level `loom-serve` command forwards native deployment arguments and
+can run in the foreground. For compatibility, catalog-directory invocations
+with `--weights` and `--tokenizer` are translated into deployment documents;
+omitting the catalog in that form selects 27B. This bypasses Hem's inventory
+and managed lifecycle. Native server registration requires positive pool
+capacity, so zero-pool dense execution is not exposed by that interface.
 
 [`_launcher.py`](../../binding/python/_launcher.py) constructs the environment
 for bundled native libraries. Linux binaries also receive a relative
@@ -250,7 +257,7 @@ placement so they can reuse the same resident weight storage.
 
 ```mermaid
 flowchart TD
-  request[Chat request and model ID] --> http[Native HTTP routing and validation]
+  request[Chat request and instance name] --> http[Native HTTP routing and validation]
   http --> framing[control.loom: chat framing and input preparation]
   framing --> admission[Native tokenization, admission, and scheduling]
   admission --> encode[control.loom: encode_state and encode_epoch]
@@ -271,7 +278,7 @@ the supported chat request fields and calls these source hooks in
 
 | Hooks | Responsibility |
 | --- | --- |
-| `model_name` | Public model ID, configured by the Python adapter. |
+| `model_name` | Public instance name, configured by the Python adapter. |
 | `chat_begin`, `chat_message`, `chat_end` | Prompt fragments, role transitions, and model-specific request options. |
 | `prepare_input` | Input framing and bounded tokenization, including continuation boundaries. |
 | `render_tool`, `parse_tools` | Canonical tool-call spelling and parsing of generated calls. |
@@ -363,27 +370,27 @@ MTP adds a proposal block and private draft state to the target model:
 Committed carry, proposal scratch, target state, and feedback have different
 lifetimes. Keep acceptance and state publication consistent when changing any
 one of them. The optional device-fed continuation path issues bounded cohorts;
-the host still joins them. The setup CLI exposes MTP options, while additional
+the host still joins them. Loom Hem exposes MTP options, while additional
 native execution options are available through `loom-serve`.
 
 ## Where to make a change
 
 | Intended change | Files or boundary to inspect |
 | --- | --- |
-| Import/download behavior or visible asset paths | `model_download.py`, `model_store.py`, validation command construction. Preserve named paths through symlinks. |
-| Add a pipeline to the managed CLI | Adapter registration and catalog handling in `pipeline_validation.py`, catalog lookup in `setup_cli.py`, and wheel staging in `python_packaging.py`. |
+| Import/download behavior or visible asset paths | `hem_models.py`, `hem_state.py`, `model_download.py` and `model_store.py`. Preserve per-model paths and external ownership. |
+| Add a pipeline to the managed CLI | Adapter registration and catalog handling in `pipeline_validation.py`, qualification in `hem_config.py`, and wheel staging in `python_packaging.py`. |
 | Public model identity | Qwen `catalog_for_model` and `control.loom`'s `model_name`. Keep inventory, advertised ID, and routing consistent. |
 | Prompt, reasoning, or tool conventions | Chat and text hooks in `control.loom`; inspect native chat validation if the request contract must expand. |
 | Architecture, layer order, or tensor names | `config.loom`, `prepare.loom`, layer programs, and weight policy together. |
 | Faster projection or attention | The relevant kernel, its layer caller, specialization bounds, and any prepared weight layout. |
 | Retained-state geometry or speculation | Preparation descriptors, control encoders, stateful kernels, and acceptance/continuation programs together. |
-| Server lifecycle | [`server_manager.py`](../../binding/python/server_manager.py) and the `servers` commands in `setup_cli.py`. |
+| Server lifecycle | [`hem_process.py`](../../binding/python/hem_process.py), `hem_shutdown.py` and the `server` commands in `hem_server_cli.py`. |
 | Generic scheduling, HTTP, JIT, or allocator behavior | The pinned HRX implementation; changes there require an upstream change and a reviewed dependency-pin update here. |
 
 A new source catalog can be exercised with the native `--model` argument
 before integrating it with the managed CLI. In that argument, “model” means
 a deployment JSON document referencing source providers; in
-`loom-serve-start MODEL_ID`, it means an
+`loom-hem instance start MODEL_ID`, it means an
 imported asset identity. The Python registry is an integration mechanism;
 the native server does not have a compiled-in model registration list.
 
@@ -395,7 +402,7 @@ model execution, retained continuation, and the HTTP behavior affected by
 the change. Include mixed spans and inactive or resumed rows when touching
 stateful execution. For MTP changes, include rejection and partial acceptance.
 
-The `models validate` command performs CPU structural inspection, including
+The `loom-hem model validate` command performs CPU structural inspection, including
 MTP tensor compatibility. The current HRX pin has removed the older Qwen model-specific tools, including
 `epoch_check` and `request_check`. Use the generic server with known-string
 requests and inspect `/v1/status` for registration diagnostics; successful
@@ -459,11 +466,11 @@ contracts. Trace the change through these steps:
    changes, use the upstream
    [`check_tools.py` harness](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/models/qwen/check_tools.py),
    supplying the edited catalog, to check generated calls and tool-result
-   follow-ups. The `models validate` command checks structural compatibility
+   follow-ups. The `loom-hem model validate` command checks structural compatibility
    of model assets; use the execution checks above to verify new chat framing.
 6. **Check the delivered solution.** Rebuild and reinstall the wheel, restart
    the server, and repeat the relevant request through the packaged launcher.
-   Confirm the advertised model ID and active catalog. An already-running
+   Confirm the advertised instance name and active catalog. An already-running
    process retains the code it compiled at startup.
 
 Keep the request fixture, expected rendering, source revision, and check

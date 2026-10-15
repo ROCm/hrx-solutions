@@ -38,11 +38,14 @@ HEM_MODULES = (
     "hem_model_cli", "hem_models", "hem_pipeline_cli", "hem_process",
     "hem_server_cli", "hem_shutdown", "hem_state",
 )
+OBSOLETE_MODULES = (
+    "setup_cli", "serve_start", "connection_manager", "server_manager",
+    "remote_registry", "state_store",
+)
+OBSOLETE_ENTRY_POINTS = {"loom-serve-setup", "loom-serve-start"}
 REQUIRED_ENTRY_POINTS = {
     "loom-hem": "hrx_solutions.hem_cli:main",
     "loom-serve": "hrx_solutions.loom_serve:main",
-    "loom-serve-setup": "hrx_solutions.setup_cli:main",
-    "loom-serve-start": "hrx_solutions.serve_start:main",
 }
 
 
@@ -79,6 +82,13 @@ def validate_wheel(path: Path) -> tuple[int, int]:
                 "wheel is missing runtime libraries: " + ", ".join(missing)
             )
 
+        obsolete_modules = sorted(
+            PACKAGE_PREFIX + name + ".py" for name in OBSOLETE_MODULES
+            if PACKAGE_PREFIX + name + ".py" in names
+        )
+        if obsolete_modules:
+            raise RuntimeError("wheel contains retired manager modules: " + ", ".join(obsolete_modules))
+
         required_files = {
             PACKAGE_PREFIX + "_native/bin/loom-serve",
             PIPELINE_PREFIX + "LICENSE-APACHE-2.0",
@@ -91,8 +101,8 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             PACKAGE_PREFIX + "qwen_validation.py",
             PACKAGE_PREFIX + "_native/share/loom-serve/LICENSE",
             PACKAGE_PREFIX + "pipeline_validation.py",
-            PACKAGE_PREFIX + "setup_cli.py",
             PACKAGE_PREFIX + "model_store.py",
+            PACKAGE_PREFIX + "runtime_paths.py",
             PACKAGE_PREFIX + "model_download.py",
         }
         required_files.update(PACKAGE_PREFIX + name + ".py" for name in HEM_MODULES)
@@ -122,6 +132,9 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         entry_points = wheel.read(entry_points_paths[0]).decode("utf-8")
         parser = configparser.ConfigParser()
         parser.read_string(entry_points)
+        retired_commands = sorted(OBSOLETE_ENTRY_POINTS & set(parser.options("console_scripts"))) if parser.has_section("console_scripts") else []
+        if retired_commands:
+            raise RuntimeError("wheel exposes retired commands: " + ", ".join(retired_commands))
         for command, target in REQUIRED_ENTRY_POINTS.items():
             if parser.get("console_scripts", command, fallback=None) != target:
                 raise RuntimeError(f"wheel does not expose the {command} command")

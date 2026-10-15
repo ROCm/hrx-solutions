@@ -2,12 +2,13 @@
 """Qualify an installed Hem wheel with immutable local Qwen fixtures.
 
 Run with a standalone venv interpreter, outside the source checkout. The caller
-must hold the host GPU lock. No download, global daemon or HOME changes occur.
+must hold the host GPU lock. Acquisition is explicit; HOME and credentials stay intact.
 """
 import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import site
 import shlex
@@ -38,11 +39,14 @@ class Gate:
     def save(self):
         (self.root / 'results.json').write_text(json.dumps(self.results, indent=2) + '\n')
 
-    def command(self, namespace, *args, expected=0, command_timeout=70):
+    def command(self, namespace, *args, expected=0, command_timeout=15):
         env = dict(os.environ, LOOM_SERVE_DIR=str(self.root / self.namespace_roots.get(namespace, namespace) / 'state'), PYTHONNOUSERSITE='1')
         env.pop('PYTHONPATH', None)
         env.pop('PYTHONHOME', None)
         python = self.states[namespace]
+        # Downloads spawn `hf`: select this namespace's installed CLI before
+        # inherited tools, preserving the caller's HOME/HF cache/credentials.
+        env['PATH'] = str(python.parent) + os.pathsep + env.get('PATH', '')
         start = time.monotonic()
         process = subprocess.run([str(python.parent / 'loom-hem'), *args, '--json'],
                                  env=env, cwd=self.root, capture_output=True, text=True, timeout=command_timeout)
@@ -84,13 +88,15 @@ class Gate:
                     assert archive.read(name) == source.read_bytes(), name
                     parity[name] = hashlib.sha256(archive.read(name)).hexdigest()
             self.results['source_parity'] = parity
-        for namespace in ('a', 'b'):
+        namespaces = ('a',) if self.args.profile == 'ci08' else ('a', 'b')
+        for namespace in namespaces:
             directory = self.root / namespace
             directory.mkdir()
             venv = directory / 'venv'
             subprocess.run(['python3', '-m', 'venv', str(venv)], check=True)
             python = venv / 'bin/python'
-            subprocess.run([str(python), '-m', 'pip', 'install', '--disable-pip-version-check', str(self.args.wheel)],
+            subprocess.run([str(python), '-m', 'pip', 'install', '--disable-pip-version-check', str(self.args.wheel),
+                            *(['huggingface_hub[cli]==0.34.4'] if self.args.acquire08 else [])],
                            check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             self.states[namespace] = python
             env = dict(os.environ, LOOM_SERVE_DIR=str(directory / 'state'), PYTHONNOUSERSITE='1')
@@ -100,7 +106,7 @@ class Gate:
             assert Path(identity['package']).is_relative_to(venv) and not identity['user_site']
             package = Path(identity['package']).parent
             native = package / '_native/bin/loom-serve'
-            assert digest(native) == '41b1a34bc4782839c91492ddf71d3f262fa3ed6107cdf53098f633eda2ebdf25'
+            assert native.is_file(), 'native-bearing wheel required'
             with zipfile.ZipFile(self.args.wheel) as archive:
                 installed = {}
                 for name in archive.namelist():
@@ -111,7 +117,8 @@ class Gate:
             self.results[namespace] = dict(identity=identity, installed_parity=installed, native_sha256=digest(native))
         self.results['source_commit'] = subprocess.check_output(['git', '-C', str(self.args.source), 'rev-parse', 'HEAD'], text=True).strip()
         self.results['wheel_sha256'] = digest(self.args.wheel)
-        self.results['native_provenance'] = 'Reused exact HRX ed6b79c757c738dea7eaecd6ca55a7df73cf6185 native closure; not a fresh manylinux build'
+        self.results['native_provenance'] = self.args.native_provenance
+        self.results['profile'] = self.args.profile
         self.save()
 
     def start_server(self, namespace, name):
@@ -189,6 +196,7 @@ class Gate:
 
     def shutdown(self, namespace, abort=False, timeout=None):
         name, endpoint, process, port = self.servers[namespace]
+        self.command(namespace, 'server', 'logs', name)
         self.command(namespace, 'server', 'shutdown', name, *(['--abort'] if abort else []), *(['--timeout', str(timeout)] if timeout is not None else []))
         pid = process['pid']
         assert not Path(f'/proc/{pid}').exists(), pid
@@ -247,6 +255,10 @@ print(json.dumps(dict(record=record, exited=(not process or
                 time.sleep(min(.01, remaining()))
                 continue
             if record['process']:
+                try:
+                    self.command(namespace, 'server', 'logs', name, command_timeout=remaining())
+                except Exception as error:
+                    print(f'Could not collect owned server log: {error}', file=sys.stderr)
                 self.command(namespace, 'server', 'shutdown', name, '--abort', '--timeout', str(remaining()), command_timeout=remaining())
             elif token is not None:
                 raise RuntimeError('launch has no verified process; cleanup unresolved')
@@ -259,9 +271,72 @@ print(json.dumps(dict(record=record, exited=(not process or
         self.servers.pop(namespace, None)
         del self.attempts[namespace]
 
+    def run_ci08(self):
+        """Required GPU CI profile; full two-model qualification remains explicit."""
+        self.start_server('a', 'server-a')
+        if self.args.acquire08:
+            answer = self.command('a', 'model', 'download', 'qwen35-08b-q5-k-xl',
+                                  '--id', 'small-a', '--pipeline', 'qwen-08b', command_timeout=600)
+            assert answer['completed'] and answer['validation']['valid'], answer
+        else:
+            self.import_model('a', 'small-a', self.args.model08,
+                              'Qwen3.5-0.8B-UD-Q5_K_XL.gguf', 'qwen-08b')
+        self.start_instance('a', 'small-a', 'qwen-08b')
+        self.query('a', 'small-a')
+        self.command('a', 'instance', 'stop', 'small-a', '--server', 'server-a')
+        assert self.command('a', 'instance', 'list', '--server', 'server-a')['items'] == []
+        self.shutdown('a')
+        with sqlite3.connect(self.root / 'a/state/control.sqlite3') as connection:
+            assert connection.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+            assert connection.execute('SELECT COUNT(*) FROM instances').fetchone()[0] == 0
+        self.results['success'] = True
+
+    def artifacts(self):
+        """Publish only bounded diagnostic files and current SQLite snapshots."""
+        target = self.root / 'diagnostics'
+        target.mkdir(exist_ok=True)
+        def redact(text):
+            for key in ('HF_TOKEN', 'HUGGING_FACE_HUB_TOKEN', 'HUGGINGFACE_HUB_TOKEN'):
+                if os.environ.get(key):
+                    text = text.replace(os.environ[key], '[REDACTED]')
+            return re.sub(r'hf_[A-Za-z0-9]+', '[REDACTED]', text)
+        def publish(name, text):
+            (target / name).write_bytes(redact(text).encode()[-65536:])
+        for path in self.root.iterdir():
+            if path.is_file() and path.suffix in ('.stdout', '.stderr', '.sse', '.json'):
+                with path.open('rb') as stream:
+                    stream.seek(max(0, path.stat().st_size - 65536))
+                    data = stream.read(65536).decode(errors='replace')
+                publish(path.name, data)
+        for namespace in ('a', 'b'):
+            state = self.root / namespace / 'state'
+            database = state / 'control.sqlite3'
+            if not database.exists():
+                continue
+            with sqlite3.connect(database) as source:
+                assert source.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+                output = target / (namespace + '-control.sqlite3')
+                with sqlite3.connect(output) as destination:
+                    source.backup(destination)
+            if output.stat().st_size > 1048576:
+                output.unlink()
+                raise AssertionError('unexpected registry growth')
+            # Only our namespace is inspected; no HF cache/model payload is copied.
+            for index, log in enumerate(state.rglob('process.log*')):
+                if index >= 16:
+                    break
+                if log.is_file():
+                    with log.open('rb') as stream:
+                        stream.seek(max(0, log.stat().st_size - 65536))
+                        text = stream.read(65536).decode(errors='replace')
+                    publish(f'{namespace}-{index}-process.log', text)
+
     def run(self):
         self.setup()
         try:
+            if getattr(self.args, 'profile', 'full') == 'ci08':
+                self.run_ci08()
+                return
             for namespace in ('a', 'b'):
                 self.start_server(namespace, 'server-' + namespace)
                 self.import_model(namespace, 'small-' + namespace, self.args.model08,
@@ -320,6 +395,8 @@ print(json.dumps(dict(record=record, exited=(not process or
             self.results['success'] = True
         finally:
             original_error = sys.exc_info()[1]
+            if original_error is not None:
+                self.results['error'] = repr(original_error)
             cleanup_error = None
             for namespace in list(self.attempts):
                 try:
@@ -334,6 +411,12 @@ print(json.dumps(dict(record=record, exited=(not process or
                     child.terminate()
                     child.wait(timeout=5)
             self.save()
+            try:
+                self.artifacts()
+            except Exception as error:
+                if original_error is None and cleanup_error is None:
+                    raise
+                print(f'Diagnostic collection failed: {error}', file=sys.stderr)
             if cleanup_error is not None and original_error is None:
                 raise cleanup_error
 
@@ -344,9 +427,18 @@ def main():
     parser.add_argument('--wheel', required=True, type=Path)
     parser.add_argument('--wheel-sha256', required=True)
     parser.add_argument('--source', required=True, type=Path)
-    parser.add_argument('--model08', required=True, type=Path)
-    parser.add_argument('--model27', required=True, type=Path)
+    parser.add_argument('--profile', choices=('ci08', 'full'), default='full')
+    parser.add_argument('--model08', type=Path)
+    parser.add_argument('--model27', type=Path)
+    parser.add_argument('--acquire08', action='store_true', help='Acquire exact pinned 0.8B recipe with Hem (CI only)')
+    parser.add_argument('--native-provenance', default='Wheel bundled native payload; see wheel build provenance')
     args = parser.parse_args()
+    if args.acquire08 and args.profile != 'ci08':
+        parser.error('--acquire08 is restricted to --profile ci08')
+    if not args.acquire08 and args.model08 is None:
+        parser.error('--model08 is required without --acquire08')
+    if args.profile == 'full' and args.model27 is None:
+        parser.error('--model27 is required for the resource-qualified full profile')
     if args.run.exists() and any(args.run.iterdir()):
         parser.error('--run must be a new or empty external directory')
     args.run.mkdir(parents=True, exist_ok=True)

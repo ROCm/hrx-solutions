@@ -21,10 +21,11 @@ python3 -m venv "$venv"
 mkdir "$venv/wheel-check"
 cd "$venv/wheel-check"
 "$venv/bin/python" -m pip install --disable-pip-version-check --no-index --no-deps "$wheel"
-"$venv/bin/python" "$scripts/check_installed_wheel.py" "${@:3}"
+"$venv/bin/python" "$scripts/check_installed_wheel.py" --wheel "$wheel" "${@:3}"
+mkdir "$venv/cpu-fixtures"
+TMPDIR="$venv/cpu-fixtures" LOOM_SERVE_DIR="$venv/installed-cpu-state" "$venv/bin/python" "$scripts/check_installed_cpu.py" \
+  --source-root "$(dirname -- "$scripts")" --evidence "$venv/wheel-check/installed-cpu-evidence.json"
 clean_env=(env -u HSA_OVERRIDE_GFX_VERSION -u IREE_HAL_AMDGPU_LIBHSA_PATH \
   -u IREE_HAL_AMDGPU_LIBAQLPROFILE_PATH -u LD_LIBRARY_PATH)
 "${clean_env[@]}" "$venv/bin/loom-serve" --help
-"${clean_env[@]}" "$venv/bin/loom-serve-setup" --help
-"${clean_env[@]}" "$venv/bin/loom-serve-start" --help
 "${clean_env[@]}" "$venv/bin/loom-hem" --help
