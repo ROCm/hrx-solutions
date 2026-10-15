@@ -7,7 +7,7 @@ from unittest.mock import patch
 import zipfile
 
 from build_tools import python_packaging as packaging
-from build_tools.validate_wheel import validate_wheel
+from build_tools.validate_wheel import HEM_MODULES, REQUIRED_ENTRY_POINTS, validate_wheel
 from build_tools.versioning import read_package_version
 
 
@@ -62,12 +62,12 @@ class PackagingTest(unittest.TestCase):
             'hrx_solutions/_native/lib/libhsa-amd-aqlprofile64.so.1':b'profile',
         }
         members.update({'hrx_solutions/'+path.relative_to(package).as_posix():path.read_bytes() for path in catalog})
-        for name in ('pipeline_validation.py','setup_cli.py','model_store.py','model_download.py','gguf.py','qwen_validation.py'):
+        for name in ('pipeline_validation.py','setup_cli.py','model_store.py','model_download.py','gguf.py','qwen_validation.py','loom_serve.py','serve_start.py', *(name+'.py' for name in HEM_MODULES)):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         version=read_package_version()
         prefix=f'hrx_solutions-{version}.dist-info/'
         members[prefix+'METADATA']=(f'Metadata-Version: 2.1\nName: hrx-solutions\nVersion: {version}\nDescription-Content-Type: text/markdown\n\n'+(packaging.REPO_ROOT/'PYPI_README.md').read_text()).encode()
-        members[prefix+'entry_points.txt']=b'[console_scripts]\nloom-serve-setup = hrx_solutions.setup_cli:main\n'
+        members[prefix+'entry_points.txt']=('[console_scripts]\n'+''.join(f'{command} = {target}\n' for command,target in REQUIRED_ENTRY_POINTS.items())).encode()
         if obsolete:
             members['hrx_solutions/_native/bin/loom-qwen-epoch-check']=b'obsolete'
         if missing:
@@ -91,6 +91,29 @@ class PackagingTest(unittest.TestCase):
         for filename in ('sources.txt', 'config.loom', 'prepare.loom', 'control.loom', 'weights.loom', 'compatibility.json'):
             with self.subTest(filename=filename), self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
                 validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/qwen_08b/'+filename))
+
+    def test_wheel_requires_every_hem_component_and_entrypoint(self):
+        for module in HEM_MODULES:
+            with self.subTest(module=module), self.assertRaisesRegex(RuntimeError, module):
+                validate_wheel(self.wheel(missing='hrx_solutions/'+module+'.py'))
+        for target in REQUIRED_ENTRY_POINTS.values():
+            module = target.split(":")[0].replace(".", "/") + ".py"
+            with self.subTest(entrypoint_module=module), self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
+                validate_wheel(self.wheel(missing=module))
+        wheel = self.wheel()
+        with zipfile.ZipFile(wheel) as archive:
+            members = {name: archive.read(name) for name in archive.namelist()}
+        entrypoint = next(name for name in members if name.endswith('/entry_points.txt'))
+        original = members[entrypoint]
+        for command, target in REQUIRED_ENTRY_POINTS.items():
+            with self.subTest(command=command):
+                members[entrypoint] = original.replace(f'{command} = {target}'.encode(),
+                                                       f'{command} = wrong.module:main'.encode())
+                with zipfile.ZipFile(wheel, 'w') as archive:
+                    for name, data in members.items():
+                        archive.writestr(name, data)
+                with self.assertRaisesRegex(RuntimeError, command):
+                    validate_wheel(wheel)
 
     def test_wheel_rejects_old_checker(self):
         with self.assertRaisesRegex(RuntimeError,'obsolete model execution checkers'):

@@ -2,14 +2,53 @@
 # Copyright 2026 The HRX Authors
 # Licensed under the MIT License.
 # SPDX-License-Identifier: MIT
-"""Validate the installed wheel assets and bundled runtime without a GPU."""
+"""Validate installed assets without a GPU; optionally qualify native lifecycle."""
+import argparse
+import importlib
 import importlib.metadata
+import os
+import site
+import sys
+import json
+import socket
+import time
 from pathlib import Path
 import hrx_solutions
 
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--native-lifecycle", action="store_true",
+                    help="also run an empty AMDGPU server (requires an available AMD GPU)")
+args = parser.parse_args()
+assert sys.prefix != sys.base_prefix, "wheel checks require a standalone venv"
+assert not site.ENABLE_USER_SITE
+assert not os.environ.get("PYTHONPATH") and not os.environ.get("PYTHONHOME")
+assert "include-system-site-packages = false" in (Path(sys.prefix) / "pyvenv.cfg").read_text()
+state_root = Path(os.environ["LOOM_SERVE_DIR"])
+assert state_root.is_absolute() and not state_root.exists(), "use fresh isolated LOOM_SERVE_DIR"
+assert not Path.cwd().is_relative_to(Path(__file__).resolve().parents[1]), "run outside the source checkout"
 print(f"hrx-solutions {importlib.metadata.version('hrx-solutions')}")
 print(f"package: {hrx_solutions.__file__}")
 package_root = Path(hrx_solutions.__file__).resolve().parent
+package_root.relative_to(Path(sys.prefix).resolve())
+for name in (
+    "hem_arguments", "hem_bootstrap", "hem_cli", "hem_common", "hem_config",
+    "hem_display", "hem_http", "hem_instance_cli", "hem_instances",
+    "hem_model_cli", "hem_models", "hem_pipeline_cli", "hem_process",
+    "hem_server_cli", "hem_shutdown", "hem_state",
+):
+    module = importlib.import_module("hrx_solutions." + name)
+    assert Path(module.__file__).resolve().parent == package_root
+entrypoints = {entry.name: entry.value for entry in
+               importlib.metadata.distribution("hrx-solutions").entry_points
+               if entry.group == "console_scripts"}
+for command, target in {
+    "loom-hem": "hrx_solutions.hem_cli:main",
+    "loom-serve": "hrx_solutions.loom_serve:main",
+    "loom-serve-setup": "hrx_solutions.setup_cli:main",
+    "loom-serve-start": "hrx_solutions.serve_start:main",
+}.items():
+    assert entrypoints[command] == target
+    assert (Path(sys.prefix) / "bin" / command).is_file()
 assert (package_root / "_native/bin/loom-serve").is_file()
 assert (package_root / "_native/share/loom-serve/LICENSE").is_file()
 assert not (package_root / "_native/bin/loom-qwen-epoch-check").exists()
@@ -58,3 +97,114 @@ subprocess.run(
     env=native_environment(clean_environment),
     check=True,
 )
+
+# Exercise the public installed CLI without downloads or GPU initialization.
+cli = str(Path(sys.prefix) / "bin/loom-hem")
+def invoke(*arguments, expected=0, timeout=15):
+    process = subprocess.run([cli, *arguments, "--json"], capture_output=True,
+                             text=True, timeout=timeout, check=False)
+    print("loom-hem", *arguments, "exit", process.returncode)
+    if process.stderr:
+        print(process.stderr, file=sys.stderr, end="")
+    expected_codes = expected if isinstance(expected, tuple) else (expected,)
+    assert process.returncode in expected_codes, process.stdout + process.stderr
+    answer = json.loads(process.stdout)
+    assert "state" in answer and "completed" in answer
+    return answer, process.stderr
+
+pipelines, _ = invoke("pipeline", "list")
+assert {item["pipeline"] for item in pipelines["items"]} == {"qwen", "qwen-08b"}
+recipes, _ = invoke("model", "available")
+for recipe in recipes["items"]:
+    preview, diagnostic = invoke("model", "download", recipe["id"], "--id", "preview", "--dry-run")
+    assert preview["state"] == "preview" and "hf download" in diagnostic
+invoke("server", "start", "--name", "invalid", "--timeout", "0", expected=2)
+assert not state_root.exists(), "help, preview and invalid input must not create state"
+
+def check_native_lifecycle():
+    """Real pinned driver is AMDGPU-only; opt in on a GPU host, never CPU CI."""
+    from hrx_solutions.hem_common import Deadline
+    from hrx_solutions.hem_process import package_identity, identity, _confirmed_exit
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    started_at = time.monotonic()
+    record = None
+    moved = []
+    try:
+        started, diagnostic = invoke("server", "start", "--name", "wheel-check",
+                                    "--device", "amdgpu", "--listen", f"127.0.0.1:{port}")
+        assert time.monotonic() - started_at < 10
+        assert "loom-serve" in diagnostic
+        record = started["record"]
+        assert started["state"] == "running" and started["completed"]
+        status, diagnostic = invoke("server", "status", "wheel-check")
+        assert status["native"]["data"] == [] and "curl" in diagnostic
+        retained = Path(record["build"]["directory"])
+        assert package_identity(retained, Deadline.after()) == package_identity(package_root, Deadline.after())
+        assert identity(record["process"]["pid"])["executable"] == record["build"]["executable"]
+        # Simulate an installer replacing the native/source package trees. Retained
+        # artifacts and the live process must remain usable; Python stays installed
+        # so the public status/shutdown commands still exercise the real entrypoint.
+        for name in ("_native", "loom-pipeline"):
+            source, backup = package_root / name, package_root / (name + ".wheel-check-backup")
+            assert not backup.exists()
+            source.rename(backup)
+            moved.append((source, backup))
+        status, _ = invoke("server", "status", "wheel-check")
+        assert status["native"]["data"] == []
+        assert (retained / "loom-pipeline/llm/qwen/qwen_08b/control.loom").is_file()
+        stopped, _ = invoke("server", "shutdown", "wheel-check")
+        assert stopped["completed"]
+        assert _confirmed_exit(record["process"])
+        if record["process"].get("logger"):
+            assert _confirmed_exit(record["process"]["logger"])
+        assert not retained.exists()
+        record = None
+    finally:
+        original_error = sys.exc_info()[1]
+        try:
+            for source, backup in reversed(moved):
+                backup.rename(source)
+            # A timed-out accepted start may still own a pending bootstrap/native.
+            # Reconcile before aborting, using one cleanup budget and only this
+            # check's named server; never sweep other rows in the same namespace.
+            from hrx_solutions.hem_state import Registry
+            if state_root.exists():
+                budget = Deadline.after()
+                owned = next((row for row in Registry(state_root, deadline=budget).list_servers()
+                              if row['id'] == 'wheel-check'), None)
+                if owned is not None:
+                    token = owned['launch_token']
+                    if record is not None and token not in (None, record['launch_token']):
+                        raise RuntimeError('checker launch changed; cleanup ownership is unresolved')
+                    process = owned['process'] or (record or {}).get('process')
+                    while (owned.get('pending') or {}).get('action') == 'start':
+                        observed, _ = invoke('server', 'reconcile', 'wheel-check',
+                                             expected=(0, 1, 4), timeout=budget.remaining())
+                        owned = observed['record']
+                        if owned['launch_token'] not in (None, token):
+                            raise RuntimeError('checker launch changed during cleanup reconciliation')
+                        process = process or owned['process']
+                        if owned.get('pending') and owned['pending']['action'] == 'start':
+                            time.sleep(min(.01, budget.remaining()))
+                    if owned['process']:
+                        invoke('server', 'shutdown', 'wheel-check', '--abort',
+                               '--timeout', str(budget.remaining()), timeout=budget.remaining())
+                    if process:
+                        assert _confirmed_exit(process), 'checker native process remains unresolved'
+                        logger = process.get('logger')
+                        while logger and not _confirmed_exit(logger):
+                            time.sleep(min(.01, budget.remaining()))
+        except Exception as cleanup_error:
+            print(f'Checker cleanup unresolved for wheel-check in {state_root}: {cleanup_error}',
+                  file=sys.stderr)
+            if original_error is None:
+                raise
+            # Keep the original gate failure as the exception being reported;
+            # stderr separately records any unresolved owned process cleanup.
+if args.native_lifecycle:
+    check_native_lifecycle()
+    print("Installed native lifecycle, payload identity and replacement retention passed")
+print("Installed Hem inventory, entrypoint and CPU descriptor checks passed")

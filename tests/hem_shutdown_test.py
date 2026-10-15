@@ -131,8 +131,22 @@ class ShutdownTest(unittest.TestCase):
         self.pending = True
         with fixture(self.respond) as (endpoint, _):
             self.server(endpoint)
-            with self.assertRaises(DeadlineExpired) as raised:
-                self.shutdown(timeout=.07)
+            now = [0.0]
+            deadline = Deadline.after(10, clock=lambda: now[0])
+            original_status = NativeClient.status
+            observations = []
+            def expire_after_acknowledgment(client, *args, **kwargs):
+                if observations:
+                    # Advance the invocation clock only after the real HTTP
+                    # acknowledgment is durable. Host scheduling must not turn
+                    # this accepted-retirement test into a pre-submission timeout.
+                    self.assertEqual(self.row()['pending']['targets']['chat']['stage'], 'accepted')
+                    now[0] = 11.0
+                observations.append(True)
+                return original_status(client, *args, **kwargs)
+            with patch.object(NativeClient, 'status', new=expire_after_acknowledgment):
+                with self.assertRaises(DeadlineExpired) as raised:
+                    self.manager.shutdown('local', deadline)
             self.assertIs(raised.exception.accepted, True)
             self.assertFalse(self.processes.exited)
             self.assertEqual(self.row()['phase'], 'stopping')

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import email.parser
 import hashlib
 import zipfile
@@ -31,6 +32,18 @@ STABLE_RUNTIME_NAMES = {
     "libhsa-amd-aqlprofile64": "libhsa-amd-aqlprofile64.so.1",
 }
 ROCM_LIBRARY_PREFIXES = ("libamd", "libhsa", "libroc")
+HEM_MODULES = (
+    "hem_arguments", "hem_bootstrap", "hem_cli", "hem_common", "hem_config",
+    "hem_display", "hem_http", "hem_instance_cli", "hem_instances",
+    "hem_model_cli", "hem_models", "hem_pipeline_cli", "hem_process",
+    "hem_server_cli", "hem_shutdown", "hem_state",
+)
+REQUIRED_ENTRY_POINTS = {
+    "loom-hem": "hrx_solutions.hem_cli:main",
+    "loom-serve": "hrx_solutions.loom_serve:main",
+    "loom-serve-setup": "hrx_solutions.setup_cli:main",
+    "loom-serve-start": "hrx_solutions.serve_start:main",
+}
 
 
 def validate_wheel(path: Path) -> tuple[int, int]:
@@ -82,6 +95,9 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             PACKAGE_PREFIX + "model_store.py",
             PACKAGE_PREFIX + "model_download.py",
         }
+        required_files.update(PACKAGE_PREFIX + name + ".py" for name in HEM_MODULES)
+        required_files.update(target.split(":")[0].replace(".", "/") + ".py"
+                              for target in REQUIRED_ENTRY_POINTS.values())
         for architecture in ("qwen_27b", "qwen_08b"):
             required_files.update(
                 PIPELINE_PREFIX + f"qwen/{architecture}/{filename}"
@@ -104,8 +120,11 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         if len(entry_points_paths) != 1:
             raise RuntimeError("wheel must contain one entry_points.txt")
         entry_points = wheel.read(entry_points_paths[0]).decode("utf-8")
-        if "loom-serve-setup = hrx_solutions.setup_cli:main" not in entry_points:
-            raise RuntimeError("wheel does not expose the loom-serve-setup command")
+        parser = configparser.ConfigParser()
+        parser.read_string(entry_points)
+        for command, target in REQUIRED_ENTRY_POINTS.items():
+            if parser.get("console_scripts", command, fallback=None) != target:
+                raise RuntimeError(f"wheel does not expose the {command} command")
 
         expected_sources = []
         for architecture in ("qwen_27b", "qwen_08b"):
