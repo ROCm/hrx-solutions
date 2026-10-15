@@ -120,7 +120,7 @@ func.def @encode_plan(%plan: buffer, %inputs: buffer, %count: index, %first: ind
 
 // All backing is cold retained storage. This transform allocates nothing and
 // completes before its opaque outputs are borrowed by queued host uploads.
-func.def public @encode_epoch(%plan: buffer, %inputs: buffer, %first_count: i32, %next_count: i32, %eos: i32, %metadata: buffer, %tokens: buffer) -> (i32) {
+func.def public @encode_epoch(%control_state: buffer, %plan: buffer, %inputs: buffer, %first_count: i32, %next_count: i32, %eos: i32, %metadata: buffer, %tokens: buffer) -> (i32) {
   %origin = index.constant 0 : offset
   %zero = index.constant 0 : index
   %one = index.constant 1 : index
@@ -557,6 +557,15 @@ func.def public @text_end(%response: buffer, %previous: i64, %phase: i32) -> (i6
   func.return %result : i64
 }
 
+// Native output spans use the same tool-marker boundary as the previous
+// text policy. Qwen's existing non-thinking generation publishes content only;
+// tool payloads remain available to parse_tools but never enter content deltas.
+func.def public @output_next(%response: buffer, %previous: i64, %state: i64, %phase: i32) -> (i64, i64, i64, i64) {
+  %end = func.call @text_end(%response, %previous, %phase) : (buffer, i64, i32) -> (i64)
+  %content = scalar.constant 1 : i64
+  func.return %content, %previous, %end, %state : i64, i64, i64, i64
+}
+
 // Canonical history trims ASCII framing whitespace, not Unicode content.
 func.def @text_is_space(%text: buffer, %position: offset) -> (i1) {
   %byte = buffer.load.i8.u %text[%position]
@@ -573,7 +582,7 @@ func.def @text_is_space(%text: buffer, %position: offset) -> (i1) {
 
 // Arguments have owned VM backing: a source result can retain them or allocate
 // its own buffer without borrowing request, decoder or invocation storage.
-func.def public @complete_text(%prompt: buffer, %content: buffer, %tools: buffer) -> (buffer) {
+func.def public @complete_text(%prompt: buffer, %response: buffer, %content: buffer, %reasoning: buffer, %tools: buffer, %initial_state: i64, %final_state: i64) -> (buffer, i32) {
   %zero = index.constant 0 : offset
   %one = index.constant 1 : offset
   %false = scalar.constant false : i1
@@ -627,7 +636,8 @@ func.def public @complete_text(%prompt: buffer, %content: buffer, %tools: buffer
   buffer.copy %between[%zero], %output[%content_end], %between_length
   buffer.copy %tools[%zero], %output[%tools_begin], %tools_length
   buffer.copy %close[%zero], %output[%tools_end], %close_length
-  func.return %output : buffer
+  %reusable = scalar.constant 1 : i32
+  func.return %output, %reusable : buffer, i32
 }
 
 // Text policy is shared by every session; request-local state is a value.
@@ -652,6 +662,103 @@ global.rodata.def @chat_invalid = bytes("756e737570706f7274656420726f6c652c20726
 global.rodata.def @chat_end_invalid = bytes("63686174206d75737420636f6e7461696e2061207573657220717565727920616e6420656e6420776974682075736572206f7220746f6f6c20696e707574")
 global.rodata.def @chat_thinking_invalid = bytes("74686973206d6f64656c20706f6c69637920737570706f72747320656e61626c655f7468696e6b696e673d66616c7365")
 func.decl import("tools") @parse_xml(%schemas: buffer, %response: buffer) -> (buffer)
+
+// This catalog implements greedy argmax only. Reject unsupported sampling
+// instead of silently accepting parameters that cannot affect execution.
+func.def @request_check(%condition: i1) {
+  %value = scalar.extui %condition : i1 to i32
+  %error = global.load @request_sampling_error : buffer
+  func.call @require(%value, %error) : (i32, buffer)
+  func.return
+}
+
+func.decl import("json") @parse_i64(%source: buffer, %offset: i64, %length: i64) -> (i64)
+
+func.decl import("json") @parse_f64(%source: buffer, %offset: i64, %length: i64) -> (f64)
+
+global.rodata.def @request_temperature = bytes("74656d7065726174757265")
+
+global.rodata.def @request_top_p = bytes("746f705f70")
+
+global.rodata.def @request_top_k = bytes("746f705f6b")
+
+global.rodata.def @request_seed = bytes("73656564")
+
+global.rodata.def @request_sampling_error = bytes("5177656e20737570706f7274732074656d70657261747572653d302c20746f705f703d312c20746f705f6b3d30206f72203120616e6420696e7465676572207365656473")
+
+func.def public @request_defaults(%options: buffer) -> (buffer) {
+  %fields, %type, %count = func.call @members(%options) : (buffer) -> (buffer, i32, i64)
+  %object = scalar.constant 2 : i32
+  %empty_count = scalar.constant 0 : i64
+  %typed = scalar.cmpi eq, %type, %object : i32
+  %empty_options = scalar.cmpi eq, %count, %empty_count : i64
+  %valid = scalar.andi %typed, %empty_options : i1
+  func.call @request_check(%valid) : (i1)
+  %empty = global.load @input_empty_boundary : buffer
+  func.return %empty : buffer
+}
+
+func.def public @request_options(%defaults: buffer, %request: buffer, %nonce: i64) -> (buffer) {
+  %origin = index.constant 0 : offset
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %zero64 = scalar.constant 0 : i64
+  %one64 = scalar.constant 1 : i64
+  %fields, %type, %count = func.call @members(%request) : (buffer) -> (buffer, i32, i64)
+  %bounded = scalar.assume %count [range(%count, 0, 2147483647)] : i64
+  %extent = index.cast %bounded : i64 to index
+  %records = buffer.view %fields[%origin] : buffer -> view<[%extent]x5xi64>
+  %capacity = buffer.length %request
+  %storage = buffer.alloca<private> align(1) %capacity : buffer
+  %temperature = global.load @request_temperature : buffer
+  %top_p = global.load @request_top_p : buffer
+  %top_k = global.load @request_top_k : buffer
+  %seed = global.load @request_seed : buffer
+  scf.for %i = [%c0 to %extent step %c1] {
+    %begin = view.load %records[%i, 0] : view<[%extent]x5xi64> -> i64
+    %length = view.load %records[%i, 1] : view<[%extent]x5xi64> -> i64
+    %used = func.call @unescape(%request, %begin, %length, %storage, %zero64) : (buffer, i64, i64, buffer, i64) -> (i64)
+    %bounded_used = scalar.assume %used [range(%used, 0, 9223372036854775807)] : i64
+    %key_length = index.cast %bounded_used : i64 to offset
+    %key = buffer.alloca<private> align(1) %key_length : buffer
+    buffer.copy %storage[%origin], %key[%origin], %key_length
+    %is_temperature = func.call @chat_equal(%key, %temperature) : (buffer, buffer) -> (i1)
+    %is_p = func.call @chat_equal(%key, %top_p) : (buffer, buffer) -> (i1)
+    %is_k = func.call @chat_equal(%key, %top_k) : (buffer, buffer) -> (i1)
+    %is_seed = func.call @chat_equal(%key, %seed) : (buffer, buffer) -> (i1)
+    %floating = scalar.ori %is_temperature, %is_p : i1
+    %integer = scalar.ori %is_k, %is_seed : i1
+    %value_begin = view.load %records[%i, 2] : view<[%extent]x5xi64> -> i64
+    %value_length = view.load %records[%i, 3] : view<[%extent]x5xi64> -> i64
+    %valid = scf.if %floating -> (i1) {
+      %value = func.call @parse_f64(%request, %value_begin, %value_length) : (buffer, i64, i64) -> (f64)
+      %greedy_temperature = scalar.constant 0.0 : f64
+      %full_probability = scalar.constant 1.0 : f64
+      %expected = scf.select %is_temperature, %greedy_temperature, %full_probability : f64
+      %valid = scalar.cmpf oeq, %value, %expected : f64
+      scf.yield %valid : i1
+    } else {
+      %valid = scf.if %integer -> (i1) {
+        %value = func.call @parse_i64(%request, %value_begin, %value_length) : (buffer, i64, i64) -> (i64)
+        %small = scalar.cmpi ule, %value, %one64 : i64
+        %valid = scalar.ori %small, %is_seed : i1
+        scf.yield %valid : i1
+      } else {
+        %true = scalar.constant true : i1
+        scf.yield %true : i1
+      }
+      scf.yield %valid : i1
+    }
+    %condition = scalar.extui %valid : i1 to i32
+    %error = global.load @request_sampling_error : buffer
+    func.call @require(%condition, %error) : (i32, buffer)
+  }
+  func.return %defaults : buffer
+}
+
+func.def public @bind_request(%state: buffer, %row: i32, %options: buffer) {
+  func.return
+}
 
 func.def public @model_name() -> (buffer) {
   %name = global.load @chat_model_name : buffer
@@ -945,7 +1052,7 @@ func.def public @chat_message(%raw: buffer, %role: buffer, %content: buffer, %re
   func.return %result, %next : buffer, i64
 }
 
-func.def public @chat_end(%state: i64) -> (buffer) {
+func.def public @chat_end(%state: i64) -> (buffer, i64) {
   %zero = scalar.constant 0 : i64
   %two = scalar.constant 2 : i64
   %three = scalar.constant 3 : i64
@@ -964,7 +1071,9 @@ func.def public @chat_end(%state: i64) -> (buffer) {
   %prefix = scf.select %tool, %close, %empty : buffer
   %generation = global.load @chat_generation : buffer
   %result = func.call @chat_join(%prefix, %generation, %empty, %empty, %empty, %empty, %empty, %empty) : (buffer, buffer, buffer, buffer, buffer, buffer, buffer, buffer) -> (buffer)
-  func.return %result : buffer
+  // Output state is independent of the history-rendering state.
+  %output_state = scalar.constant 0 : i64
+  func.return %result, %output_state : buffer, i64
 }
 
 // The program is shared; all request state arrives as buffer bindings.

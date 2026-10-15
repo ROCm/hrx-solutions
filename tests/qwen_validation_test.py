@@ -213,5 +213,34 @@ class QwenComparisonTest(unittest.TestCase):
             self.assertIn('model object',compare_tokenizer(path,self.profile)[0])
 
 
+class QwenNativePolicyContractTest(unittest.TestCase):
+    def test_manifests_supply_pinned_text_policy_abi(self):
+        # Public policy bindings required by ed6b79 service/text/chat.c.
+        # Keep this catalog packaging guard in sync when reviewing an HRX pin.
+        expected = {
+            'encode_epoch': (('buffer',) * 3 + ('i32',) * 3 + ('buffer',) * 2, ('i32',)),
+            'request_defaults': (('buffer',), ('buffer',)),
+            'request_options': (('buffer', 'buffer', 'i64'), ('buffer',)),
+            'bind_request': (('buffer', 'i32', 'buffer'), ()),
+            'output_next': (('buffer', 'i64', 'i64', 'i32'), ('i64',) * 4),
+            'complete_text': (('buffer',) * 5 + ('i64',) * 2, ('buffer', 'i32')),
+            'chat_end': (('i64',), ('buffer', 'i64')),
+        }
+        root = Path(__file__).resolve().parents[1] / 'loom-pipeline/llm/qwen'
+        for architecture in ('qwen_27b', 'qwen_08b'):
+            directory = root / architecture
+            sources = '\n'.join((directory / entry.strip()).read_text()
+                                for entry in (directory / 'sources.txt').read_text().splitlines()
+                                if entry.strip() and not entry.startswith('#'))
+            for name, (arguments, results) in expected.items():
+                with self.subTest(architecture=architecture, hook=name):
+                    signatures = re.findall(
+                        r'func.def public @' + name + r'\(([^)]*)\)(?: -> \(([^)]*)\))? \{', sources)
+                    self.assertEqual(len(signatures), 1, 'missing or duplicate native policy hook')
+                    args, returns = signatures[0]
+                    self.assertEqual(tuple(re.findall(r': (\w+)', args)), arguments)
+                    self.assertEqual(tuple(part.strip() for part in returns.split(',') if part.strip()), results)
+
+
 if __name__ == '__main__':
     unittest.main()
