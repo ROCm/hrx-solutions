@@ -311,7 +311,15 @@ def _confirmed_exit(process):
     try:
         if _exited(fd):
             return True
-        current = identity(process['pid'])
+        try:
+            current = identity(process['pid'])
+        except UncertainOutcome:
+            # The process can exit after the first poll, removing procfs
+            # executable data. Only this same pinned pidfd proves that exit;
+            # an inaccessible live process must remain uncertain.
+            if _exited(fd):
+                return True
+            raise
         if current['boot_id'] != process['boot_id'] or current['start_ticks'] != process['start_ticks']:
             return True  # The recorded incarnation is gone; never signal replacement.
         return False

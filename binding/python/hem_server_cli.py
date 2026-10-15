@@ -7,10 +7,11 @@ import sys
 import time
 
 from . import hem_arguments as arguments, hem_display
-from .hem_common import Deadline, HemError, InvalidInput, UncertainOutcome, result, unimplemented
+from .hem_common import Deadline, HemError, InvalidInput, UncertainOutcome, result
 from .hem_http import NativeClient
 from .hem_process import ProcessManager, read_logs
 from .hem_state import Registry
+from .hem_shutdown import ShutdownManager
 
 
 def configure(parser):
@@ -165,12 +166,12 @@ def _logs(registry, manager, record, follow):
 
 
 def run(args, deadline):
-    if args.command == 'shutdown':
-        return unimplemented('server', 'shutdown')
     settings = _settings(args) if args.command == 'start' and args.name else None
     budget = deadline or Deadline.after()
     registry = Registry(deadline=budget)
     manager = ProcessManager(registry)
+    if args.command == 'shutdown':
+        return ShutdownManager(registry, processes=manager).shutdown(args.server, budget, abort=args.abort)
     if args.command == 'start':
         server_id = args.name or args.server
         if args.name:

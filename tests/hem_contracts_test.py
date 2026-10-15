@@ -179,29 +179,26 @@ class DeadlineAndResultTest(unittest.TestCase):
                 self.assertIn(str(error), err)
                 self.assertEqual(data['state'], 'uncertain' if expected == 4 else 'failed')
 
-    def test_parse_errors_and_unimplemented_are_honest(self):
-        for argv, expected in ((['instances', 'list', '--json'], 2),
-                                (['instance', 'list', '--json'], 1)):
+    def test_parse_errors_are_honest(self):
+        for argv in (['instances', 'list', '--json'],
+                     ['instance', 'list', '--server', 'local', '--url', 'http://127.0.0.1:8080', '--json'],
+                     ['instance', 'start', 'qwen08', '--timeout', '0', '--json']):
             out, err = io.StringIO(), io.StringIO()
             with redirect_stdout(out), redirect_stderr(err):
-                self.assertEqual(hem_cli.main(argv), expected)
+                self.assertEqual(hem_cli.main(argv), 2)
             self.assertFalse(json.loads(out.getvalue())['completed'])
             self.assertTrue(err.getvalue())
-        out, err = io.StringIO(), io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err):
-            self.assertEqual(hem_cli.main(['instance', 'start', 'qwen08', '--json']), 1)
-        self.assertEqual(json.loads(out.getvalue())['instance'], 'qwen08')
 
-    def test_command_subprocess_does_not_create_state(self):
+    def test_help_subprocess_does_not_create_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             import os
             environment = dict(os.environ, LOOM_SERVE_DIR=str(Path(temporary) / 'state'))
             process = subprocess.run([sys.executable, '-m', 'binding.python.hem_cli',
-                                      'server', 'shutdown', 'local', '--json'],
+                                      'server', 'shutdown', '--help'],
                                      env=environment, capture_output=True, text=True, check=False)
-            self.assertEqual(process.returncode, 1)
-            self.assertIn('not implemented', process.stderr)
-            self.assertFalse(json.loads(process.stdout)['completed'])
+            self.assertEqual(process.returncode, 0)
+            self.assertEqual(process.stderr, '')
+            self.assertIn('--abort', process.stdout)
             self.assertFalse(Path(environment['LOOM_SERVE_DIR']).exists())
 
 
