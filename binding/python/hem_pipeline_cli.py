@@ -1,7 +1,8 @@
 """Packaged pipeline inventory grammar."""
 
 from . import hem_arguments as arguments
-from .hem_common import unimplemented
+from .hem_config import pipeline_info
+from .pipeline_validation import available_pipelines
 
 
 def configure(parser):
@@ -14,4 +15,7 @@ def configure(parser):
 
 
 def run(args, deadline):
-    return unimplemented("pipeline", args.command)
+    if args.command == "list":
+        return {"state": "available", "completed": True,
+                "items": [pipeline_info(identifier) for identifier in available_pipelines()]}
+    return {"state": "available", "completed": True, **pipeline_info(args.pipeline)}
