@@ -39,13 +39,25 @@ python3 -m venv "$run/venv"
 source "$run/venv/bin/activate"
 cd -- "$run"
 python -m pip install --disable-pip-version-check "$wheel" 'huggingface_hub[cli]==0.34.4' \
-  > "$run/install.log" 2>&1
+  2>&1 | tee "$run/install.log"
 
 # The wheel's recipe owns pinned sources, cache aliases and model validation.
 loom-serve-setup models download qwen35-08b-q5-k-xl --id ci-qwen08 \
-  > "$run/setup.log" 2>&1
-loom-serve-start ci-qwen08 --ready-timeout 180 --json \
-  > "$run/start.json" 2> "$run/start.log"
+  2>&1 | tee "$run/setup.log"
+echo "Starting ci-qwen08 (readiness timeout: 180s)..."
+if loom-serve-start ci-qwen08 --ready-timeout 180 --json \
+    > "$run/start.json" 2> "$run/start.log"; then
+  echo "Server ready. Sending test query..."
+else
+  start_status=$?
+  cat "$run/start.log" >&2
+  for log in "$run/loom/logs/"*.log; do
+    if [[ -f $log ]]; then
+      tail -n 100 "$log" >&2
+    fi
+  done
+  exit "$start_status"
+fi
 server_id=$(jq -er '.server_id' "$run/start.json")
 endpoint=$(jq -er '.endpoint' "$run/start.json")
 
