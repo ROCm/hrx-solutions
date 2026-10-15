@@ -4,27 +4,15 @@
 name: Check model setup and query
 
 on:
-  workflow_dispatch:
-  pull_request:
-  push:
-    branches:
-      - main
-      - main-staging
+  workflow_call:
 
 permissions:
   actions: read
   contents: read
 
 jobs:
-  wheel:
-    name: Build and check wheel
-    uses: ./.github/workflows/build_python_wheel.yml
-    with:
-      name: manylinux x86-64
-
   model:
     name: Test model setup and query (gfx1151)
-    needs: wheel
     runs-on: linux-gfx1151-gpu-rocm
     timeout-minutes: 20
     # Matches the successful gfx1151 configuration in ROCm/hrx-system ci_iree.yml.

@@ -8,6 +8,10 @@ name: CI Python Wheel
 on:
   workflow_dispatch:
     inputs:
+      test_model:
+        type: boolean
+        description: "Run the gfx1151 model setup and query test after building the wheel."
+        default: true
       release_type:
         type: choice
         options:
@@ -48,3 +52,9 @@ jobs:
       release_type: ${{ inputs.release_type || 'nightly' }}
       run_id: ${{ inputs.run_id || '' }}
       artifact_set: ${{ inputs.artifact_set || 'core' }}
+
+  model:
+    name: Model setup and query
+    needs: python_wheel
+    if: github.event_name != 'workflow_dispatch' || inputs.test_model
+    uses: ./.github/workflows/check_model.yml
