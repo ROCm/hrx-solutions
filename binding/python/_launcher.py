@@ -22,10 +22,20 @@ def _required_library(directory: Path, name: str) -> Path:
 
 def native_environment(
     environ: Optional[Dict[str, str]] = None,
+    *, native_root: Optional[Path] = None,
 ) -> Dict[str, str]:
-    """Returns the environment used for a bundled native executable."""
+    """Return a bundled environment, optionally pinned to a retained closure.
+
+    Explicit retained roots replace library overrides/search paths: their payload
+    must remain usable after the installed package is replaced. Ordinary direct
+    launcher calls retain the existing override behavior.
+    """
     result = dict(os.environ if environ is None else environ)
-    native_root = Path(__file__).resolve().parent / "_native"
+    retained = native_root is not None
+    native_root = Path(native_root) if retained else Path(__file__).resolve().parent / "_native"
+    if retained:
+        for key in (_LIBHSA_ENV, _LIBAQLPROFILE_ENV, "LD_LIBRARY_PATH", "LD_PRELOAD"):
+            result.pop(key, None)
     library_dir = native_root / "lib"
 
     if _LIBHSA_ENV not in result:
