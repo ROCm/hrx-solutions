@@ -8,6 +8,7 @@ import sys
 import time
 import tempfile
 import sqlite3
+import socket
 import unittest
 from contextlib import redirect_stderr
 import io
@@ -46,6 +47,92 @@ class SmokeFailureTest(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 self.gate.command('a', 'instance', 'start', 'model')
         self.assertFalse(self.gate.results['success'])
+
+
+class ShutdownVerificationTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.gate = hem_model_smoke.Gate(argparse.Namespace(run=self.root))
+        python = self.root / 'python'
+        source = Path(__file__).resolve().parents[1]
+        python.write_text('#!' + sys.executable + '\nimport sys\n'
+                          f'sys.path.insert(0, {str(source)!r})\n'
+                          'code=sys.argv[2].replace("hrx_solutions", "binding.python")\n'
+                          'sys.argv=["-c",*sys.argv[3:]]\nexec(code)\n')
+        python.chmod(0o700)
+        self.gate.states['a'] = python
+        self.listener = socket.socket()
+        self.listener.bind(('127.0.0.1', 0))
+        self.port = self.listener.getsockname()[1]
+        self.addCleanup(self.listener.close)
+        self.command = mock.patch.object(self.gate, 'command', return_value={
+            'completed': True, 'state': 'stopped'})
+        self.command.start()
+        self.addCleanup(self.command.stop)
+
+    def child(self):
+        child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
+                                 stdin=subprocess.PIPE)
+        def cleanup():
+            child.stdin.close()
+            child.wait(timeout=3)
+        self.addCleanup(cleanup)
+        return child, hem_process.identity(child.pid)
+
+    def zombie(self):
+        child, process = self.child()
+        child.stdin.close()
+        os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+        self.assertTrue(Path(f'/proc/{child.pid}').exists())
+        return process
+
+    def configure(self, server, logger):
+        process = dict(server, logger=logger)
+        self.gate.servers['a'] = ('server-a', f'http://127.0.0.1:{self.port}', process, self.port)
+        self.gate.attempts['a'] = {'process': process}
+
+    def test_shutdown_accepts_real_unreaped_server_and_logger(self):
+        self.configure(self.zombie(), self.zombie())
+        self.listener.close()
+        self.gate.shutdown('a')
+        self.assertTrue(self.gate.results['cleanup'][0]['processes_exited'])
+        self.assertNotIn('a', self.gate.attempts)
+
+    def test_live_server_or_logger_times_out_and_preserves_recovery(self):
+        exited = self.zombie()
+        _, live = self.child()
+        for server, logger in ((live, exited), (exited, live)):
+            with self.subTest(server=server['pid'], logger=logger['pid']):
+                self.configure(server, logger)
+                # Exercise one real installed-inspection equivalent before the bound.
+                self.assertFalse(self.gate.inspect_server('a', 'server-a',
+                                 self.gate.servers['a'][2])['exited'])
+                with mock.patch.object(hem_model_smoke.time, 'monotonic', side_effect=[0, 0, 11, 11]):
+                    with self.assertRaises(TimeoutError):
+                        self.gate.shutdown('a')
+                self.assertIn('a', self.gate.attempts)
+                self.assertFalse(self.gate.results['cleanup'])
+                self.assertTrue((self.root / 'shutdown-a.json').exists())
+
+    def test_open_port_fails_even_after_confirmed_exit(self):
+        self.configure(self.zombie(), self.zombie())
+        self.listener.listen()
+        with self.assertRaisesRegex(AssertionError, 'owned port still open'):
+            self.gate.shutdown('a')
+        self.assertIn('a', self.gate.attempts)
+        self.assertFalse(self.gate.results['cleanup'])
+
+    def test_inspection_error_cannot_become_success(self):
+        self.configure(self.zombie(), self.zombie())
+        with mock.patch.object(self.gate, 'inspect_server', side_effect=RuntimeError('unreadable')):
+            with self.assertRaisesRegex(RuntimeError, 'unreadable'):
+                self.gate.shutdown('a')
+        self.assertIn('a', self.gate.attempts)
+        self.assertFalse(self.gate.results['cleanup'])
+        evidence = json.loads((self.root / 'shutdown-a.json').read_text())
+        self.assertEqual(evidence['server']['state'], 'Z')
 
 
 class AcquisitionPathTest(unittest.TestCase):

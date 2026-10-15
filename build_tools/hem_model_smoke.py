@@ -197,16 +197,52 @@ class Gate:
     def shutdown(self, namespace, abort=False, timeout=None):
         name, endpoint, process, port = self.servers[namespace]
         self.command(namespace, 'server', 'logs', name)
-        self.command(namespace, 'server', 'shutdown', name, *(['--abort'] if abort else []), *(['--timeout', str(timeout)] if timeout is not None else []))
+        answer = self.command(namespace, 'server', 'shutdown', name, *(['--abort'] if abort else []), *(['--timeout', str(timeout)] if timeout is not None else []))
         pid = process['pid']
-        assert not Path(f'/proc/{pid}').exists(), pid
-        assert not Path(f'/proc/{process["logger"]["pid"]}').exists(), process
-        with socket.socket() as sock:
-            assert sock.connect_ex(('127.0.0.1', port)) != 0
-        self.results['cleanup'].append(dict(namespace=namespace, pid=pid, absent=True, port_closed=True))
+        try:
+            assert answer['completed'] and answer['state'] == 'stopped', answer
+            end = time.monotonic() + 10
+            while True:
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('owned shutdown exit verification exceeded 10 seconds')
+                if self.inspect_server(namespace, name, process, timeout=remaining)['exited']:
+                    break
+                time.sleep(min(.01, max(0, end - time.monotonic())))
+            with socket.socket() as sock:
+                assert sock.connect_ex(('127.0.0.1', port)) != 0, 'owned port still open'
+        except Exception:
+            self.shutdown_diagnostics(namespace, process)
+            raise
+        # absent describes recorded live processes, not their procfs entries.
+        self.results['cleanup'].append(dict(namespace=namespace, pid=pid, absent=True,
+                                            processes_exited=True, port_closed=True))
         del self.servers[namespace]
         self.attempts.pop(namespace, None)
         self.save()
+
+    def shutdown_diagnostics(self, namespace, process):
+        """Capture only bounded procfs identity evidence before recovery."""
+        evidence = {}
+        for role, saved in (('server', process), ('logger', process.get('logger'))):
+            if not saved:
+                continue
+            item = dict(pid=saved['pid'], saved_boot_id=saved['boot_id'],
+                        saved_start_ticks=saved['start_ticks'])
+            try:
+                item['boot_id'] = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+                with Path(f'/proc/{saved["pid"]}/stat').open() as stream:
+                    fields = stream.read(4096).rsplit(')', 1)[1].split()
+                item.update(state=fields[0], parent_pid=int(fields[1]), start_ticks=int(fields[19]))
+            except FileNotFoundError:
+                item['missing'] = True
+            except (OSError, ValueError, IndexError) as error:
+                item['error'] = str(error)[:512]
+            evidence[role] = item
+        try:
+            (self.root / f'shutdown-{namespace}.json').write_text(json.dumps(evidence, indent=2) + '\n')
+        except OSError as error:
+            print(f'Could not save shutdown diagnostics: {error}', file=sys.stderr)
 
     def inspect_server(self, namespace, name, process=None, timeout=10):
         """Read one owned row and verify saved process identities, outside source."""
@@ -267,7 +303,8 @@ print(json.dumps(dict(record=record, exited=(not process or
             time.sleep(min(.01, remaining()))
         with socket.socket() as sock:
             assert sock.connect_ex(('127.0.0.1', attempt['port'])) != 0, 'owned port still open'
-        self.results['cleanup'].append(dict(namespace=namespace, name=name, absent=True, port_closed=True))
+        self.results['cleanup'].append(dict(namespace=namespace, name=name, absent=True,
+                                            processes_exited=True, port_closed=True))
         self.servers.pop(namespace, None)
         del self.attempts[namespace]
 
