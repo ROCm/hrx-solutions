@@ -1,9 +1,11 @@
-"""Model acquisition and inventory grammar. Implementation follows separately."""
+"""Thin public adapters for local model acquisition and inventory."""
 
 from pathlib import Path
 
 from . import hem_arguments as arguments
-from .hem_common import unimplemented
+from . import hem_display, hem_models
+from .hem_common import result
+from .hem_state import Registry
 
 
 def configure(parser):
@@ -27,4 +29,33 @@ def configure(parser):
 
 
 def run(args, deadline):
-    return unimplemented("model", args.command)
+    if args.command == "available":
+        return result("available", completed=True, items=hem_models.available())
+    # Preview must not initialize even an empty model registry.
+    if args.command == "download" and args.dry_run:
+        preview = hem_models.download(None, args.recipe, model_id=args.id,
+                                      pipeline=args.pipeline, offline=args.offline, dry_run=True)
+        for command in preview['commands']:
+            hem_display.emit(command)
+        hem_display.emit('Preview only: no acquisition or local validation performed')
+        return preview
+    registry = Registry(deadline=deadline)
+    if args.command == "list":
+        return result("inventory", completed=True, items=hem_models.inventory(registry))
+    if args.command == "show":
+        record = hem_models.show(registry, args.model)
+        record['instances'] = registry.references(args.model)
+    else:
+        if args.command == "import":
+            hem_models.import_model(registry, args.model, ggufs=args.gguf,
+                                    tokenizer=args.tokenizer, alias=args.alias,
+                                    pipeline=args.pipeline)
+        elif args.command == "download":
+            hem_display.emit('Local packaged pipeline validation after acquisition (no native equivalent)')
+            hem_models.download(registry, args.recipe, model_id=args.id,
+                                pipeline=args.pipeline, offline=args.offline)
+        elif args.command == "validate":
+            hem_display.emit('Local packaged pipeline validation (no native equivalent)')
+            hem_models.validate(registry, args.model, pipeline=args.pipeline)
+        record = hem_models.show(registry, args.id if args.command == 'download' else args.model)
+    return dict(record, completed=True)

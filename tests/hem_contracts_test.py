@@ -181,7 +181,7 @@ class DeadlineAndResultTest(unittest.TestCase):
 
     def test_parse_errors_and_unimplemented_are_honest(self):
         for argv, expected in ((['instances', 'list', '--json'], 2),
-                                (['model', 'list', '--json'], 1)):
+                                (['instance', 'list', '--json'], 1)):
             out, err = io.StringIO(), io.StringIO()
             with redirect_stdout(out), redirect_stderr(err):
                 self.assertEqual(hem_cli.main(argv), expected)
@@ -197,7 +197,7 @@ class DeadlineAndResultTest(unittest.TestCase):
             import os
             environment = dict(os.environ, LOOM_SERVE_DIR=str(Path(temporary) / 'state'))
             process = subprocess.run([sys.executable, '-m', 'binding.python.hem_cli',
-                                      'server', 'list', '--json'],
+                                      'server', 'shutdown', 'local', '--json'],
                                      env=environment, capture_output=True, text=True, check=False)
             self.assertEqual(process.returncode, 1)
             self.assertIn('not implemented', process.stderr)

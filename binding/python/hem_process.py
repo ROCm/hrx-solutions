@@ -44,6 +44,13 @@ def _exited(fd):
     return bool(poll.poll(0))
 
 
+class _ExecutableMismatch(UncertainOutcome):
+    """Identity snapshot rejected while its boot/start identity was pinned."""
+    def __init__(self, observed):
+        super().__init__('recorded executable differs; refusing control')
+        self.observed = observed
+
+
 class PinnedProcess:
     """One verified Linux pidfd; signal only this handle after re-verification."""
     def __init__(self, process, executable=None, *, emit=hem_display.emit):
@@ -82,10 +89,10 @@ class PinnedProcess:
         current = identity(self.expected['pid'])
         if any(current[key] != self.expected[key] for key in ('pid', 'boot_id', 'start_ticks')):
             raise UncertainOutcome('recorded process identity changed; refusing control')
-        if current['executable'] != self.executable:
-            raise UncertainOutcome('recorded executable differs; refusing control')
         if _exited(self.fd):
             raise UncertainOutcome('recorded process exited during identity check')
+        if current['executable'] != self.executable:
+            raise _ExecutableMismatch(current)
         return current
 
     def send(self, number, deadline):
@@ -446,11 +453,17 @@ class ProcessManager:
                         if document['data']:
                             raise UncertainOutcome('new server unexpectedly contains registrations', accepted=True)
                     return self._update(record, dict(phase='running', pending=None))
-                except UncertainOutcome:
-                    # Bootstrap-to-native transition is expected only while the
-                    # recorded bootstrap executable is still running.
-                    current = identity(record['process']['pid'])
-                    if current['executable'] != record['process']['executable']:
+                except _ExecutableMismatch as error:
+                    # Classify the snapshot that failed pinned verification.
+                    # A second inspection can already see the legitimate exec,
+                    # falsely turning a transient bootstrap into an unknown PID.
+                    # Retry only this launch's verified bootstrap snapshot; the
+                    # next iteration must still pin native and prove HTTP owner.
+                    observed = error.observed
+                    expected = record['process']
+                    if (record['pending'] != {'action': 'start', 'stage': 'bootstrap'}
+                            or any(observed[key] != expected[key] for key in ('pid', 'boot_id', 'start_ticks'))
+                            or observed['executable'] != expected['executable']):
                         raise
                 except DeadlineExpired:
                     raise

@@ -499,3 +499,53 @@ b.bootstrap(sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), Deadline(fl
             time.sleep(min(.01, deadline.remaining()))
         self.owned.append((current['process'], current['build']['executable']))
         self.manager.children[record['launch_token']] = child
+
+    def test_bootstrap_exec_between_pin_rejection_and_handler_recheck_is_retried(self):
+        record = self.reserve()
+        marker, release = self.root / 'exec-waiting', self.root / 'exec-release'
+        program = '''
+import os, sys, time
+from pathlib import Path
+from binding.python import hem_bootstrap as b
+from binding.python.hem_common import Deadline
+def checkpoint(stage):
+    if stage == 'before_exec':
+        Path(sys.argv[6]).touch()
+        while not Path(sys.argv[7]).exists(): time.sleep(.001)
+b._checkpoint = checkpoint
+b.bootstrap(sys.argv[1],sys.argv[2],sys.argv[3],int(sys.argv[4]),Deadline(float(sys.argv[5])))
+'''
+        with self.registry.lock('server', 'one') as lock:
+            child = subprocess.Popen([sys.executable, '-c', program, str(self.registry.root), 'one',
+                                      record['launch_token'], str(lock.fileno()),
+                                      str(Deadline.after(4).expires_at), str(marker), str(release)],
+                                     pass_fds=(lock.fileno(),), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                     env=dict(os.environ, LOOM_SERVE_DIR=str(self.registry.root)))
+            self.manager.children[record['launch_token']] = child
+            deadline = Deadline.after(3)
+            while not marker.exists():
+                time.sleep(min(.001, deadline.remaining()))
+            current = self.registry.get_server('one')
+            self.owned.append((current['process'], record['build']['executable']))
+            original_identity = hem_process.identity
+            observed_bootstrap = []
+            def exec_after_snapshot(pid):
+                snapshot = original_identity(pid)
+                if pid == child.pid and not observed_bootstrap:
+                    self.assertEqual(snapshot['executable'], current['process']['executable'])
+                    observed_bootstrap.append(snapshot)
+                    release.touch()
+                    # Force the real same-PID exec before verify() rejects the
+                    # older Python snapshot. A second inspection now sees native.
+                    while original_identity(pid)['executable'] != record['build']['executable']:
+                        time.sleep(min(.001, deadline.remaining()))
+                return snapshot
+            with patch.object(hem_process, 'identity', side_effect=exec_after_snapshot):
+                running = self.manager._wait_start('one', child, deadline)
+            self.assertEqual(len(observed_bootstrap), 1)
+            self.assertEqual(running['phase'], 'running')
+            self.assertEqual(running['launch_token'], record['launch_token'])
+            for key in ('pid', 'boot_id', 'start_ticks'):
+                self.assertEqual(running['process'][key], current['process'][key])
+            with self.manager.pin(running) as pinned:
+                self.assertEqual(self.manager.client(running, pinned, Deadline.after(1)).status()['data'], [])

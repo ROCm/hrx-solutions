@@ -76,7 +76,7 @@ def main(argv=None):
         print(json.dumps(response))
     else:
         print(json.dumps(response, indent=2))
-    return 0
+    return getattr(response, 'exit_code', 0)
 
 
 if __name__ == "__main__":
