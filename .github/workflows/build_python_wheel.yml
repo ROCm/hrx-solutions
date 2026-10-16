@@ -21,7 +21,7 @@ on:
       cache_write_pilot:
         type: boolean
         default: false
-        description: Allow a trusted manual main run to seed the cache during qualification.
+        description: Allow an explicit trusted manual pilot-branch run to seed the pilot cache.
       artifact_set:
         type: string
         default: core
@@ -47,7 +47,8 @@ jobs:
       cache_attempted_key: ${{ steps.cache_publication.outputs.key }}
     env:
       PYTHONNOUSERSITE: "1"
-      CACHE_KEY: wheel-bazel-v1-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}-manylinux-${{ inputs.artifact_set }}
+      CACHE_FAMILY: ${{ github.ref == 'refs/heads/pilot/wheel-bazel-cache' && 'wheel-bazel-pilot-v1-linux-x86_64-' || 'wheel-bazel-v1-linux-x86_64-' }}
+      CACHE_KEY: ${{ github.ref == 'refs/heads/pilot/wheel-bazel-cache' && 'wheel-bazel-pilot-v1-linux-x86_64-' || 'wheel-bazel-v1-linux-x86_64-' }}${{ github.run_id }}-${{ github.run_attempt }}-manylinux-${{ inputs.artifact_set }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -81,7 +82,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/hrx-wheel-bazel-cache
           key: ${{ env.CACHE_KEY }}
-          restore-keys: wheel-bazel-v1-linux-x86_64-
+          restore-keys: ${{ env.CACHE_FAMILY }}
           fail-on-cache-miss: false
           enableCrossOsArchive: false
       - name: Prepare optional Bazel action cache
@@ -136,7 +137,7 @@ jobs:
         id: cache_admit
         env:
           HRX_BAZEL_CACHE_DIR: ${{ runner.temp }}/hrx-wheel-bazel-cache
-        if: inputs.use_bazel_cache && steps.cache_prepare.outputs.enabled == 'true' && github.repository == 'ROCm/hrx-solutions' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.cache_write_pilot))
+        if: inputs.use_bazel_cache && steps.cache_prepare.outputs.enabled == 'true' && github.repository == 'ROCm/hrx-solutions' && ((github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.ref == 'refs/heads/pilot/wheel-bazel-cache' && github.event_name == 'workflow_dispatch' && inputs.cache_write_pilot))
         continue-on-error: true
         run: |
           unset PYTHONPATH PYTHONHOME

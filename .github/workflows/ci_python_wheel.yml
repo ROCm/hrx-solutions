@@ -14,11 +14,11 @@ on:
         default: false
       cache_write_pilot:
         type: boolean
-        description: "Pilot only: permit cache publication on a manual main run (also enable use_bazel_cache)."
+        description: "Pilot only: permit publication on pilot/wheel-bazel-cache (also enable use_bazel_cache)."
         default: false
       test_model:
         type: boolean
-        description: "Run the gfx1151 Hem 0.8B lifecycle test after building the wheel."
+        description: "Run the gfx1151 Hem 0.8B lifecycle test after building the wheel. Pilot branch always skips this job."
         default: true
       release_type:
         type: choice
@@ -66,13 +66,14 @@ jobs:
   model:
     name: Hem 0.8B dynamic lifecycle
     needs: python_wheel
-    if: github.event_name != 'workflow_dispatch' || inputs.test_model
+    # Temporary pilot qualification bypass: gfx1151 startup is outside the cache gate.
+    if: github.ref != 'refs/heads/pilot/wheel-bazel-cache' && github.head_ref != 'pilot/wheel-bazel-cache' && (github.event_name != 'workflow_dispatch' || inputs.test_model)
     uses: ./.github/workflows/check_model.yml
 
   wheel_cache_cleanup:
     name: Maintain optional wheel cache
     needs: python_wheel
-    if: github.repository == 'ROCm/hrx-solutions' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.cache_write_pilot)) && needs.python_wheel.result == 'success' && needs.python_wheel.outputs.cache_attempted_key != ''
+    if: github.repository == 'ROCm/hrx-solutions' && ((github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.ref == 'refs/heads/pilot/wheel-bazel-cache' && github.event_name == 'workflow_dispatch' && inputs.use_bazel_cache && inputs.cache_write_pilot)) && needs.python_wheel.result == 'success' && needs.python_wheel.outputs.cache_attempted_key != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     continue-on-error: true
@@ -80,15 +81,20 @@ jobs:
       actions: write
       contents: read
     steps:
-      - name: Checkout trusted main revision
+      - name: Checkout trusted cache-writer revision
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Verify publication and retire older snapshots
         env:
           GH_TOKEN: ${{ github.token }}
           ATTEMPTED_KEY: ${{ needs.python_wheel.outputs.cache_attempted_key }}
           PYTHONNOUSERSITE: "1"
+          CACHE_PILOT: ${{ github.ref == 'refs/heads/pilot/wheel-bazel-cache' && '1' || '0' }}
         run: |
           unset PYTHONPATH PYTHONHOME
           python3 -m venv "${RUNNER_TEMP}/wheel-cache-maintenance-venv"
+          scope_args=()
+          if [[ "$CACHE_PILOT" == 1 ]]; then
+            scope_args+=(--pilot)
+          fi
           "${RUNNER_TEMP}/wheel-cache-maintenance-venv/bin/python" build_tools/github_wheel_cache.py \
-            --attempted-key "$ATTEMPTED_KEY"
+            --attempted-key "$ATTEMPTED_KEY" "${scope_args[@]}"
