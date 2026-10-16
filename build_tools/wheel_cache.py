@@ -67,6 +67,8 @@ def prepare(directory: str, restore_state: str = "fresh") -> dict:
     elif restore_state == "restored":
         raise ValueError("restored snapshot has no manifest")
     (root / "bazel-actions").mkdir(exist_ok=True)
+    # Validate restored descendants before Docker or Bazel can follow them.
+    sizes(root)
     with tempfile.TemporaryFile(dir=root):
         pass
     with tempfile.TemporaryFile(dir=root / "bazel-actions"):
@@ -89,6 +91,11 @@ def write_manifest(root: Path, data: dict) -> None:
 def configure(rc: Path, enabled: bool) -> None:
     contents = rc.read_text()
     contents = re.sub(re.escape(BEGIN) + r".*?" + re.escape(END), "", contents, flags=re.S)
+    if not enabled:
+        contents = "".join(line for line in contents.splitlines(keepends=True) if not any(
+            line.startswith(f"common --{option}=HRX_WHEEL_COMPILER_INPUTS=")
+            for option in ("action_env", "host_action_env")
+        ))
     if enabled:
         contents += BEGIN + "build --disk_cache=/ci-cache/bazel-actions\nbuild --remote_cache_async=false\n" + END
     rc.write_text(contents)
@@ -155,7 +162,7 @@ def main() -> None:
             result = prepare(args.directory, args.restore_state)
         elif args.command == "configure":
             configure(args.bazelrc, args.enabled)
-            result = {"enabled": args.enabled}
+            result = {"configured": True, "enabled": args.enabled}
         elif args.command == "invalidate":
             root = Path(args.directory)
             (root / "manifest.json").unlink(missing_ok=True)

@@ -46,7 +46,14 @@ if [[ ${HRX_BAZEL_CACHE_ENABLED:-0} == 1 ]]; then
   fi
 fi
 # Remove our previous block even when caching is disabled on this invocation.
-"$HRX_BUILD_PYTHON" build_tools/wheel_cache.py configure "${cache_enabled[@]}"
+if configuration=$("$HRX_BUILD_PYTHON" build_tools/wheel_cache.py configure "${cache_enabled[@]}") &&
+    [[ $configuration == *'"configured": true'* ]]; then
+  :
+else
+  echo "Optional cache configuration unavailable; overriding disk cache off" >&2
+  HRX_BAZEL_CACHE_ENABLED=0
+fi
+export HRX_BAZEL_CACHE_ENABLED
 export HRX_BAZEL_METRICS_DIR="$HRX_OUTPUT_DIR/metrics"
 mkdir -p "$HRX_BAZEL_METRICS_DIR"
 if [[ ${HRX_BAZEL_CACHE_ENABLED:-0} == 1 ]]; then

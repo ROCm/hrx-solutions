@@ -184,6 +184,13 @@ def build_native_executables(bazel: Path, rocm_root: Path) -> dict[str, Path]:
         *BAZEL_BUILD_OPTIONS,
         f"--repo_env=IREE_ROCM_PATH={rocm_root}",
     )
+    # An explicit container disable also overrides stale generated rc entries.
+    if os.environ.get("HRX_BAZEL_CACHE_ENABLED") == "0":
+        build_options += (
+            "--disk_cache=",
+            "--action_env=HRX_WHEEL_COMPILER_INPUTS=",
+            "--host_action_env=HRX_WHEEL_COMPILER_INPUTS=",
+        )
     environment = bazel_environment()
     metrics_options = []
     if metrics_dir := os.environ.get("HRX_BAZEL_METRICS_DIR"):

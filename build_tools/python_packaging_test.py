@@ -30,6 +30,14 @@ class PackagingTest(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][-1],packaging.BAZEL_TARGETS['loom-serve'])
         self.assertNotIn('epoch_check',' '.join(run.call_args.args[0]))
 
+    def test_explicit_cache_disable_overrides_stale_rc_for_build_and_query(self):
+        with patch.dict(os.environ, {"HRX_BAZEL_CACHE_ENABLED": "0"}), patch.object(packaging, "_query_bazel_output", return_value=self.root / "server") as query, patch.object(packaging.subprocess, "run") as run:
+            packaging.build_native_executables(self.root / "bazel", self.root / "rocm")
+        self.assertIn("--disk_cache=", run.call_args.args[0])
+        self.assertIn("--disk_cache=", query.call_args.args[2])
+        self.assertIn("--action_env=HRX_WHEEL_COMPILER_INPUTS=", run.call_args.args[0])
+        self.assertIn("--host_action_env=HRX_WHEEL_COMPILER_INPUTS=", run.call_args.args[0])
+
     def test_metrics_only_apply_to_native_build(self):
         with patch.dict(os.environ, {"HRX_BAZEL_METRICS_DIR": str(self.root / "metrics")}), patch.object(packaging, "_query_bazel_output", return_value=self.root / "server") as query, patch.object(packaging.subprocess, "run") as run:
             packaging.build_native_executables(self.root / "bazel", self.root / "rocm")

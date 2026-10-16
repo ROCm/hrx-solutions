@@ -70,6 +70,8 @@ class WheelCacheTest(unittest.TestCase):
         self.complete()
         (self.root / "bazel-actions" / "external").symlink_to("/tmp")
         with self.assertRaises(ValueError):
+            cache.prepare(str(self.root), "restored")
+        with self.assertRaises(ValueError):
             cache.admit(str(self.root))
 
     def test_configuration_repeat_and_disable(self):
@@ -79,8 +81,19 @@ class WheelCacheTest(unittest.TestCase):
         cache.configure(rc, True)
         self.assertEqual(rc.read_text().count("--disk_cache"), 1)
         self.assertIn("--remote_cache_async=false", rc.read_text())
+        with rc.open("a") as stream:
+            stream.write("common --action_env=HRX_WHEEL_COMPILER_INPUTS=old\n")
+            stream.write("common --host_action_env=HRX_WHEEL_COMPILER_INPUTS=old\n")
         cache.configure(rc, False)
         self.assertEqual(rc.read_text(), "build --compilation_mode=opt\n")
+
+    def test_failed_configuration_reports_failure_without_claiming_enabled(self):
+        rc = Path(self.temp.name) / "rc-directory"
+        rc.mkdir()
+        result = subprocess.run([os.sys.executable, str(REPO / "build_tools/wheel_cache.py"), "configure", "--bazelrc", str(rc)], check=True, capture_output=True, text=True)
+        data = json.loads(result.stdout)
+        self.assertFalse(data["enabled"])
+        self.assertFalse(data.get("configured", False))
 
     def test_wrapper_cache_unavailable_does_not_block_docker(self):
         bindir = Path(self.temp.name) / "bin"
