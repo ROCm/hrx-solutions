@@ -67,7 +67,7 @@ jobs:
     name: Hem 0.8B dynamic lifecycle
     needs: python_wheel
     # Temporary pilot qualification bypass: gfx1151 startup is outside the cache gate.
-    if: github.ref != 'refs/heads/pilot/wheel-bazel-cache' && github.head_ref != 'pilot/wheel-bazel-cache' && (github.event_name != 'workflow_dispatch' || inputs.test_model)
+    if: github.ref != 'refs/heads/pilot/wheel-bazel-cache' && (github.event_name != 'workflow_dispatch' || inputs.test_model)
     uses: ./.github/workflows/check_model.yml
 
   wheel_cache_cleanup:

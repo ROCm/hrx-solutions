@@ -49,7 +49,9 @@ class WorkflowPolicyTest(unittest.TestCase):
         model = condition("ci_python_wheel.yml", "  model:")
         for event in ("push", "workflow_dispatch", "pull_request"):
             self.assertFalse(evaluate(model, {"github.ref": "refs/heads/pilot/wheel-bazel-cache", "github.event_name": event, "inputs.test_model": True}))
-        self.assertFalse(evaluate(model, {"github.ref": "refs/pull/1/merge", "github.head_ref": "pilot/wheel-bazel-cache", "github.event_name": "pull_request", "inputs.test_model": True}))
+        for repository in ("ROCm/hrx-solutions", "fork/hrx-solutions"):
+            with self.subTest(repository=repository):
+                self.assertTrue(evaluate(model, {"github.repository": repository, "github.ref": "refs/pull/1/merge", "github.head_ref": "pilot/wheel-bazel-cache", "github.event_name": "pull_request", "inputs.test_model": True}))
         self.assertTrue(evaluate(model, {"github.ref": "refs/heads/main", "github.event_name": "push", "inputs.test_model": False}))
 
 
