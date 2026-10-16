@@ -228,3 +228,38 @@ Many HRX components were originally derived from [IREE](https://github.com/iree-
 and use the Apache license with LLVM exception. HRX also borrows or adapts
 concepts from MLIR, without using MLIR code. Licenses in individual source
 files are authoritative; see the [pipeline notices](loom-pipeline/llm/README.md#license-notices).
+
+### Run CI locally
+
+Run the complete ordinary wheel checks, including real 0.8B serving and Pi
+requests, with one command on a Linux x86-64 AMD GPU host with Docker:
+
+```bash
+bash build_tools/local-ci.sh
+```
+
+Use `--cpu-only` for source tests, source Pi checks, the manylinux build and
+installed wheel/Pi checks without GPU inference. `--model08 DIRECTORY` uses an
+existing `Qwen3.5-0.8B-UD-Q5_K_XL.gguf` and adjacent `tokenizer.json` instead of
+Hugging Face acquisition. Otherwise the existing Hugging Face cache and login
+are reused; only missing pinned model files download. `HF_HUB_OFFLINE=1` rejects
+model cache misses, but dependency installation can still require network access.
+
+Dirty working files are captured into an independent local Git snapshot; ignored
+build outputs and local Bazel SDK configuration are excluded. The original
+checkout is preserved. Each invocation creates its own venvs, wheel, runtime
+state and logs outside the checkout. Results remain under
+`${CODEX_PROJECT_WORKSPACES:-$HOME/codex/project-workspaces}/hrx-solutions/gates/local-ci/`,
+or a new external directory supplied with `--run-dir DIRECTORY`. The runner
+prints progress and writes `summary.json`, including exact source/wheel identity,
+stage exits and cleanup evidence. Failed and interrupted runs retain diagnostics;
+remove their directory only after owned cleanup is complete. This does not run
+27B inference, publish releases or emulate GitHub artifact/cache transport.
+
+Safety-sensitive test and Pi state use a separate unique private directory under
+`/tmp`, so group-writable workspace ancestors do not require permission changes.
+The printed path and ownership record are retained in `summary.json`; reports,
+source, wheels and venvs stay in the selected run directory. Both directories
+remain for inspection, including when interrupted tests report unresolved fixture
+ownership. Remove them only after owned cleanup is complete. Hugging Face caches
+and credentials keep their normal locations.

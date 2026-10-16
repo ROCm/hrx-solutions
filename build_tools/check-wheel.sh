@@ -16,14 +16,18 @@ scripts=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # XDG, Hugging Face credentials or the ordinary user's daemon.
 unset PYTHONPATH PYTHONHOME
 export PYTHONNOUSERSITE=1
-export LOOM_SERVE_DIR="$venv/loom-state"
 python3 -m venv "$venv"
+runtime="$venv"
+if [[ -n ${HRX_LOCAL_CI_RUNTIME_ROOT:-} ]]; then
+  runtime=$("$venv/bin/python" "$scripts/local_ci_runtime.py" "$HRX_LOCAL_CI_RUNTIME_ROOT" "$venv")
+fi
+export LOOM_SERVE_DIR="$runtime/loom-state"
 mkdir "$venv/wheel-check"
 cd "$venv/wheel-check"
 "$venv/bin/python" -m pip install --disable-pip-version-check --no-index --no-deps "$wheel"
 "$venv/bin/python" "$scripts/check_installed_wheel.py" --wheel "$wheel" "${@:3}"
-mkdir "$venv/cpu-fixtures"
-TMPDIR="$venv/cpu-fixtures" LOOM_SERVE_DIR="$venv/installed-cpu-state" "$venv/bin/python" "$scripts/check_installed_cpu.py" \
+mkdir -m 700 "$runtime/cpu-fixtures"
+TMPDIR="$runtime/cpu-fixtures" LOOM_SERVE_DIR="$runtime/installed-cpu-state" "$venv/bin/python" "$scripts/check_installed_cpu.py" \
   --source-root "$(dirname -- "$scripts")" --evidence "$venv/wheel-check/installed-cpu-evidence.json"
 clean_env=(env -u HSA_OVERRIDE_GFX_VERSION -u IREE_HAL_AMDGPU_LIBHSA_PATH \
   -u IREE_HAL_AMDGPU_LIBAQLPROFILE_PATH -u LD_LIBRARY_PATH)

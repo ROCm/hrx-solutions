@@ -16,6 +16,11 @@ from tests.gguf_fixtures import write_gguf, write_matching_gguf, profile
 
 class HemModelsTest(unittest.TestCase):
     def setUp(self):
+        # Acquisition fixtures explicitly control offline behavior; a caller's
+        # real-model offline policy must not change mocked retry expectations.
+        offline = patch.dict(os.environ, {'HF_HUB_OFFLINE': '0'})
+        offline.start()
+        self.addCleanup(offline.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)

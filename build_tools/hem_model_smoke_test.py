@@ -9,6 +9,7 @@ import time
 import tempfile
 import sqlite3
 import socket
+import signal
 import unittest
 from contextlib import redirect_stderr
 import io
@@ -33,6 +34,32 @@ class SmokeFailureTest(unittest.TestCase):
         self.gate = hem_model_smoke.Gate(argparse.Namespace(run=self.root))
         self.gate.states['a'] = self.root / 'venv/bin/python'
 
+    def test_internal_private_root_separates_state_from_report_and_venv_paths(self):
+        from local_ci_runtime import create
+        import shutil
+        owner = create(self.root)
+        runtime = Path(owner['root'])
+        self.addCleanup(shutil.rmtree, runtime)
+        with mock.patch.dict(os.environ, {'HRX_LOCAL_CI_RUNTIME_ROOT': str(runtime / 'model')}):
+            gate = hem_model_smoke.Gate(argparse.Namespace(run=self.root))
+        gate.states['a'] = self.root / 'a/venv/bin/python'
+        (runtime / 'model/a').mkdir(mode=0o700)
+        registry = Registry(gate.state_path('a'))
+        self.assertEqual(gate.verify_empty_state('a')['pi_target'], 0)
+        gate.namespace_roots['c'] = 'a'
+        self.assertEqual(gate.state_path('c'), gate.state_path('a'))
+        child = subprocess.CompletedProcess([], 0, '{"completed":true}', '')
+        with mock.patch.object(hem_model_smoke, 'run_child', return_value=child) as run:
+            gate.command('a', 'server', 'list')
+        self.assertEqual(run.call_args.kwargs['env']['LOOM_SERVE_DIR'], str(runtime / 'model/a/state'))
+        self.assertEqual(run.call_args.args[0][0], str(self.root / 'a/venv/bin/loom-control'))
+        self.assertTrue((self.root / 'results.json').is_file())
+        self.assertFalse((runtime / 'model/results.json').exists())
+        from binding.python.hem_pi_state import integration_lock
+        from binding.python.hem_common import Deadline
+        with integration_lock(registry.root, Deadline.after()):
+            pass
+
     def test_full_profile_accepts_current_schema_and_requires_empty_pi_reservation(self):
         registry = Registry(self.root / 'a/state')
         counts = self.gate.verify_empty_state('a')
@@ -45,7 +72,7 @@ class SmokeFailureTest(unittest.TestCase):
 
     def test_failed_child_is_recorded_and_fails_gate(self):
         failed = subprocess.CompletedProcess([], 1, '{"completed":false}', 'native failure')
-        with mock.patch.object(hem_model_smoke.subprocess, 'run', return_value=failed):
+        with mock.patch.object(hem_model_smoke, 'run_child', return_value=failed):
             with self.assertRaises(AssertionError):
                 self.gate.command('a', 'instance', 'start', 'model')
         evidence = json.loads((self.root / 'results.json').read_text())
@@ -56,7 +83,7 @@ class SmokeFailureTest(unittest.TestCase):
         child = subprocess.CompletedProcess([], 0, '{"completed":true}', '')
         overrides = {'PATH': '/isolated-node/bin:/isolated-pi/node_modules/.bin',
                      'PI_CODING_AGENT_DIR': '/isolated/pi', 'PI_OFFLINE': '1'}
-        with mock.patch.object(hem_model_smoke.subprocess, 'run', return_value=child) as run:
+        with mock.patch.object(hem_model_smoke, 'run_child', return_value=child) as run:
             self.gate.command('a', 'pi', 'configure', '--pi-dir', '/isolated/pi', env_overrides=overrides)
         environment = run.call_args.kwargs['env']
         self.assertEqual(environment['PI_CODING_AGENT_DIR'], '/isolated/pi')
@@ -78,7 +105,7 @@ class SmokeFailureTest(unittest.TestCase):
         diagnostic = output.getvalue()
         self.assertIn('\\\n', diagnostic)
         child = subprocess.CompletedProcess([], 0, '{"completed":true}', diagnostic)
-        with mock.patch.object(hem_model_smoke.subprocess, 'run', return_value=child):
+        with mock.patch.object(hem_model_smoke, 'run_child', return_value=child):
             self.gate.command('a', 'instance', 'start', 'model')
         self.assertEqual(self.gate.results['commands'][0]['native_order'],
                          ['register', 'activate', 'undrain'])
@@ -106,7 +133,7 @@ class SmokeFailureTest(unittest.TestCase):
         diagnostic = '\n'.join('curl --request POST http://localhost/v1/models/' + action
                                for action in ('register', 'undrain', 'activate'))
         child = subprocess.CompletedProcess([], 0, '{"completed":true}', diagnostic)
-        with mock.patch.object(hem_model_smoke.subprocess, 'run', return_value=child):
+        with mock.patch.object(hem_model_smoke, 'run_child', return_value=child):
             with self.assertRaises(AssertionError):
                 self.gate.command('a', 'instance', 'start', 'model')
         self.assertFalse(self.gate.results['success'])
@@ -349,6 +376,17 @@ class SmokePendingLaunchTest(unittest.TestCase):
         self.gate.states['a'] = python
         self.gate.namespace_roots['a'] = '.'
         self.gate.setup = lambda: None
+        self.addCleanup(self.recover_owned_fixture)
+
+    def recover_owned_fixture(self):
+        # Dispose only our fresh test name, before the fixture removes its DB.
+        # This runs after success assertions, so recovery cannot qualify a gate.
+        record = next((row for row in self.case.registry.list_servers()
+                       if row['id'] == 'server-a'), None)
+        if record and record['process'] and not hem_process._confirmed_exit(record['process']):
+            self.gate.attempts['a'] = dict(name='server-a', token=record['launch_token'],
+                process=record['process'], port=int(record['endpoint'].rsplit(':', 1)[1]))
+            hem_model_smoke.Gate.cleanup_attempt(self.gate, 'a')
 
     def assert_failed_launch_cleaned(self, outer_timeout=False, cleanup_failure=False):
         other = self.case.start('unrelated')
@@ -417,6 +455,89 @@ class SmokePendingLaunchTest(unittest.TestCase):
         self.assertTrue(self.gate.results['cleanup'][-1]['absent'])
         self.assertFalse(hem_process._confirmed_exit(other['process']))
         ShutdownManager(self.case.registry, processes=self.case.manager).shutdown('unrelated', Deadline.after(3), abort=True)
+
+
+    def assert_signal_cleanup(self, signum, registered=False, cleanup_failure=False):
+        other = self.case.start('unrelated')
+        cleanup_file = self.case.root / 'cleanup.json'
+        self.gate.args.profile = 'ci08'
+        cli = self.case.root / 'loom-control'
+        cli.write_text(cli.read_text().replace('["--timeout","0.15"]', '["--timeout","5"]'))
+        def exercise():
+            self.gate.start_server('a', 'server-a')
+            signal.pause()
+        self.gate.run_ci08 = exercise
+        if cleanup_failure:
+            self.gate.cleanup_attempt = lambda namespace: (_ for _ in ()).throw(RuntimeError('injected cleanup failure'))
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.environ['HRX_LOCAL_CI_CLEANUP_FILE'] = str(cleanup_file)
+                with (self.case.root / 'cancel.log').open('w') as log:
+                    os.dup2(log.fileno(), 1)
+                    os.dup2(log.fileno(), 2)
+                    self.gate.run()
+            except hem_model_smoke.Cancelled as error:
+                os._exit(128 + error.signum)
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+            os._exit(0)
+        reaped = False
+        try:
+            end = time.monotonic() + 8
+            while True:
+                record = next((row for row in self.case.registry.list_servers() if row['id'] == 'server-a'), None)
+                if record and record['process'] and record['process'].get('logger') and (not registered or record['phase'] == 'running'):
+                    break
+                self.assertLess(time.monotonic(), end, 'owned launch not observed')
+                time.sleep(.01)
+            owned = record['process']
+            self.case.owned.append((owned, owned['executable']))
+            os.kill(pid, signum)
+            # A second signal while the finally path waits must not interrupt it.
+            time.sleep(.05)
+            os.kill(pid, signum)
+            while True:
+                waited, status = os.waitpid(pid, os.WNOHANG)
+                if waited:
+                    reaped = True
+                    break
+                self.assertLess(time.monotonic(), end + 12, 'cooperative helper did not exit')
+                time.sleep(.01)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 128 + signum)
+            evidence = json.loads(cleanup_file.read_text())
+            self.assertEqual(evidence['status'], 'unresolved' if cleanup_failure else 'complete')
+            if not cleanup_failure:
+                self.assertTrue(hem_process._confirmed_exit(owned))
+                self.assertTrue(hem_process._confirmed_exit(owned['logger']))
+                with socket.socket() as sock:
+                    self.assertNotEqual(sock.connect_ex(('127.0.0.1', int(record['endpoint'].rsplit(':', 1)[1]))), 0)
+            self.assertFalse(hem_process._confirmed_exit(other['process']))
+            with self.case.manager.pin(other) as pinned:
+                self.assertEqual(self.case.manager.client(other, pinned, Deadline.after()).status()['data'], [])
+        finally:
+            if not reaped:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            # This recovery is fixture disposal, after assertions about helper
+            # cleanup. It cannot turn unresolved evidence into a passing result.
+            if cleanup_failure:
+                deadline = Deadline.after(4)
+                while self.case.manager.reconcile('server-a', deadline)['phase'] != 'running':
+                    time.sleep(.01)
+                ShutdownManager(self.case.registry, processes=self.case.manager).shutdown('server-a', deadline, abort=True)
+            ShutdownManager(self.case.registry, processes=self.case.manager).shutdown('unrelated', Deadline.after(3), abort=True)
+
+    def test_sigterm_during_synchronous_pending_start_reconciles_and_reaps(self):
+        self.assert_signal_cleanup(signal.SIGTERM)
+
+    def test_sigint_registered_server_and_repeated_signal_preserves_unrelated(self):
+        self.assert_signal_cleanup(signal.SIGINT, registered=True)
+
+    def test_sigterm_cleanup_failure_preserves_signal_and_unresolved_evidence(self):
+        self.assert_signal_cleanup(signal.SIGTERM, cleanup_failure=True)
 
 
 if __name__ == '__main__':

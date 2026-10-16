@@ -14,11 +14,87 @@ import site
 import shlex
 import sqlite3
 import socket
+import signal
 import subprocess
 import sys
 import time
 import urllib.request
 import zipfile
+
+from local_ci_runtime import validate_stage
+
+
+class Cancelled(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
+        super().__init__(f'cancelled by signal {signum}')
+
+
+def write_cleanup(status, **details):
+    destination = os.environ.get('HRX_LOCAL_CI_CLEANUP_FILE')
+    if destination:
+        path = Path(destination)
+        temporary = path.with_name(path.name + '.tmp')
+        temporary.write_text(json.dumps(dict(status=status, **details)) + '\n')
+        temporary.replace(path)
+
+
+def session_live(group):
+    for path in Path('/proc').glob('[0-9]*/stat'):
+        try:
+            fields = path.read_text().rsplit(')', 1)[1].split()
+            if int(fields[2]) == group and fields[0] != 'Z':
+                return True
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+    return False
+
+
+def run_child(argv, *, capture_output=False, timeout=None, check=False, **kwargs):
+    """Own synchronous CLI/download/setup children without touching native sessions."""
+    if capture_output:
+        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    child = None
+    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    try:
+        child = subprocess.Popen(argv, start_new_session=True,
+                                 preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, old_mask),
+                                 **kwargs)
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        stdout, stderr = child.communicate(timeout=timeout)
+    except BaseException as original:
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+        try:
+            if child is not None:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    child.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.communicate(timeout=5)
+                # The CLI can exit before a downloader it spawned. Prove its
+                # separate session is empty; native launches use other sessions.
+                end = time.monotonic() + 5
+                while session_live(child.pid):
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    if time.monotonic() >= end:
+                        raise RuntimeError('owned synchronous child session remains live')
+                    time.sleep(.01)
+        except Exception as cleanup:
+            original.cleanup_unresolved = repr(cleanup)
+        raise
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+    result = subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
+    if check:
+        result.check_returncode()
+    return result
 
 
 def digest(path):
@@ -28,7 +104,10 @@ def digest(path):
 class Gate:
     def __init__(self, args):
         self.args, self.root = args, args.run.resolve()
-        self.results = {'commands': [], 'queries': [], 'cleanup': [], 'success': False}
+        internal_root = os.environ.get('HRX_LOCAL_CI_RUNTIME_ROOT')
+        self.runtime_root = validate_stage(Path(internal_root), self.root) if internal_root else self.root
+        self.results = {'commands': [], 'queries': [], 'cleanup': [], 'success': False,
+                        'runtime_root': str(self.runtime_root)}
         self.states = {}
         self.servers = {}
         self.attempts = {}
@@ -39,8 +118,11 @@ class Gate:
     def save(self):
         (self.root / 'results.json').write_text(json.dumps(self.results, indent=2) + '\n')
 
+    def state_path(self, namespace):
+        return self.runtime_root / self.namespace_roots.get(namespace, namespace) / 'state'
+
     def verify_empty_state(self, namespace):
-        with sqlite3.connect(self.root / namespace / 'state/control.sqlite3') as connection:
+        with sqlite3.connect(self.state_path(namespace) / 'control.sqlite3') as connection:
             tables = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")]
             assert set(tables) == {'models', 'servers', 'instances', 'pi_target'}, tables
             assert connection.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
@@ -50,7 +132,7 @@ class Gate:
             return counts
 
     def command(self, namespace, *args, expected=0, command_timeout=15, env_overrides=None):
-        env = dict(os.environ, LOOM_SERVE_DIR=str(self.root / self.namespace_roots.get(namespace, namespace) / 'state'), PYTHONNOUSERSITE='1')
+        env = dict(os.environ, LOOM_SERVE_DIR=str(self.state_path(namespace)), PYTHONNOUSERSITE='1')
         env.update(env_overrides or {})
         env.pop('PYTHONPATH', None)
         env.pop('PYTHONHOME', None)
@@ -59,7 +141,7 @@ class Gate:
         # inherited tools, preserving the caller's HOME/HF cache/credentials.
         env['PATH'] = str(python.parent) + os.pathsep + env.get('PATH', '')
         start = time.monotonic()
-        process = subprocess.run([str(python.parent / 'loom-control'), *args, '--json'],
+        process = run_child([str(python.parent / 'loom-control'), *args, '--json'],
                                  env=env, cwd=self.root, capture_output=True, text=True, timeout=command_timeout)
         number = len(self.results['commands'])
         (self.root / f'{number:03}-{namespace}.stderr').write_text(process.stderr)
@@ -100,14 +182,15 @@ class Gate:
         for namespace in namespaces:
             directory = self.root / namespace
             directory.mkdir()
+            (self.runtime_root / namespace).mkdir(mode=0o700, exist_ok=True)
             venv = directory / 'venv'
-            subprocess.run(['python3', '-m', 'venv', str(venv)], check=True)
+            run_child(['python3', '-m', 'venv', str(venv)], check=True)
             python = venv / 'bin/python'
-            subprocess.run([str(python), '-m', 'pip', 'install', '--disable-pip-version-check', str(self.args.wheel),
+            run_child([str(python), '-m', 'pip', 'install', '--disable-pip-version-check', str(self.args.wheel),
                             *(['huggingface_hub[cli]==0.34.4'] if self.args.acquire08 else [])],
                            check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             self.states[namespace] = python
-            env = dict(os.environ, LOOM_SERVE_DIR=str(directory / 'state'), PYTHONNOUSERSITE='1')
+            env = dict(os.environ, LOOM_SERVE_DIR=str(self.state_path(namespace)), PYTHONNOUSERSITE='1')
             check = subprocess.check_output([str(python), '-c',
                 'import hrx_solutions,sys,site,json; print(json.dumps(dict(package=hrx_solutions.__file__,prefix=sys.prefix,user_site=site.ENABLE_USER_SITE)))'], env=env, cwd=self.root, text=True)
             identity = json.loads(check)
@@ -254,7 +337,7 @@ class Gate:
 
     def inspect_server(self, namespace, name, process=None, timeout=10):
         """Read one owned row and verify saved process identities, outside source."""
-        env = dict(os.environ, LOOM_SERVE_DIR=str(self.root / self.namespace_roots.get(namespace, namespace) / 'state'), PYTHONNOUSERSITE='1')
+        env = dict(os.environ, LOOM_SERVE_DIR=str(self.state_path(namespace)), PYTHONNOUSERSITE='1')
         env.pop('PYTHONPATH', None)
         env.pop('PYTHONHOME', None)
         script = """
@@ -269,7 +352,7 @@ process = json.loads(sys.argv[2])
 print(json.dumps(dict(record=record, exited=(not process or
     (_confirmed_exit(process) and (not process.get('logger') or _confirmed_exit(process['logger'])))))))
 """
-        child = subprocess.run([str(self.states[namespace]), '-c', script, name, json.dumps(process)],
+        child = run_child([str(self.states[namespace]), '-c', script, name, json.dumps(process)],
                                env=env, cwd=self.root, capture_output=True, text=True, timeout=timeout, check=True)
         return json.loads(child.stdout)
 
@@ -325,13 +408,13 @@ print(json.dumps(dict(record=record, exited=(not process or
         runtime = self.args.pi_runtime.resolve()
         node_bin = runtime / 'node-v22.22.1-linux-x64/bin'
         pi_bin = runtime / 'node_modules/.bin'
-        target = self.root / 'pi-agent'
-        project = self.root / 'pi-project'
+        target = self.runtime_root / 'pi-agent'
+        project = self.runtime_root / 'pi-project'
         target.mkdir(mode=0o700)
         project.mkdir(mode=0o700)
         original = '{"quietStartup":true}\n'
         (target / 'settings.json').write_text(original)
-        environment = dict(os.environ, LOOM_SERVE_DIR=str(self.root / 'a/state'),
+        environment = dict(os.environ, LOOM_SERVE_DIR=str(self.state_path('a')),
                            PI_CODING_AGENT_DIR=str(target), PYTHONNOUSERSITE='1', PI_OFFLINE='1')
         environment.pop('PYTHONPATH', None)
         environment.pop('PYTHONHOME', None)
@@ -365,7 +448,7 @@ print(json.dumps(dict(record=record, exited=(not process or
                     '--print', '--mode', 'json', '--no-session', '--no-tools', '--thinking', 'off',
                     '--system-prompt', 'Reply briefly to the user.', 'Say hello in two words.']
             started = time.monotonic()
-            response = subprocess.run(argv, cwd=project, env=environment, capture_output=True, text=True, timeout=30)
+            response = run_child(argv, cwd=project, env=environment, capture_output=True, text=True, timeout=30)
             prefix = 'pi-' + item['id']
             (self.root / (prefix + '.stdout')).write_text(response.stdout)
             (self.root / (prefix + '.stderr')).write_text(response.stderr)
@@ -411,7 +494,7 @@ print(json.dumps(dict(record=record, exited=(not process or
         if getattr(self.args, 'pi_runtime', None):
             self.pi_configuration()
         self.shutdown('a')
-        with sqlite3.connect(self.root / 'a/state/control.sqlite3') as connection:
+        with sqlite3.connect(self.state_path('a') / 'control.sqlite3') as connection:
             assert connection.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
             assert connection.execute('SELECT COUNT(*) FROM instances').fetchone()[0] == 0
         self.results['success'] = True
@@ -434,7 +517,7 @@ print(json.dumps(dict(record=record, exited=(not process or
                     data = stream.read(65536).decode(errors='replace')
                 publish(path.name, data)
         for namespace in ('a', 'b'):
-            state = self.root / namespace / 'state'
+            state = self.state_path(namespace)
             database = state / 'control.sqlite3'
             if not database.exists():
                 continue
@@ -457,8 +540,23 @@ print(json.dumps(dict(record=record, exited=(not process or
                     publish(f'{namespace}-{index}-process.log', text)
 
     def run(self):
-        self.setup()
+        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        def cancelled(signum, frame):
+            # Ignore subsequent termination signals until all owned cleanup ends.
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(sig, signal.SIG_IGN)
+            raise Cancelled(signum)
+        for sig in previous:
+            signal.signal(sig, cancelled)
         try:
+            self._run()
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
+    def _run(self):
+        try:
+            self.setup()
             if getattr(self.args, 'profile', 'full') == 'ci08':
                 self.run_ci08()
                 return
@@ -517,7 +615,9 @@ print(json.dumps(dict(record=record, exited=(not process or
             original_error = sys.exc_info()[1]
             if original_error is not None:
                 self.results['error'] = repr(original_error)
-            cleanup_error = None
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(sig, signal.SIG_IGN)
+            cleanup_error = getattr(original_error, 'cleanup_unresolved', None)
             for namespace in list(self.attempts):
                 try:
                     self.cleanup_attempt(namespace)
@@ -528,9 +628,15 @@ print(json.dumps(dict(record=record, exited=(not process or
                     print(f'Cleanup unresolved for {self.attempts[namespace]["name"]} in {self.root}: {error}', file=sys.stderr)
             for child in self.streams:
                 if child.poll() is None:
-                    child.terminate()
-                    child.wait(timeout=5)
+                    try:
+                        child.terminate()
+                        child.wait(timeout=5)
+                    except Exception as error:
+                        cleanup_error = cleanup_error or error
+                        self.results['cleanup'].append(dict(child=child.pid, error=repr(error)))
+            self.results['success'] = bool(self.results['success'] and original_error is None and cleanup_error is None)
             self.save()
+            write_cleanup('unresolved' if cleanup_error else 'complete', attempts=list(self.attempts), error=repr(cleanup_error) if cleanup_error else None)
             try:
                 self.artifacts()
             except Exception as error:
@@ -563,7 +669,10 @@ def main():
     if args.run.exists() and any(args.run.iterdir()):
         parser.error('--run must be a new or empty external directory')
     args.run.mkdir(parents=True, exist_ok=True)
-    Gate(args).run()
+    try:
+        Gate(args).run()
+    except Cancelled as error:
+        raise SystemExit(128 + error.signum)
 
 
 if __name__ == '__main__':

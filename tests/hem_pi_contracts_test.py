@@ -2,6 +2,8 @@
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
+import gc
+import warnings
 import json
 import os
 from pathlib import Path
@@ -18,6 +20,10 @@ from binding.python.hem_pi_contracts import PiResult, provider_id
 
 class PiContractTest(unittest.TestCase):
     def invoke(self, suffix=(), *, response=None, error=None):
+        # Earlier SQLite fixtures can leave cyclic garbage. Drain it outside
+        # this command-only capture so its warnings remain visible without
+        # being mistaken for output from the CLI under test.
+        gc.collect()
         out, err = io.StringIO(), io.StringIO()
         with patch.object(hem_pi_cli, "run", return_value=response, side_effect=error) as run:
             with redirect_stdout(out), redirect_stderr(err):
@@ -40,6 +46,31 @@ class PiContractTest(unittest.TestCase):
         for args in (["--json", "pi", "configure"], ["pi", "--json", "configure"],
                      ["pi", "configure", "--json"]):
             self.assertTrue(hem_cli.parse_args(args).json)
+
+    def test_prior_fixture_resource_warning_stays_outside_command_capture(self):
+        class PriorFixture:
+            def __del__(self):
+                warnings.warn("prior fixture resource was not closed", ResourceWarning)
+        # Keep the cycle pending until invoke's explicit collection, even when
+        # automatic collection happens at an unrelated bytecode allocation.
+        enabled = gc.isenabled()
+        gc.disable()
+        prior = io.StringIO()
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("always", ResourceWarning)
+                resource = PriorFixture()
+                resource.cycle = resource
+                del resource
+                with redirect_stderr(prior):
+                    code, _, err, _ = self.invoke(response=PiResult(
+                        "unchanged", configured=True, changed=False, completed=True, exit_code=0))
+            self.assertEqual(code, 0)
+            self.assertEqual(err, "")
+            self.assertIn("ResourceWarning: prior fixture resource was not closed", prior.getvalue())
+        finally:
+            if enabled:
+                gc.enable()
 
     def test_preview_nonzero_result_is_preserved_and_deadline_passed_once(self):
         response = PiResult("changes_required", configured=False, changed=False,

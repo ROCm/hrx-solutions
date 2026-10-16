@@ -99,10 +99,13 @@ class WheelCacheTest(unittest.TestCase):
         bindir = Path(self.temp.name) / "bin"
         bindir.mkdir()
         docker = bindir / "docker"
-        docker.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CAPTURE"\n')
+        from build_tools.cancellation_test import DOCKER
+        docker.write_text(DOCKER.replace('PYTHON', os.sys.executable, 1).replace(
+            'while state.exists(): time.sleep(.02)', 'pass').replace(
+            "(root/'creating').touch()", "(root/'creating').touch(); Path(os.environ['CAPTURE']).write_text('\\n'.join(a))"))
         docker.chmod(0o755)
         capture = Path(self.temp.name) / "args"
-        environment = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", CAPTURE=str(capture))
+        environment = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", CAPTURE=str(capture), FAKE_DOCKER=str(Path(self.temp.name)))
         for directory, enabled in (("relative", "0"), (str(self.root), "1")):
             environment["HRX_BAZEL_CACHE_DIR"] = directory
             subprocess.run(["bash", str(REPO / "build_tools/build-wheel.sh")], env=environment, check=True, capture_output=True)
