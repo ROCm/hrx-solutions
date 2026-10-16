@@ -115,7 +115,12 @@ def main():
                           args.attempted_key)
     except Exception as error:
         # Cache maintenance must never turn a valid wheel into a failed build.
-        result = dict(verified=False, reason=f"Maintenance skipped ({type(error).__name__})")
+        detail = str(error)
+        if token := os.environ.get("GH_TOKEN"):
+            detail = detail.replace(token, "[redacted]")
+        reason = (f"HTTP {error.code}" if isinstance(error, urllib.error.HTTPError)
+                  else f"{type(error).__name__}: {detail[:160]}")
+        result = dict(verified=False, reason=f"Maintenance skipped ({reason})")
     print(json.dumps(result, sort_keys=True))
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:

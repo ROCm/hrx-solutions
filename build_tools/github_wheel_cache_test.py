@@ -89,6 +89,12 @@ class MaintenanceTest(unittest.TestCase):
                 cache.maintain(api, entry(2)["key"])
         self.assertEqual(api.deleted, [])
 
+    def test_cli_redacts_token_from_bounded_error_detail(self):
+        with patch.dict("os.environ", {"GH_TOKEN": "secret-token", "GITHUB_REPOSITORY": "owner/repo"}, clear=True), patch("sys.argv", ["cache", "--attempted-key", entry(1)["key"]]), patch.object(cache, "maintain", side_effect=ValueError("secret-token bad response")), patch("builtins.print") as output:
+            cache.main()
+        self.assertNotIn("secret-token", output.call_args.args[0])
+        self.assertIn("bad response", output.call_args.args[0])
+
     def test_cli_api_failure_remains_successful(self):
         with patch.dict("os.environ", {}, clear=True), patch("sys.argv", ["cache", "--attempted-key", entry(1)["key"]]), patch("builtins.print") as output:
             cache.main()

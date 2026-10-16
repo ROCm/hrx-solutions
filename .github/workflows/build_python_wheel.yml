@@ -66,6 +66,12 @@ jobs:
           "$python" -c 'import os,site,sys,setuptools,packaging; from pathlib import Path; assert sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE; assert "include-system-site-packages = false" in (Path(sys.prefix)/"pyvenv.cfg").read_text(); assert not os.environ.get("PYTHONPATH") and not os.environ.get("PYTHONHOME"); assert all(Path(m.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()) for m in (setuptools,packaging)); print(sys.executable, setuptools.__file__, packaging.__file__)'
           "$python" -m unittest discover -s build_tools -p '*_test.py' -v
           "$python" -m unittest discover -s tests -p '*_test.py' -v
+      - name: Start cache measurements
+        if: inputs.use_bazel_cache
+        continue-on-error: true
+        run: |
+          mkdir -p "${RUNNER_TEMP}/wheel-cache-diagnostics"
+          date +%s > "${RUNNER_TEMP}/wheel-cache-diagnostics/restore.started"
       - name: Restore optional Bazel action cache
         id: cache_restore
         if: inputs.use_bazel_cache
@@ -95,7 +101,8 @@ jobs:
             state=restored
           fi
           "${RUNNER_TEMP}/hem-source-venv/bin/python" build_tools/wheel_cache.py prepare \
-            --directory "$HRX_BAZEL_CACHE_DIR" --restore-state "$state"
+            --directory "$HRX_BAZEL_CACHE_DIR" --restore-state "$state" | tee "${RUNNER_TEMP}/wheel-cache-diagnostics/prepare.json"
+          echo "$(( $(date +%s) - $(cat "${RUNNER_TEMP}/wheel-cache-diagnostics/restore.started") ))" > "${RUNNER_TEMP}/wheel-cache-diagnostics/restore.seconds"
       - name: Build and repair wheel in manylinux container
         env:
           HRX_BAZEL_CACHE_DIR: ${{ runner.temp }}/hrx-wheel-bazel-cache
@@ -103,13 +110,22 @@ jobs:
           HRX_RELEASE_TYPE: ${{ inputs.release_type }}
           HRX_RUN_ID: ${{ inputs.run_id }}
           HRX_ARTIFACT_SET: ${{ inputs.artifact_set }}
-        run: bash build_tools/build-wheel.sh
+        run: |
+          SECONDS=0
+          bash build_tools/build-wheel.sh
+          if [[ -d "${RUNNER_TEMP}/wheel-cache-diagnostics" ]]; then
+            echo "$SECONDS" > "${RUNNER_TEMP}/wheel-cache-diagnostics/build.seconds" || true
+          fi
       - name: Check wheel installation on Ubuntu host
         run: |
+          SECONDS=0
           shopt -s nullglob
           wheels=(build/wheel/wheelhouse/*.whl)
           test "${#wheels[@]}" -eq 1
           bash build_tools/check-wheel.sh "${wheels[0]}" "${RUNNER_TEMP}/wheel-install-venv"
+          if [[ -d "${RUNNER_TEMP}/wheel-cache-diagnostics" ]]; then
+            echo "$SECONDS" > "${RUNNER_TEMP}/wheel-cache-diagnostics/validation.seconds" || true
+          fi
       - name: Upload validated manylinux wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -125,12 +141,14 @@ jobs:
         run: |
           unset PYTHONPATH PYTHONHOME
           "${RUNNER_TEMP}/hem-source-venv/bin/python" build_tools/wheel_cache.py admit \
-            --directory "$HRX_BAZEL_CACHE_DIR" --max-bytes 3221225472
+            --directory "$HRX_BAZEL_CACHE_DIR" --max-bytes 3221225472 | tee "${RUNNER_TEMP}/wheel-cache-diagnostics/admit.json"
       - name: Record attempted cache publication
         id: cache_publication
         continue-on-error: true
         if: steps.cache_admit.outputs.ready == 'true'
-        run: echo "key=$CACHE_KEY" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "key=$CACHE_KEY" >> "$GITHUB_OUTPUT"
+          date +%s > "${RUNNER_TEMP}/wheel-cache-diagnostics/save.started" || true
       - name: Save optional Bazel action cache
         id: cache_save
         if: steps.cache_publication.outputs.key != ''
@@ -152,5 +170,7 @@ jobs:
           ATTEMPTED_KEY: ${{ steps.cache_publication.outputs.key }}
           SAVE_OUTCOME: ${{ steps.cache_save.outcome }}
         run: |
-          printf 'Wheel cache: restore=%s matched=%s enabled=%s ready=%s attempted=%s save=%s\n' \
-            "$RESTORE_OUTCOME" "$MATCHED_KEY" "$ENABLED" "$READY" "$ATTEMPTED_KEY" "$SAVE_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
+          unset PYTHONPATH PYTHONHOME
+          "${RUNNER_TEMP}/hem-source-venv/bin/python" build_tools/wheel_cache_summary.py \
+            --snapshot "${RUNNER_TEMP}/hrx-wheel-bazel-cache" \
+            --diagnostics "${RUNNER_TEMP}/wheel-cache-diagnostics"
