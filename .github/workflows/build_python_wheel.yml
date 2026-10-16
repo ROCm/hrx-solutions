@@ -15,9 +15,16 @@ on:
       run_id:
         type: string
         default: ""
+      use_bazel_cache:
+        type: boolean
+        default: false # Enable after compiler tracking and integrated local gates pass.
       artifact_set:
         type: string
         default: core
+    outputs:
+      cache_attempted_key:
+        description: Attempted publication key; cleanup must independently verify publication.
+        value: ${{ jobs.build_python_wheel.outputs.cache_attempted_key }}
 
 permissions:
   actions: read
@@ -32,8 +39,11 @@ jobs:
     name: ${{ inputs.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      cache_attempted_key: ${{ steps.cache_publication.outputs.key }}
     env:
       PYTHONNOUSERSITE: "1"
+      CACHE_KEY: wheel-bazel-v1-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}-manylinux-${{ inputs.artifact_set }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -52,8 +62,40 @@ jobs:
           "$python" -c 'import os,site,sys,setuptools,packaging; from pathlib import Path; assert sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE; assert "include-system-site-packages = false" in (Path(sys.prefix)/"pyvenv.cfg").read_text(); assert not os.environ.get("PYTHONPATH") and not os.environ.get("PYTHONHOME"); assert all(Path(m.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()) for m in (setuptools,packaging)); print(sys.executable, setuptools.__file__, packaging.__file__)'
           "$python" -m unittest discover -s build_tools -p '*_test.py' -v
           "$python" -m unittest discover -s tests -p '*_test.py' -v
+      - name: Restore optional Bazel action cache
+        id: cache_restore
+        if: inputs.use_bazel_cache
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/hrx-wheel-bazel-cache
+          key: ${{ env.CACHE_KEY }}
+          restore-keys: wheel-bazel-v1-linux-x86_64-
+          fail-on-cache-miss: false
+          enableCrossOsArchive: false
+      - name: Prepare optional Bazel action cache
+        id: cache_prepare
+        if: inputs.use_bazel_cache
+        continue-on-error: true
+        env:
+          HRX_BAZEL_CACHE_DIR: ${{ runner.temp }}/hrx-wheel-bazel-cache
+          RESTORE_OUTCOME: ${{ steps.cache_restore.outcome }}
+          MATCHED_KEY: ${{ steps.cache_restore.outputs.cache-matched-key }}
+        run: |
+          unset PYTHONPATH PYTHONHOME
+          state=fresh
+          if [[ "$RESTORE_OUTCOME" != success ]]; then
+            state=failed
+          elif [[ -n "$MATCHED_KEY" ]]; then
+            state=restored
+          fi
+          "${RUNNER_TEMP}/hem-source-venv/bin/python" build_tools/wheel_cache.py prepare \
+            --directory "$HRX_BAZEL_CACHE_DIR" --restore-state "$state"
       - name: Build and repair wheel in manylinux container
         env:
+          HRX_BAZEL_CACHE_DIR: ${{ runner.temp }}/hrx-wheel-bazel-cache
+          HRX_BAZEL_CACHE_ENABLED: ${{ steps.cache_prepare.outputs.enabled == 'true' && '1' || '0' }}
           HRX_RELEASE_TYPE: ${{ inputs.release_type }}
           HRX_RUN_ID: ${{ inputs.run_id }}
           HRX_ARTIFACT_SET: ${{ inputs.artifact_set }}
@@ -70,3 +112,41 @@ jobs:
           name: hrx-solutions-wheel-linux-x86_64
           path: build/wheel/wheelhouse/*.whl
           if-no-files-found: error
+      - name: Admit completed cache snapshot
+        id: cache_admit
+        env:
+          HRX_BAZEL_CACHE_DIR: ${{ runner.temp }}/hrx-wheel-bazel-cache
+        if: inputs.use_bazel_cache && steps.cache_prepare.outputs.enabled == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        run: |
+          unset PYTHONPATH PYTHONHOME
+          "${RUNNER_TEMP}/hem-source-venv/bin/python" build_tools/wheel_cache.py admit \
+            --directory "$HRX_BAZEL_CACHE_DIR" --max-bytes 3221225472
+      - name: Record attempted cache publication
+        id: cache_publication
+        continue-on-error: true
+        if: steps.cache_admit.outputs.ready == 'true'
+        run: echo "key=$CACHE_KEY" >> "$GITHUB_OUTPUT"
+      - name: Save optional Bazel action cache
+        id: cache_save
+        if: steps.cache_publication.outputs.key != ''
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/hrx-wheel-bazel-cache
+          key: ${{ steps.cache_publication.outputs.key }}
+          enableCrossOsArchive: false
+      - name: Summarize optional cache
+        if: always() && inputs.use_bazel_cache
+        continue-on-error: true
+        env:
+          MATCHED_KEY: ${{ steps.cache_restore.outputs.cache-matched-key }}
+          RESTORE_OUTCOME: ${{ steps.cache_restore.outcome }}
+          ENABLED: ${{ steps.cache_prepare.outputs.enabled }}
+          READY: ${{ steps.cache_admit.outputs.ready }}
+          ATTEMPTED_KEY: ${{ steps.cache_publication.outputs.key }}
+          SAVE_OUTCOME: ${{ steps.cache_save.outcome }}
+        run: |
+          printf 'Wheel cache: restore=%s matched=%s enabled=%s ready=%s attempted=%s save=%s\n' \
+            "$RESTORE_OUTCOME" "$MATCHED_KEY" "$ENABLED" "$READY" "$ATTEMPTED_KEY" "$SAVE_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
