@@ -329,7 +329,7 @@ class JoinTest(unittest.TestCase):
             self.assertTrue(hem_process._confirmed_exit(row['process']))
             with closing(sqlite3.connect(f.registry.database)) as connection:
                 tables = {name for name, in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                self.assertEqual(tables, {'models', 'servers', 'instances'})
+                self.assertEqual(tables, {'models', 'servers', 'instances', 'pi_target'})
                 self.assertEqual([connection.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
                                   for table in ('models', 'servers', 'instances')], [1, 1, 0])
                 self.assertEqual(connection.execute('PRAGMA integrity_check').fetchone()[0], 'ok')

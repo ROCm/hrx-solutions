@@ -1,4 +1,4 @@
-"""Thin four-resource entry point for Loom Hem."""
+"""Thin resource entry point for Loom Hem."""
 
 from __future__ import annotations
 
@@ -6,12 +6,12 @@ import argparse
 import json
 import sys
 
-from . import hem_arguments, hem_instance_cli, hem_model_cli, hem_pipeline_cli, hem_server_cli
+from . import hem_arguments, hem_instance_cli, hem_model_cli, hem_pi_cli, hem_pipeline_cli, hem_server_cli
 from .hem_common import Deadline, HemError, InvalidInput, result
 
 
 DOMAINS = {"model": hem_model_cli, "pipeline": hem_pipeline_cli,
-           "server": hem_server_cli, "instance": hem_instance_cli}
+           "server": hem_server_cli, "instance": hem_instance_cli, "pi": hem_pi_cli}
 
 
 class Parser(argparse.ArgumentParser):

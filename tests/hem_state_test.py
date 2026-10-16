@@ -61,10 +61,10 @@ class StateTest(unittest.TestCase):
         with self.assertRaises(InvalidInput):
             Registry("relative")
         with sqlite3.connect(self.registry.database) as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
             self.assertEqual(db.execute("PRAGMA journal_mode").fetchone()[0], "delete")
             self.assertEqual({row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")},
-                             {"models", "servers", "instances"})
+                             {"models", "servers", "instances", "pi_target"})
         with self.registry._transaction() as db:
             self.assertEqual(db.execute("PRAGMA synchronous").fetchone()[0], 2)
             self.assertEqual(db.execute("PRAGMA foreign_keys").fetchone()[0], 1)

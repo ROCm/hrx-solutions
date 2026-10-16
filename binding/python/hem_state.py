@@ -1,6 +1,6 @@
 """Crash-resilient current inventory and scoped filesystem publication.
 
-Only models, servers and instances are durable records. Callers own validation,
+Only current model/server/instance inventory and the Pi reservation are durable. Callers own validation,
 process observation and HTTP; none of those actions run inside transactions.
 Lifecycle callers hold model locks before server locks. Updates use record
 revisions/current launch tokens to reject stale observations after a wait.
@@ -24,14 +24,41 @@ import uuid
 
 from .hem_common import Deadline, HemError, InvalidInput
 
-SCHEMA_VERSION = 1
-_TABLES = {"models", "servers", "instances"}
+SCHEMA_VERSION = 2
 _HELD = threading.local()
 _SCHEMA = (
     "CREATE TABLE models (id TEXT PRIMARY KEY NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL)",
     "CREATE TABLE servers (id TEXT PRIMARY KEY NOT NULL, launch_token TEXT, revision INTEGER NOT NULL, data TEXT NOT NULL, UNIQUE(id, launch_token))",
     "CREATE TABLE instances (server_id TEXT NOT NULL, launch_token TEXT NOT NULL, name TEXT NOT NULL, model_id TEXT, revision INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(server_id, launch_token, name), FOREIGN KEY(server_id, launch_token) REFERENCES servers(id, launch_token), FOREIGN KEY(model_id) REFERENCES models(id))",
 )
+_PI_SCHEMA = "CREATE TABLE pi_target (singleton INTEGER PRIMARY KEY CHECK(singleton=1), target TEXT NOT NULL, integration_id TEXT NOT NULL)"
+
+
+def _validate_schema(connection, version):
+    """Validate before migration; unknown tables and weakened constraints refuse."""
+    if version not in (1, 2):
+        raise HemError(f"unsupported state schema {version}; inventory was not reset")
+    actual = dict(connection.execute("SELECT name,sql FROM sqlite_master WHERE type='table'"))
+    statements = _SCHEMA + ((_PI_SCHEMA,) if version == 2 else ())
+    expected = {statement.split()[2]: statement for statement in statements}
+    if actual != expected:
+        raise HemError("state schema constraints do not match; inventory was not reset")
+    if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+        raise HemError("corrupt state database; inventory was not reset")
+    if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+        raise HemError("state database has broken references; inventory was not reset")
+    for table in ("models", "servers", "instances"):
+        columns = "server_id,launch_token,name" if table == "instances" else "id"
+        for key in connection.execute(f"SELECT {columns} FROM {table}").fetchall():
+            Registry._read(connection, table, tuple(key))
+    if version == 2:
+        from .hem_pi_state import _read_target
+        _read_target(connection)
+
+
+def _migrate(connection):
+    connection.execute(_PI_SCHEMA)
+    connection.execute("PRAGMA user_version=2")
 
 
 def _name(value):
@@ -110,20 +137,29 @@ class ResourceLock:
     inherited open-file description held by a launch bootstrap until exec.
     """
 
-    def __init__(self, root, kind, resource_id, deadline):
-        self.path = root / "locks" / f"{kind}-{_name(resource_id)}.lock"
+    def __init__(self, root, kind, resource_id, deadline, *, path=None):
+        self.path = path if path is not None else root / "locks" / f"{kind}-{_name(resource_id)}.lock"
         self.kind = kind
         self.deadline = deadline
         self.descriptor = None
 
-    def __enter__(self):
+    def _check_order(self):
         held = getattr(_HELD, "locks", [])
         if any(item.path == self.path for item in held):
             raise HemError("resource locks are not reentrant")
-        if self.kind == "model" and any(item.kind == "server" for item in held):
-            raise HemError("acquire model locks before server locks")
+        order = {"model": 0, "server": 1, "integration": 2, "target": 3}
+        if any(order[item.kind] > order[self.kind] for item in held):
+            raise HemError("acquire model before server before integration before target locks")
+        return held
+
+    def __enter__(self):
+        held = self._check_order()
+        self.deadline.remaining()
         descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise HemError("lock must be a private same-user regular file")
             while True:
                 self.deadline.remaining()
                 try:
@@ -171,34 +207,22 @@ class Registry:
         os.chmod(self.root, 0o700)
         if self.database.is_symlink():
             raise HemError("state database cannot be a symlink")
-        with self._transaction() as connection:
+        with self._transaction(allow_legacy=True) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if version == 0 and not tables:
                 for statement in _SCHEMA:
                     connection.execute(statement)
-                connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-            elif version != SCHEMA_VERSION or tables != _TABLES:
-                raise HemError(f"unsupported state schema {version}; inventory was not reset")
-            if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-                raise HemError("corrupt state database; inventory was not reset")
-            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
-                raise HemError("state database has broken references; inventory was not reset")
-            for table, expected in (("models", ["id", "revision", "data"]),
-                                    ("servers", ["id", "launch_token", "revision", "data"]),
-                                    ("instances", ["server_id", "launch_token", "name", "model_id", "revision", "data"])):
-                if [row[1] for row in connection.execute(f"PRAGMA table_info({table})")] != expected:
-                    raise HemError("state schema does not match this tool; inventory was not reset")
-            actual = {row[0]: row[1] for row in connection.execute("SELECT name,sql FROM sqlite_master WHERE type='table'")}
-            for statement in _SCHEMA:
-                table = statement.split()[2]
-                if actual[table] != statement:
-                    raise HemError("state schema constraints do not match; inventory was not reset")
+                _migrate(connection)
+            else:
+                _validate_schema(connection, version)
+                if version == 1:
+                    _migrate(connection)
         os.chmod(self.database, 0o600)
         _sync_dir(self.root)
 
     @contextmanager
-    def _transaction(self):
+    def _transaction(self, *, allow_legacy=False):
         deadline = self.deadline or Deadline.after()
         connection = None
         def execute(statement):
@@ -215,8 +239,9 @@ class Registry:
         try:
             deadline.remaining()
             connection = sqlite3.connect(self.database, timeout=0, isolation_level=None)
+            connection.set_progress_handler(lambda: int(deadline.clock() >= deadline.expires_at), 1000)
             version = execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, SCHEMA_VERSION):
+            if version not in ((0, 1, SCHEMA_VERSION) if allow_legacy else (SCHEMA_VERSION,)):
                 raise HemError(f"unsupported state schema {version}; inventory was not reset")
             execute("PRAGMA foreign_keys=ON")
             execute("PRAGMA synchronous=FULL")
@@ -225,6 +250,7 @@ class Registry:
             yield connection
             execute("COMMIT")
         except sqlite3.Error as error:
+            deadline.remaining()
             raise HemError(f"state database unavailable; inventory retained: {error}") from error
         finally:
             if connection is not None:

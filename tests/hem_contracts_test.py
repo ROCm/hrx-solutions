@@ -22,8 +22,10 @@ class GrammarTest(unittest.TestCase):
     def parse(self, text):
         return hem_cli.parse_args(shlex.split(text))
 
-    def test_complete_four_type_inventory(self):
+    def test_complete_five_type_inventory(self):
         examples = {
+            'pi': ['configure', 'configure --check', 'configure --disable',
+                   'configure --pi-dir /alternate/pi'],
             'model': ['available', 'download recipe --id qwen08',
                       'import qwen08 --gguf a.gguf b.gguf --tokenizer tokenizer.json --alias',
                       'validate qwen08', 'list', 'show qwen08'],
