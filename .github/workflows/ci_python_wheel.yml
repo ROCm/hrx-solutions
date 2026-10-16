@@ -10,7 +10,7 @@ on:
     inputs:
       use_bazel_cache:
         type: boolean
-        description: "Use the optional Bazel cache (experimental; disabled pending local gates)."
+        description: "Use the optional Bazel cache (experimental; enabled by default on main pushes)."
         default: false
       cache_write_pilot:
         type: boolean
@@ -56,7 +56,7 @@ jobs:
       actions: read
       contents: read
     with:
-      use_bazel_cache: ${{ inputs.use_bazel_cache || false }}
+      use_bazel_cache: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || inputs.use_bazel_cache || false }}
       cache_write_pilot: ${{ inputs.cache_write_pilot || false }}
       name: manylinux x86-64
       release_type: ${{ inputs.release_type || 'nightly' }}
