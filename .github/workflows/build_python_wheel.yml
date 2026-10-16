@@ -46,7 +46,8 @@ jobs:
         env:
           LOOM_SERVE_DIR: ${{ runner.temp }}/hem-source-state
         run: |
-          unset PYTHONPATH PYTHONHOME
+          # Unit-test fixtures must not inherit the enclosing CI run's identity.
+          unset PYTHONPATH PYTHONHOME GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
           python="${RUNNER_TEMP}/hem-source-venv/bin/python"
           "$python" -c 'import os,site,sys,setuptools,packaging; from pathlib import Path; assert sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE; assert "include-system-site-packages = false" in (Path(sys.prefix)/"pyvenv.cfg").read_text(); assert not os.environ.get("PYTHONPATH") and not os.environ.get("PYTHONHOME"); assert all(Path(m.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()) for m in (setuptools,packaging)); print(sys.executable, setuptools.__file__, packaging.__file__)'
           "$python" -m unittest discover -s build_tools -p '*_test.py' -v
