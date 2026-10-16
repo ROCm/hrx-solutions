@@ -52,6 +52,10 @@ jobs:
           "$python" -c 'import os,site,sys,setuptools,packaging; from pathlib import Path; assert sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE; assert "include-system-site-packages = false" in (Path(sys.prefix)/"pyvenv.cfg").read_text(); assert not os.environ.get("PYTHONPATH") and not os.environ.get("PYTHONHOME"); assert all(Path(m.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()) for m in (setuptools,packaging)); print(sys.executable, setuptools.__file__, packaging.__file__)'
           "$python" -m unittest discover -s build_tools -p '*_test.py' -v
           "$python" -m unittest discover -s tests -p '*_test.py' -v
+      - name: Stage qualified Pi runtime for our extension checks
+        run: bash build_tools/stage-pi-runtime.sh "${RUNNER_TEMP}/pi-runtime"
+      - name: Check our source Pi assets and public loader integration
+        run: bash build_tools/check-pi-assets.sh "${RUNNER_TEMP}/pi-runtime" binding/python/pi_extension
       - name: Build and repair wheel in manylinux container
         env:
           HRX_RELEASE_TYPE: ${{ inputs.release_type }}
@@ -64,6 +68,10 @@ jobs:
           wheels=(build/wheel/wheelhouse/*.whl)
           test "${#wheels[@]}" -eq 1
           bash build_tools/check-wheel.sh "${wheels[0]}" "${RUNNER_TEMP}/wheel-install-venv"
+      - name: Check installed Pi assets from the repaired wheel
+        run: |
+          assets=$(env -u PYTHONPATH -u PYTHONHOME "${RUNNER_TEMP}/wheel-install-venv/bin/python" -c 'import hrx_solutions; from pathlib import Path; print(Path(hrx_solutions.__file__).parent / "pi_extension")')
+          bash build_tools/check-pi-assets.sh "${RUNNER_TEMP}/pi-runtime" "$assets"
       - name: Upload validated manylinux wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

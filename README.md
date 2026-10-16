@@ -53,7 +53,7 @@ and adaptation are encouraged.
 
 | Solution | What you can do |
 | --- | --- |
-| [LLM serving](docs/solutions/llm-serving.md) | Import and validate a model, serve streaming chat locally, and inspect its configuration. |
+| [LLM serving](docs/solutions/llm-serving.md) | Import and validate a model, serve streaming chat locally, inspect its configuration, and connect Pi. |
 
 Image serving, audio, NPU workloads, and interactive applications such as [Doom](https://gist.github.com/benvanik/20fbfd298ab1d53588ad12aedade6457)
 are candidates for future worked solutions.
@@ -77,6 +77,8 @@ loom-hem instance start --help
 
 Continue with the [LLM serving walkthrough](docs/solutions/llm-serving.md)
 to import a checkpoint, validate it, and start the server.
+For the supported Pi coding agent, see
+[Connect Pi once](docs/solutions/llm-serving.md#connect-pi-once).
 
 ## Agent Guidebooks
 

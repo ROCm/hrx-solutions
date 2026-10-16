@@ -23,8 +23,12 @@ import zipfile
 
 
 HELPERS = ('gguf_fixtures', 'hem_http_test', 'hem_process_test', 'hem_instances_test')
+# Installer concurrency fixtures import source-only test helpers in children.
+# Keep those in source CPU discovery; installed CLI cases still exercise the
+# real installed installer through its public entry point.
 CONTRACTS = ('hem_process_test', 'hem_model_cli_test', 'hem_server_cli_test',
-             'hem_instance_cli_test', 'hem_shutdown_test')
+             'hem_instance_cli_test', 'hem_shutdown_test', 'hem_pi_contracts_test',
+             'hem_pi_state_test', 'hem_pi_endpoints_test', 'hem_pi_cli_test')
 
 
 def digest(path):

@@ -2,8 +2,10 @@
 
 The former `loom-serve-setup remote` interface, tracked SSH tunnels and Pi
 configuration helpers are retired with the setup/start tooling. Loom Hem does
-not provide remote provisioning, SSH target inventories or client configuration
-commands. The earlier remote-serving design is not an implemented Hem interface.
+not provide remote provisioning or SSH target inventories. Its
+[`pi configure`](solutions/llm-serving.md#connect-pi-once) command connects Pi to
+local Hem-managed loopback servers only. The earlier remote-serving design is
+not an implemented Hem interface.
 
 Use the [current serving walkthrough](solutions/llm-serving.md) on the machine
 that owns the GPU and model assets. An operator can separately arrange SSH
