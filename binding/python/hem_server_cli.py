@@ -12,6 +12,7 @@ from .hem_http import NativeClient
 from .hem_process import ProcessManager, read_logs
 from .hem_state import Registry
 from .hem_shutdown import ShutdownManager
+from .hem_pi_endpoints import update_result
 
 
 def configure(parser):
@@ -171,7 +172,8 @@ def run(args, deadline):
     registry = Registry(deadline=budget)
     manager = ProcessManager(registry)
     if args.command == 'shutdown':
-        return ShutdownManager(registry, processes=manager).shutdown(args.server, budget, abort=args.abort)
+        payload = ShutdownManager(registry, processes=manager).shutdown(args.server, budget, abort=args.abort)
+        return update_result(registry, budget, payload)
     if args.command == 'start':
         server_id = args.name or args.server
         if args.name:
@@ -182,9 +184,10 @@ def run(args, deadline):
         else:
             settings = registry.get_server(server_id)['saved_settings']
         record = manager.start(server_id, settings, budget)
-        return result('running', completed=True, server=server_id, accepted=True,
+        payload = result('running', completed=True, server=server_id, accepted=True,
                       record=record, endpoint=record['endpoint'], process=record['process'],
                       log_paths=_log_paths(record))
+        return update_result(registry, budget, payload)
     if args.command == 'show':
         return result('configured', completed=True, server=args.server,
                       saved_settings=registry.get_server(args.server)['saved_settings'])
@@ -198,7 +201,7 @@ def run(args, deadline):
             items.append(_observation(scoped, ProcessManager(scoped), row['id'], observation_budget))
         return ObservationResult(result('inventory', completed=True, items=items))
     if args.command in ('status', 'reconcile'):
-        return _observation(registry, manager, args.server, budget)
+        return update_result(registry, budget, _observation(registry, manager, args.server, budget))
     if args.command == 'logs':
         return _logs(registry, manager, registry.get_server(args.server), args.follow)
     raise InvalidInput('unknown server command')

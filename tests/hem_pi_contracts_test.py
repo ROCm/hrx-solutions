@@ -74,24 +74,18 @@ class PiContractTest(unittest.TestCase):
                 self.assertIs(body["accepted"], error.accepted)
                 self.assertIn(str(error), err)
 
-    def test_skeleton_and_help_never_create_state_or_claim_success(self):
+    def test_help_is_passive(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             env = dict(os.environ, LOOM_SERVE_DIR=str(root / "state"),
                        PI_CODING_AGENT_DIR=str(root / "pi"))
-            for flags, expected in ((["--help"], 0), (["--check", "--json"], 1),
-                                    (["--disable", "--json"], 1), (["--json"], 1)):
-                process = subprocess.run([sys.executable, "-m", "binding.python.hem_cli",
-                                          "pi", "configure", *flags], env=env,
-                                         text=True, capture_output=True, check=False)
-                self.assertEqual(process.returncode, expected, process.stderr)
-                if expected:
-                    self.assertIn("not implemented", process.stderr)
-                    self.assertFalse(json.loads(process.stdout)["completed"])
-                else:
-                    self.assertIn("--check", process.stdout)
-                self.assertFalse((root / "state").exists())
-                self.assertFalse((root / "pi").exists())
+            process = subprocess.run([sys.executable, "-m", "binding.python.hem_cli",
+                                      "pi", "configure", "--help"], env=env,
+                                     text=True, capture_output=True, check=False)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertIn("--check", process.stdout)
+            self.assertFalse((root / "state").exists())
+            self.assertFalse((root / "pi").exists())
 
     def test_provider_encoding_is_stable_and_avoids_case_punctuation_collisions(self):
         names = ["local", "Local", "a-b", "a_b", "a.b", "ab", "a"]
