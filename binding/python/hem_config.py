@@ -21,10 +21,17 @@ from .pipeline_validation import available_pipelines, catalog_for_model, resolve
 from .qwen_validation import compare_gguf, compare_tokenizer, load_profile
 
 # Bounds in pinned configuration.c and Qwen prepare.loom, not memory-fit promises.
-LIMITS = {"rows": 16, "context_capacity": 262144,
-          "pool_capacity": 4194304, "prefill_capacity": 262144, "mtp_depth": 3}
-DEFAULTS = {"rows": 4, "context_capacity": 8192,
-            "pool_capacity": 32768, "prefill_capacity": 128}
+# Meanings: pinned server/configuration.h and service/text/{model,packing}.h.
+# Help and validation consume this same metadata; parser omissions remain None.
+SETTINGS = {
+    "rows": (4, 16, "Maximum simultaneous execution rows for this model; queued requests may exceed this count"),
+    "context_capacity": (8192, 262144, "Logical context token ceiling per row, including retained/input and generated tokens; not eagerly allocated storage"),
+    "pool_capacity": (32768, 4194304, "Shared KV cache token positions across rows; must be divisible by source-declared page size, with page-rounded reservations"),
+    "prefill_capacity": (128, 262144, "Maximum packed input tokens per model traversal across rows, also the isolated prefill chunk limit"),
+    "mtp_depth": (3, 3, "Proposal tokens after each anchor for multi-token prediction (MTP); applicable only when supported and enabled"),
+}
+LIMITS = {key: metadata[1] for key, metadata in SETTINGS.items()}
+DEFAULTS = {key: metadata[0] for key, metadata in SETTINGS.items() if key != "mtp_depth"}
 EXPORT_RESPONSIBILITY = (
     "Export does not reserve dependencies or validate a running server. You must "
     "preserve the referenced weights, tokenizer and pipeline source files, and use "
@@ -83,8 +90,8 @@ def pipeline_info(identifier: str) -> dict:
     return {"pipeline": identifier, "profile": profile["identifier"],
             "catalog": str(catalog), "compatibility": profile,
             "capabilities": {"mtp": supported},
-            "defaults": {**DEFAULTS, "mtp": supported, "mtp_depth": 3 if supported else None},
-            "limits": {**LIMITS, "mtp_depth": 3 if supported else None}}
+            "defaults": {**DEFAULTS, "mtp": supported, "mtp_depth": SETTINGS["mtp_depth"][0] if supported else None},
+            "limits": {**LIMITS, "mtp_depth": LIMITS["mtp_depth"] if supported else None}}
 
 
 def select_pipeline(model: ModelFiles, pipeline: Optional[str] = None) -> str:

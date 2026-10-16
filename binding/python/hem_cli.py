@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from . import hem_arguments, hem_instance_cli, hem_model_cli, hem_pipeline_cli, hem_server_cli
+from . import hem_arguments, hem_help, hem_instance_cli, hem_model_cli, hem_pipeline_cli, hem_server_cli
 from .hem_common import Deadline, HemError, InvalidInput, result
 
 
@@ -16,27 +16,44 @@ DOMAINS = {"model": hem_model_cli, "pipeline": hem_pipeline_cli,
 
 class Parser(argparse.ArgumentParser):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **dict(kwargs, allow_abbrev=False))
+        super().__init__(*args, **dict(kwargs, allow_abbrev=False,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter))
 
     def error(self, message):
-        raise InvalidInput(message)
+        error = InvalidInput(message)
+        error.parser = self
+        raise error
+
+    def parse_args(self, args=None, namespace=None):
+        parsed, remaining = self.parse_known_args(args, namespace)
+        if remaining:
+            getattr(parsed, '_help_parser', self).error(
+                'unrecognized arguments: ' + ' '.join(remaining))
+        return parsed
 
 
 def parser():
     root = Parser(prog="loom-hem", description="Thin setup and control for Loom Serve")
     hem_arguments.output(root)
-    types = root.add_subparsers(dest="resource", required=True)
+    types = root.add_subparsers(dest="resource")
+    domains = {}
     for name, module in DOMAINS.items():
-        domain = types.add_parser(name)
+        domain = types.add_parser(name, help=hem_help.RESOURCES[name])
+        domains[name] = domain
         hem_arguments.output(domain)
         module.configure(domain)
+    hem_help.describe(root, domains)
     return root
 
 
 def parse_args(argv=None):
     args = parser().parse_args(argv)
-    if args.resource == "server":
-        hem_server_cli.validate(args)
+    if args.resource == "server" and args.command is not None:
+        try:
+            hem_server_cli.validate(args)
+        except InvalidInput as error:
+            error.parser = args._help_parser
+            raise
     return args
 
 
@@ -47,11 +64,19 @@ def main(argv=None):
     try:
         args = parse_args(argv)
         json_output = getattr(args, "json", False)
+        if args.resource is None or getattr(args, "command", None) is None:
+            args._help_parser.print_help()
+            return 0
         # Downloads and follow streams intentionally have no lifecycle budget.
         deadline = Deadline.after(args.timeout) if hasattr(args, "timeout") else None
         response = DOMAINS[args.resource].run(args, deadline)
     except HemError as error:
         print(str(error), file=sys.stderr)
+        if isinstance(error, InvalidInput) and not json_output:
+            context = getattr(error, "parser", None) or (args._help_parser if args else None)
+            if context is not None:
+                context.print_usage(sys.stderr)
+                print(f"For details: {context.prog} --help", file=sys.stderr)
         if error.accepted is not None or error.exit_code == 4:
             acceptance = 'unknown' if error.accepted is None else str(error.accepted).lower()
             print(f"accepted: {acceptance}", file=sys.stderr)

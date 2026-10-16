@@ -38,7 +38,8 @@ def timeout(value: str) -> float:
 
 def output(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
-                        help="write one JSON result to stdout")
+                        help="write one JSON action result to stdout; diagnostics and command "
+                             "equivalents stay on stderr; help remains text")
 
 
 def lifecycle(parser: argparse.ArgumentParser) -> None:

@@ -45,7 +45,7 @@ class GrammarTest(unittest.TestCase):
                     self.assertEqual(args.command, command.split()[0])
 
     def test_no_aliases_shortcuts_or_incomplete_invocations(self):
-        for text in ('models list', 'start qwen08', 'server', 'instance activate chat',
+        for text in ('models list', 'start qwen08', 'instance activate chat',
                      'model download recipe', 'model import qwen08 --gguf w',
                      'instance export qwen08', 'server start',
                      'server start local --name other', 'server start local --device task',
