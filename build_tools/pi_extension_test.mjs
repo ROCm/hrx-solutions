@@ -61,7 +61,7 @@ try {
     const loaded = await discoverAndLoadExtensions([directory], target, target);
     assert.equal(loaded.errors.length, 1, JSON.stringify(loaded.errors));
     const error = String(loaded.errors[0].error);
-    if (scenario === "valid-unavailable") assert.match(error, /discovery is not implemented/);
+    if (scenario === "valid-unavailable") assert.match(error, /cannot read the endpoint projection/);
     else {
       assert.match(error, /Loom Hem Pi:/);
       assert.match(error, /Run loom-hem pi configure/);

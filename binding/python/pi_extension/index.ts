@@ -10,7 +10,7 @@ const repair = "Run loom-hem pi configure to repair the owned integration";
 
 function fail(reason: string): never { throw new Error(`Loom Hem Pi: ${reason}. ${repair}`); }
 
-function readBounded(path: string): Buffer {
+export function readBounded(path: string): Buffer {
   if (realpathSync(path) !== path) fail("aliased managed file");
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
