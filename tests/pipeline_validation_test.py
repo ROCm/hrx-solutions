@@ -56,28 +56,27 @@ class PipelineValidationTest(unittest.TestCase):
         self.assertFalse(result.compatible)
         self.assertIn('MTP: missing required tensor',result.message)
 
-    def test_catalog_customization(self):
-        source=Path(__file__).resolve().parents[1]/'loom-pipeline/llm/qwen/qwen_27b'
-        with patch.object(Path,'home',return_value=self.root):
-            configured=pipeline_validation.catalog_for_model('qwen',source,'test-model')
-            self.assertIn('746573742d6d6f64656c',(configured/'control.loom').read_text())
-            self.assertTrue((configured/'compatibility.json').is_file())
-
-
-    def test_08b_catalog_cache_preserves_other_architecture_and_dependencies(self):
-        source = pipeline_validation.resolve_catalog('qwen-08b')
-        self.assertEqual(source.name, 'qwen_08b')
-        self.assertEqual(pipeline_validation.resolve_catalog('qwen').name, 'qwen_27b')
-        original = (source/'control.loom').read_bytes()
-        with patch.object(Path, 'home', return_value=self.root):
-            configured = pipeline_validation.catalog_for_model('qwen-08b', source, 'small-qwen')
-            self.assertIn('736d616c6c2d7177656e', (configured/'control.loom').read_text())
-            self.assertEqual((configured.parent/'qwen_27b/control.loom').read_bytes(), original)
-            for entry in (configured/'sources.txt').read_text().splitlines():
-                if entry:
-                    self.assertTrue((configured/entry).is_file(), entry)
-            self.assertEqual(pipeline_validation.catalog_for_model('qwen-08b', source, 'small-qwen'), configured)
-        self.assertEqual((source/'control.loom').read_bytes(), original)
+    def test_qwen_aliases_use_immutable_catalog_without_name_cache(self):
+        cache = self.root / 'runtime-cache'
+        for pipeline in ('qwen', 'qwen-08b'):
+            source = pipeline_validation.resolve_catalog(pipeline)
+            original = (source / 'control.loom').read_bytes()
+            with patch.object(pipeline_validation, 'runtime_cache_dir', return_value=cache):
+                for name in ('custom-A', 'custom-B'):
+                    path = pipeline_validation.deployment_for_model(
+                        source, ModelFiles(self.weights, self.tokenizer), name)
+                    document = json.loads(path.read_text())
+                    self.assertEqual(document['name'], name)
+                    self.assertEqual(Path(document['base_directory']), source)
+                    self.assertEqual((source / 'control.loom').read_bytes(), original)
+                    modules = pipeline_validation.catalog_modules(source)
+                    self.assertEqual(document['definition']['prepare'], modules.prepare)
+                    self.assertEqual(document['definition']['control'], modules.control)
+                    self.assertEqual(modules.prepare, 'prepare.loom')
+                    self.assertEqual(modules.weights, 'weights.loom')
+                    self.assertNotIn(modules.control, modules.providers)
+                    self.assertNotIn(modules.weights, modules.providers)
+        self.assertFalse((cache / 'catalogs').exists())
 
 
     def test_deployment_capacity_and_native_document_passthrough(self):

@@ -9,16 +9,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
 import json
-import os
 from pathlib import Path
-import shutil
 import uuid
 
 from . import hem_config, hem_models, hem_process
 from .hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome, result
 from .hem_http import NativeClient, active_ready, registration, retired
 from .hem_state import _name
-from .pipeline_validation import catalog_for_model
 
 
 class InstanceManager:
@@ -78,60 +75,24 @@ class InstanceManager:
         return self.registry.write_document(relative / f'{action}-{uuid.uuid4().hex}.json',
                                            json.dumps(document, allow_nan=False) + '\n')
 
-    def _retain_catalog(self, server, name, resolved, catalog_root, deadline):
+    def _retained_catalog(self, server, resolved, catalog_root):
+        """Map a qualified catalog into the matching immutable launch snapshot."""
         try:
-            relative = resolved.catalog.relative_to(self.processes.package_root / 'loom-pipeline')
-        except ValueError as error:
-            raise HemError('validated pipeline is outside the matching package catalog') from error
-        retained_catalog = catalog_root / relative
-        destination = (Path(server['build']['directory']) / 'instances' / name /
-                       f'sources-{uuid.uuid4().hex}')
-        def copy(source, target):
-            with open(source, 'rb') as incoming, open(target, 'xb') as outgoing:
-                while True:
-                    deadline.remaining()
-                    block = incoming.read(1024 * 1024)
-                    if not block:
-                        break
-                    outgoing.write(block)
-                outgoing.flush()
-                os.fsync(outgoing.fileno())
-            return target
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        # Launch payloads are read-only. Existing adapters copy source mode bits
-        # before rewriting names, so provide a writable owned preparation copy.
-        # Both preparation and configured closure remain inside this launch.
-        preparation = destination.with_name(destination.name + '-input')
-        source_root = retained_catalog.parents[1]
-        shutil.copytree(source_root, preparation, copy_function=copy)
-        deadline.remaining()
-        configured = catalog_for_model(resolved.pipeline,
-                        preparation / retained_catalog.relative_to(source_root), name)
-        deadline.remaining()
-        # Configurers may use a regenerable cache. Never leave native dependent
-        # on that cache: retain its complete source closure in the launch tree.
-        configured_root = configured.parents[1]
-        shutil.copytree(configured_root, destination, copy_function=copy)
-        for root in (preparation, destination):
-            for directory, _, _ in os.walk(root, topdown=False):
-                deadline.remaining()
-                descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-        # Persist newly created instances/name directory entries before the
-        # SQLite row can durably reserve documents within this source closure.
-        for directory in (destination.parent, destination.parent.parent,
-                          Path(server['build']['directory'])):
-            deadline.remaining()
-            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        deadline.remaining()
-        return destination / configured.relative_to(configured_root)
+            package = self.processes.package_root.resolve(strict=True)
+            current_root = (package / 'loom-pipeline').resolve(strict=True)
+            current_root.relative_to(package)
+            current = resolved.catalog.resolve(strict=True)
+            relative = current.relative_to(current_root)
+            launch = Path(server['build']['directory']).resolve(strict=True)
+            retained_root = catalog_root.resolve(strict=True)
+            retained_root.relative_to(launch)
+            retained = (retained_root / relative).resolve(strict=True)
+            retained.relative_to(retained_root)
+            if not current.is_dir() or not retained.is_dir():
+                raise ValueError('catalog must be a directory')
+        except (OSError, ValueError) as error:
+            raise HemError('validated pipeline is outside or missing from the matching package catalog') from error
+        return retained
 
     def _start(self, server, model_id, deadline, *, name=None, overrides=None,
               config_path=None, pipeline=None, device=0):
@@ -159,7 +120,7 @@ class InstanceManager:
                     if registration(initial, name) is not None:
                         raise HemError('instance name is already registered; inspect or stop before retrying')
                     catalog_root = hem_process.require_build(server, self.processes.package_root, deadline)
-                    catalog = self._retain_catalog(server, name, resolved, catalog_root, deadline)
+                    catalog = self._retained_catalog(server, resolved, catalog_root)
                     document = hem_config.deployment_document(resolved, name, catalog=catalog, device=device)
                     path = self._document(server, name, 'register', document)
                     deadline.remaining()

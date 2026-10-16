@@ -64,11 +64,31 @@ def port():
 
 def wait_exit(process, seconds=3):
     until = time.monotonic() + seconds
+    uncertain = None
     while time.monotonic() < until:
-        if hem_process._confirmed_exit(process):
-            return
+        try:
+            if hem_process._confirmed_exit(process):
+                return
+        except UncertainOutcome as error:
+            # Procfs executable data may disappear before pidfd reports exit.
+            # Retry the same owned record; uncertainty never counts as success.
+            uncertain = error
         time.sleep(.01)
+    if uncertain is not None:
+        raise uncertain
     raise AssertionError(f'owned process did not exit: {process}')
+
+
+class WaitExitTest(unittest.TestCase):
+    def test_transient_inspection_failure_waits_for_confirmed_exit(self):
+        with patch.object(hem_process, '_confirmed_exit', side_effect=[UncertainOutcome('exiting'), True]) as check:
+            wait_exit({'pid':123})
+        self.assertEqual(check.call_count, 2)
+
+    def test_persistent_uncertainty_is_not_accepted_as_exit(self):
+        with patch.object(hem_process, '_confirmed_exit', side_effect=UncertainOutcome('unreadable')):
+            with self.assertRaisesRegex(UncertainOutcome, 'unreadable'):
+                wait_exit({'pid':123}, seconds=.02)
 
 
 class ProcessTests(unittest.TestCase):
@@ -171,6 +191,23 @@ class ProcessTests(unittest.TestCase):
         with self.manager.pin(record) as pinned:
             self.assertEqual(self.manager.client(record, pinned, Deadline.after(2)).status()['data'], [])
         self.assertTrue((retained / 'compatibility.json').is_file())
+
+    def test_registration_rejects_missing_current_or_tampered_retained_catalog(self):
+        record = self.start()
+        retained = hem_process.require_build(record, self.package, Deadline.after(2))
+        target = retained / 'compatibility.json'
+        target.chmod(0o600)
+        target.write_text('{"test":"tampered"}')
+        with self.assertRaisesRegex(HemError, 'differs'):
+            hem_process.require_build(record, self.package, Deadline.after(2))
+        target.write_text('{"test":"fixture"}')
+        self.assertEqual(hem_process.require_build(record, self.package, Deadline.after(2)), retained)
+        shutil.rmtree(self.package / 'loom-pipeline')
+        with self.assertRaisesRegex(HemError, 'missing bundled payload'):
+            hem_process.require_build(record, self.package, Deadline.after(2))
+        self.assertTrue(target.is_file())
+        with self.manager.pin(record) as pinned:
+            self.assertEqual(self.manager.client(record, pinned, Deadline.after(2)).status()['data'], [])
 
     def test_pid_boot_and_executable_mismatch_never_signal_replacement(self):
         record = self.start()

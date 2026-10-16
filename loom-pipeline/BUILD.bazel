@@ -1,0 +1,7 @@
+load(":bytecode.bzl", "bytecode_catalogs")
+load(":catalog_sources.bzl", "CATALOG_VARIANTS")
+
+bytecode_catalogs(
+    name = "bytecode_catalogs",
+    variants = CATALOG_VARIANTS,
+)

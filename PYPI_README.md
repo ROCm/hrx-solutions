@@ -8,8 +8,8 @@ run, inspect, and adapt these examples for their own workloads.
 
 The current package provides Loom Serve for streaming LLM chat on AMD GPUs.
 It includes the native server, Python GGUF compatibility validation, the Qwen
-Loom source catalog, and the required ROCm runtime libraries. Model weights
-are downloaded separately.
+two complete Loom bytecode pipelines (`pipeline.loombc`, one per supported model specification), and the required ROCm runtime libraries.
+Model weights are downloaded separately.
 
 The serving solution makes model computation, weight preparation, and chat
 policy explicit in source while sharing native scheduling and execution
@@ -49,5 +49,5 @@ use an available release or build wheel with the walkthrough installation steps.
 - [HRX platform](https://github.com/ROCm/hrx-system)
 
 The Python launcher and packaging code are MIT licensed. Bundled native code,
-pipeline sources, and ROCm libraries retain their upstream licenses and
+pipeline modules, and ROCm libraries retain their upstream licenses and
 notices. Model weights are not redistributed.

@@ -40,13 +40,13 @@ and [CLI](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent
 
 The packaged `qwen` pipeline lives at `loom-pipeline/llm/qwen/qwen_27b`.
 Its `compatibility.json` pins checkpoint/tokenizer independently; use its own
-`sources.txt` provider closure, keeping the preparation/control roles and shared
-source tree. The small-model example does not qualify 27B memory fit or agent
+`pipeline.json` descriptor and single `pipeline.loombc`, keeping all preparation,
+control and provider definitions together. The small-model example does not qualify 27B memory fit or agent
 use on the same hardware.
 
-The 27B source identity is also `qwen3.8-27b`: retire the small-model registration
-before reusing the name. It supports `draft_depth` 1–3 for MTP or zero to disable
-it. Prefill capacity must fit one anchor plus all draft proposals and must not
+The example name `qwen3.8-27b` can also be used for 27B: retire the small-model
+registration before reusing that name, or choose a distinct name. It supports
+`draft_depth` 1–3 for MTP or zero to disable it. Prefill capacity must fit one anchor plus all draft proposals and must not
 exceed context capacity. Select rows, context and pool for the target hardware;
 then repeat readiness, bounded inference, intended Pi workload and retirement
 checks with those exact assets before describing the profile as tested.

@@ -162,20 +162,23 @@ class HemConfigTest(unittest.TestCase):
         output = self.root / 'export.json'
         stderr = io.StringIO()
         resolved = self.resolve()
-        with patch.object(config,'catalog_for_model',return_value=resolved.catalog), \
+        with patch.object(config,'deployment_document',wraps=config.deployment_document) as document, \
              patch.object(config,'select_pipeline',wraps=config.select_pipeline) as validation, \
              redirect_stderr(stderr):
             result = config.export_deployment(self.models['qwen-08b'], output,'chat-small')
         self.assertTrue(result['completed'])
         validation.assert_called_once()
+        document.assert_called_once()
         self.assertEqual(json.loads(output.read_text()), config.deployment_document(resolved,'chat-small',catalog=resolved.catalog))
         self.assertIn('does not reserve',stderr.getvalue())
         self.assertIn('compatible server',stderr.getvalue())
         self.assertIn('entire raw-curl',stderr.getvalue())
         self.assertFalse(list(self.root.glob('*.sqlite3')))
-        with patch.object(config,'catalog_for_model') as catalog, self.assertRaises(InvalidInput):
+        original = output.read_bytes()
+        with patch.object(config.tempfile, 'NamedTemporaryFile') as staging, self.assertRaises(InvalidInput):
             config.export_deployment(self.models['qwen-08b'],output,'../bad')
-        catalog.assert_not_called()
+        staging.assert_not_called()
+        self.assertEqual(output.read_bytes(), original)
 
     def test_pipeline_cli_exposes_profiles_capabilities_and_defaults(self):
         for argv in (['pipeline','list','--json'],['pipeline','show','qwen-08b','--json']):

@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import tempfile
 from typing import Protocol, Optional
 import sys
@@ -57,9 +56,71 @@ def resolve_catalog(pipeline: str) -> Path:
         if candidate.is_dir():
             return candidate.resolve()
     raise FileNotFoundError(
-        f"No source catalog is installed for pipeline {pipeline!r}; searched: "
+        f"No pipeline catalog is installed for pipeline {pipeline!r}; searched: "
         + ", ".join(str(path) for path in candidates)
     )
+
+
+@dataclass(frozen=True)
+class CatalogModules:
+    """Validated role/provider selection shared by native deployment builders."""
+
+    prepare: str
+    control: str
+    weights: str
+    providers: tuple[str, ...]
+
+
+def catalog_modules(catalog: Path) -> CatalogModules:
+    """Resolve a checked installed singleton or an authored source catalog."""
+    catalog = Path(catalog).resolve()
+    descriptor = catalog / "pipeline.json"
+    if descriptor.exists():
+        metadata = json.loads(descriptor.read_text(encoding="utf-8"))
+        profile = load_profile(catalog)
+        if (not isinstance(metadata, dict)
+                or set(metadata) != {"format", "variant", "module", "sha256"}
+                or metadata["format"] != 1
+                or metadata["variant"] != profile["identifier"]
+                or metadata["module"] != "pipeline.loombc"):
+            raise ValueError("Invalid singleton pipeline descriptor or compatibility variant")
+        module = catalog / metadata["module"]
+        module.resolve(strict=True).relative_to(catalog)
+        content = module.read_bytes()
+        if (not content.startswith(b"LOOM")
+                or hashlib.sha256(content).hexdigest() != metadata["sha256"]):
+            raise ValueError(f"Invalid Loom bytecode module or hash: {module}")
+        executable = {p.relative_to(catalog).as_posix() for p in catalog.rglob("*")
+                      if p.suffix in (".loom", ".loombc")}
+        if executable != {"pipeline.loombc"}:
+            raise ValueError("Singleton catalog contains unexpected executable modules")
+        return CatalogModules("pipeline.loombc", "pipeline.loombc", "pipeline.loombc", ("pipeline.loombc",))
+    root = catalog.parents[1]
+    entries = [line.strip() for line in (catalog / "sources.txt").read_text(encoding="utf-8").splitlines()
+               if line.strip() and not line.strip().startswith("#")]
+    roles = {name: [] for name in ("prepare", "control", "weights")}
+    identities = set()
+    providers = []
+    for entry in entries:
+        path = Path(entry)
+        if path.is_absolute() or path.suffix != ".loom":
+            raise ValueError(f"Unsupported pipeline module: {entry}")
+        module = catalog / path
+        identity = os.path.normpath(str(module))
+        if identity in identities:
+            raise ValueError(f"Duplicate pipeline module: {entry}")
+        identities.add(identity)
+        module.resolve(strict=True).relative_to(root)
+        if not module.is_file():
+            raise ValueError(f"Pipeline module is not a file: {module}")
+        if path.stem in roles:
+            roles[path.stem].append(entry)
+        else:
+            providers.append(entry)
+    for name, matches in roles.items():
+        if len(matches) != 1:
+            raise ValueError(f"Pipeline catalog must contain exactly one {name} module")
+    return CatalogModules(*(roles[name][0] for name in roles), tuple(providers))
 
 
 def mtp_enabled(catalog: Path, requested: bool | None = None) -> bool:
@@ -86,20 +147,6 @@ def register_pipeline(pipeline: Pipeline) -> None:
 def available_pipelines() -> tuple[str, ...]:
     """Return the registered pipeline identifiers in stable order."""
     return tuple(sorted(_PIPELINES))
-
-
-def catalog_for_model(pipeline: str, catalog: Path, model_id: str) -> Path:
-    """Return a serving catalog configured for this installed model ID.
-
-    Pipeline adapters may customize their source catalog when the server's
-    endpoint identity is encoded in its source files. Adapters without this
-    capability keep using their shared catalog unchanged.
-    """
-    implementation = _PIPELINES.get(pipeline)
-    configure = getattr(implementation, "catalog_for_model", None)
-    if configure is None:
-        return catalog
-    return configure(catalog, model_id)
 
 
 def validate_model(
@@ -143,51 +190,6 @@ class _QwenPipeline:
     def __init__(self, identifier: str = "qwen"):
         self.identifier = identifier
 
-    def catalog_for_model(self, catalog: Path, model_id: str) -> Path:
-        """Make the Qwen HTTP model name match the installed model ID."""
-        catalog = Path(catalog).resolve()
-        source_root = catalog.parents[1]
-        catalog_relative = catalog.relative_to(source_root)
-        control = catalog / "control.loom"
-        if not control.is_file():
-            raise FileNotFoundError(f"Qwen pipeline control source is missing: {control}")
-
-        digest = hashlib.sha256()
-        for source in sorted(path for path in source_root.rglob("*") if path.is_file()):
-            digest.update(source.relative_to(source_root).as_posix().encode("utf-8"))
-            digest.update(source.read_bytes())
-        fingerprint = digest.hexdigest()[:16]
-
-        cache_root = runtime_cache_dir() / "catalogs" / self.identifier
-        output = cache_root / f"{model_id}-{fingerprint}"
-        configured_control = output / catalog_relative / "control.loom"
-        if configured_control.is_file():
-            return output / catalog_relative
-
-        cache_root.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix=f".{model_id}-", dir=cache_root))
-        try:
-            staging_catalog = staging / "llm"
-            shutil.copytree(source_root, staging_catalog)
-            configured_control = staging_catalog / catalog_relative / "control.loom"
-            source_text = configured_control.read_text(encoding="utf-8")
-            marker = 'global.rodata.def @chat_model_name = bytes('
-            lines = source_text.splitlines()
-            matching = [index for index, line in enumerate(lines) if line.startswith(marker)]
-            if len(matching) != 1:
-                raise ValueError(
-                    "Qwen catalog must define exactly one @chat_model_name byte string"
-                )
-            lines[matching[0]] = (
-                f'global.rodata.def @chat_model_name = bytes("{model_id.encode("utf-8").hex()}")'
-            )
-            configured_control.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            output.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staging_catalog, output)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
-        return output / catalog_relative
-
     def validate(self, model: ModelFiles, *, tokenizer_data: Optional[dict] = None) -> ValidationResult:
         try:
             profile = load_profile(resolve_catalog(self.identifier))
@@ -227,12 +229,10 @@ def deployment_for_model(
     mtp_enabled(catalog, draft_depth > 0)
     if pool_capacity <= 0:
         raise ValueError("The pinned Loom Serve runtime requires positive --pool-capacity")
-    sources = [line.strip() for line in (catalog / "sources.txt").read_text().splitlines()
-               if line.strip() and not line.strip().startswith("#")]
+    modules = catalog_modules(catalog)
     definition = {
-        "kind": "text", "prepare": "prepare.loom", "control": "control.loom",
-        "sources": [entry for entry in sources
-                    if entry not in {"prepare.loom", "control.loom", "weights.loom"}],
+        "kind": "text", "prepare": modules.prepare, "control": modules.control,
+        "sources": list(modules.providers),
         # Preserve parser-selecting extensions on symlinked model assets.
         "weights": str(model.weights.absolute()),
         "tokenizer": str(model.tokenizer.absolute()),

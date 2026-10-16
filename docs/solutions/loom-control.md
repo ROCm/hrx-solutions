@@ -332,10 +332,13 @@ curl --fail-with-body -sS http://127.0.0.1:8080/v1/models/unregister \
 Use a fresh instance name if the earlier example is still registered. These
 are separate steps with status inspection between them, not an unattended
 startup script. Export accepts a model ID, start's configuration flags and
-`--name`; it needs no server and performs validation without registration.
+`--name`; it needs no server and performs validation without registration or
+invoking a native linker/compiler. Installed-wheel exports reference the packaged
+`pipeline.loombc` directly for preparation, control and providers. Its embedded weight policy uses that same module. The exported `name` controls HTTP routing and response
+identity independently of the catalog’s internal policy name.
 
 **You own export dependencies and compatibility.** Preserve the referenced
-weights, tokenizer and pipeline sources for the entire native registration
+weights, tokenizer and pipeline bytecode for the entire native registration
 lifetime, and use a compatible server. Export reserves nothing and records no
 history. Paths are server-local; posting JSON does not transfer files. Package
 upgrades or external file changes can invalidate paths: revalidate/regenerate

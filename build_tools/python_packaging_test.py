@@ -2,12 +2,14 @@
 
 from pathlib import Path
 import os
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
 
 from build_tools import python_packaging as packaging
+from build_tools import loom_catalog
 from build_tools.validate_wheel import HEM_MODULES, OBSOLETE_MODULES, OBSOLETE_ENTRY_POINTS, REQUIRED_ENTRY_POINTS, validate_wheel
 from build_tools.versioning import read_package_version
 
@@ -17,8 +19,10 @@ class PackagingTest(unittest.TestCase):
         temporary=tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root=Path(temporary.name)
+        self.decode = patch.object(loom_catalog, 'validate_bytecode_artifact').start()
+        self.addCleanup(patch.stopall)
 
-    def test_build_targets_only_server(self):
+    def test_build_includes_catalog_but_native_mapping_only_contains_server(self):
         hrx=self.root/'hrx'
         hrx.mkdir()
         (hrx/'.bazelversion').write_text('8.3.1')
@@ -27,7 +31,8 @@ class PackagingTest(unittest.TestCase):
         self.assertEqual(set(outputs),{'loom-serve'})
         self.assertEqual(packaging.BAZEL_TARGETS,{'loom-serve':'//:loom-serve'})
         self.assertEqual(query.call_count,1)
-        self.assertEqual(run.call_args.args[0][-1],packaging.BAZEL_TARGETS['loom-serve'])
+        self.assertIn(packaging.BAZEL_TARGETS['loom-serve'],run.call_args.args[0])
+        self.assertEqual(run.call_args.args[0][-1],loom_catalog.CATALOG_TARGET)
         self.assertNotIn('epoch_check',' '.join(run.call_args.args[0]))
 
     def test_explicit_cache_disable_overrides_stale_rc_for_build_and_query(self):
@@ -70,7 +75,14 @@ class PackagingTest(unittest.TestCase):
 
     def wheel(self, *, obsolete=False, missing=None):
         package=self.root/'staged'
-        catalog=packaging.stage_loom_source_catalog(package)
+        inventory = packaging.REPO_ROOT / 'loom-pipeline/catalog_sources.bzl'
+        products = {}
+        for architecture, variant in loom_catalog.variants(inventory).items():
+            product = self.root / 'outputs' / variant['output']
+            product.parent.mkdir(parents=True, exist_ok=True)
+            product.write_bytes(b'LOOMfixture')
+            products[architecture] = product
+        catalog=loom_catalog.stage_bytecode_catalog(package / 'loom-pipeline/llm', products, inventory, decoder=Path("fixture-decoder"))
         members={
             'hrx_solutions/_native/bin/loom-serve':b'server',
             'hrx_solutions/_native/share/loom-serve/LICENSE':b'license',
@@ -98,15 +110,61 @@ class PackagingTest(unittest.TestCase):
         libraries,size=validate_wheel(self.wheel())
         self.assertEqual(libraries,2)
         self.assertGreater(size,0)
+        with zipfile.ZipFile(self.root/'fixture.whl') as archive:
+            catalog = [name for name in archive.namelist() if name.startswith('hrx_solutions/loom-pipeline/llm/')]
+            self.assertEqual(len(catalog), 8)
+            self.assertEqual(sum(name.endswith('.loombc') for name in catalog), 2)
+            self.assertFalse(any(name.endswith('sources.txt') for name in catalog))
         with self.assertRaisesRegex(RuntimeError,'missing setup assets.*compatibility.json'):
             validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/qwen_27b/compatibility.json'))
         with self.assertRaisesRegex(RuntimeError,'missing setup assets.*gguf.py'):
             validate_wheel(self.wheel(missing='hrx_solutions/gguf.py'))
 
     def test_wheel_requires_both_architecture_catalogs(self):
-        for filename in ('sources.txt', 'config.loom', 'prepare.loom', 'control.loom', 'weights.loom', 'compatibility.json'):
+        for filename in ('pipeline.loombc', 'pipeline.json', 'compatibility.json'):
             with self.subTest(filename=filename), self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
                 validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/qwen_08b/'+filename))
+
+    def test_wheel_rejects_source_fallback_corruption_and_metadata_drift(self):
+        mutations = ('source', 'bytecode', 'extra', 'descriptor', 'profile',
+                     'variant', 'source_hash', 'source_inventory', 'bytecode_hash', 'format')
+        for mutation in mutations:
+            wheel = self.wheel()
+            with zipfile.ZipFile(wheel) as archive:
+                members = {name: archive.read(name) for name in archive.namelist()}
+            prefix = 'hrx_solutions/loom-pipeline/llm/'
+            local = prefix + 'qwen/qwen_08b/'
+            if mutation == 'source':
+                members[local+'control.loom'] = b'hidden source fallback'
+            elif mutation == 'bytecode':
+                members[local+'pipeline.loombc'] = b'LOOMstale'
+            elif mutation == 'extra':
+                members[local+'weights.loombc'] = b'LOOMauxiliary'
+            elif mutation in ('descriptor', 'profile'):
+                name = local + ('pipeline.json' if mutation == 'descriptor' else 'compatibility.json')
+                data = json.loads(members[name])
+                data['variant' if mutation == 'descriptor' else 'identifier'] = 'wrong'
+                members[name] = json.dumps(data).encode()
+            else:
+                name = prefix + 'catalog-build.json'
+                data = json.loads(members[name])
+                variant = data['variants']['qwen_08b']
+                if mutation == 'variant':
+                    variant['identifier'] = 'wrong'
+                elif mutation == 'source_hash':
+                    variant['sources'][next(iter(variant['sources']))] = '0'*64
+                elif mutation == 'source_inventory':
+                    del variant['sources'][next(iter(variant['sources']))]
+                elif mutation == 'bytecode_hash':
+                    variant['bytecode_sha256'] = '0'*64
+                else:
+                    data['format'] = 1
+                members[name] = json.dumps(data).encode()
+            with zipfile.ZipFile(wheel, 'w') as archive:
+                for name, data in members.items():
+                    archive.writestr(name, data)
+            with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
+                validate_wheel(wheel)
 
     def test_wheel_requires_every_hem_component_and_entrypoint(self):
         for module in HEM_MODULES:

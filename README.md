@@ -31,8 +31,8 @@ decoding, and streaming chat together through explicit ownership boundaries:
   transport, physical storage, and execution services. Requests share weights,
   compiled commands, and execution infrastructure while retaining independent
   state.
-* **Deployment specialization.** The server loads a source catalog and compiles
-  for the device and configured capacities. Model-policy changes within the
+* **Deployment specialization.** The server loads the packaged bytecode catalog and
+  compiles for the device and configured capacities. Model-policy changes within the
   existing execution contract can reuse the native server executable.
 
 The [pipeline guidebook](loom-pipeline/llm/README.md) follows these boundaries
@@ -200,9 +200,10 @@ its exact filename. The setup command checks the Bazel version from
 `.bazelrc.configured`. Handwritten `.bazelrc.local` settings are loaded last.
 Its `--help` includes commands to install the pinned Bazelisk.
 
-The wheel build invokes `//:loom-serve` from this Bazel root and stages the
-executable, HRX license, redistributable ROCm libraries, solution helpers,
-and this repository’s Qwen source catalog. To use a sibling
+The wheel build invokes Bazel for `//:loom-serve` and the Qwen bytecode catalog
+from this root. It stages the executable, HRX license, redistributable ROCm libraries,
+solution helpers, and exactly two complete `pipeline.loombc` modules, one per supported model specification. Authored `.loom` files remain
+in the repository; the wheel ships bytecode instead. To use a sibling
 checkout for wheel builds, add an absolute override to `.bazelrc.local`:
 
 ```bash

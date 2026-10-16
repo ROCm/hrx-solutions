@@ -3,6 +3,7 @@
 Synthetic payloads prove orchestration, never model/GPU compatibility. The small
 process fixture additionally exercises real pin/accepted-socket ownership hooks.
 """
+from dataclasses import replace
 from contextlib import contextmanager, redirect_stderr
 import io
 import json
@@ -62,15 +63,9 @@ class LifecycleTest(unittest.TestCase):
         gguf.write_bytes(b'fixture')
         tokenizer.write_text('{}')
         hem_models.import_model(self.registry, 'tiny', ggufs=[gguf], tokenizer=tokenizer)
-        self.build = patch.object(hem_process, 'require_build', return_value=self.processes.package_root / 'loom-pipeline')
+        self.build = patch.object(hem_process, 'require_build', side_effect=lambda server, package, deadline: Path(server['build']['directory']) / 'loom-pipeline')
         self.build.start()
         self.addCleanup(self.build.stop)
-        # Keep named configuration fixture output under this validation's private
-        # retained tree instead of normal runtime cache. Production configurer is
-        # verified by the real source copy/name rewrite in a dedicated test.
-        self.configure = patch.object(hem_instances, 'catalog_for_model', side_effect=lambda pipeline, catalog, name: catalog)
-        self.configure.start()
-        self.addCleanup(self.configure.stop)
         self.items = []
         self.calls = []
         self.mode = None
@@ -120,6 +115,7 @@ class LifecycleTest(unittest.TestCase):
         row = self.registry.reserve_launch('server', launch_token='launch', current_settings={}, endpoint=endpoint)
         directory = self.root / 'state/servers/server/launch'
         directory.mkdir(parents=True)
+        shutil.copytree(self.processes.package_root / 'loom-pipeline', directory / 'loom-pipeline')
         return self.registry.update_server('server', {'phase': 'running', 'pending': None,
                     'build': {'directory': str(directory)}},
                     expected_token='launch', expected_revision=row['revision'])
@@ -147,7 +143,7 @@ class LifecycleTest(unittest.TestCase):
             self.assertEqual(row['incarnation'], 17)
             document = json.loads(Path(row['document']).read_text())
             self.assertTrue(Path(document['base_directory']).is_relative_to(Path(server['build']['directory'])))
-            self.assertTrue((Path(document['base_directory']) / 'control.loom').is_file())
+            self.assertTrue((Path(document['base_directory']) / hem_config.catalog_modules(Path(document['base_directory'])).control).is_file())
             self.assertEqual(self.registry.references('tiny'), [row])
             stopped = self.manager.stop(server, 'chat', Deadline.after())
             self.assertTrue(stopped['completed'])
@@ -244,6 +240,80 @@ class LifecycleTest(unittest.TestCase):
             with self.assertRaisesRegex(HemError, 'already tracked'):
                 self.start(server)
             self.assertEqual(len(self.mutations()), count)
+
+    def test_shared_catalog_aliases_and_legacy_paths_survive_retirement(self):
+        items = {}
+        def respond(handler, requests):
+            method, path, body, _ = requests[-1]
+            if method == 'GET':
+                reply(handler, inventory(*items.values()))
+                return
+            payload = json.loads(body)
+            name = payload.get('name', payload.get('model'))
+            if path.endswith('/register'):
+                items[name] = dict(model(len(items) + 20), id=name)
+            elif path.endswith('/activate'):
+                items[name]['loom']['parameters']['active'] = True
+            elif path.endswith('/undrain'):
+                items[name]['loom']['status']['admission'] = 'open'
+            elif path.endswith('/unregister'):
+                del items[name]
+            reply(handler, {'accepted': True}, 202)
+        with fixture(respond) as (endpoint, _):
+            server = self.server(endpoint)
+            for name in ('one', 'two'):
+                self.manager.start(server, 'tiny', Deadline.after(), name=name)
+            rows = self.registry.list_instances()
+            documents = [json.loads(Path(row['document']).read_text()) for row in rows]
+            shared = Path(documents[0]['base_directory'])
+            self.assertEqual(documents[1]['base_directory'], str(shared))
+            self.assertTrue(all(str(shared) in row['dependencies'] for row in rows))
+            self.assertFalse(list((Path(server['build']['directory']) / 'instances').glob('*/sources-*')))
+            self.assertNotEqual(rows[0]['document'], rows[1]['document'])
+            # Persisted legacy catalogs and role locators remain valid until
+            # explicit retirement; there is no filesystem migration/sweep.
+            legacy = Path(server['build']['directory']) / 'instances/legacy/sources-old'
+            shutil.copytree(shared, legacy)
+            document = dict(documents[0], name='legacy', base_directory=str(legacy))
+            path = self.manager._document(server, 'legacy', 'register', document)
+            self.registry.create_instance(server['id'], server['launch_token'], 'legacy',
+                model_id='tiny', settings=rows[0]['settings'], document=str(path),
+                dependencies=[str(legacy) if item == str(shared) else item for item in rows[0]['dependencies']],
+                incarnation=33, pending=None)
+            items['legacy'] = dict(model(33), id='legacy')
+            self.manager.stop(server, 'legacy', Deadline.after())
+            self.manager.stop(server, 'one', Deadline.after())
+            self.assertTrue(legacy.is_dir())
+            self.assertTrue(shared.is_dir())
+            self.assertEqual(list(items), ['two'])
+            self.assertEqual([row['name'] for row in self.registry.list_instances()], ['two'])
+            self.manager.stop(server, 'two', Deadline.after())
+            self.assertTrue(shared.is_dir())
+
+    def test_catalog_mapping_rejects_missing_or_escaping_paths_before_registration(self):
+        with fixture(self.respond) as (endpoint, _):
+            server = self.server(endpoint)
+            resolved = hem_config.resolve(hem_models.model_files(self.registry, 'tiny'))
+            retained_root = Path(server['build']['directory']) / 'loom-pipeline'
+            retained = retained_root / resolved.catalog.relative_to(self.processes.package_root / 'loom-pipeline')
+            original = retained.with_name('saved-catalog')
+            retained.rename(original)
+            cases = [replace(resolved, catalog=self.root), resolved]
+            for candidate in cases:
+                with self.subTest(catalog=candidate.catalog), patch.object(hem_config, 'resolve', return_value=candidate):
+                    with self.assertRaisesRegex(HemError, 'matching package catalog'):
+                        self.start(server)
+            retained.symlink_to(self.root)
+            with self.assertRaisesRegex(HemError, 'matching package catalog'):
+                self.start(server)
+            escaped = self.root / 'catalog-link'
+            escaped.symlink_to(self.root)
+            with patch.object(hem_config, 'resolve', return_value=replace(resolved, catalog=escaped)):
+                with self.assertRaisesRegex(HemError, 'matching package catalog'):
+                    self.start(server)
+            self.assertEqual(self.registry.list_instances(), [])
+            self.assertEqual(self.mutations(), [])
+            self.assertFalse(list(self.registry.root.rglob('register-*.json')))
 
     def test_activation_failure_never_undrains_retains_dependencies(self):
         self.mode = 'activation-error'
@@ -563,7 +633,7 @@ class OwnedProcessLifecycleTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.compiled.cleanup()
 
-    def test_owned_process_registration_and_retirement_with_retained_named_sources(self):
+    def test_owned_process_registration_and_retirement_from_shared_snapshot(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             package = root / 'package'
@@ -597,12 +667,22 @@ class OwnedProcessLifecycleTest(unittest.TestCase):
                 row = registry.get_instance('fixture', server['launch_token'], 'chat')
                 deployment = json.loads(Path(row['document']).read_text())
                 retained = Path(deployment['base_directory'])
-                self.assertIn('bytes("63686174")', (retained / 'control.loom').read_text())
-                self.assertTrue(retained.is_relative_to(Path(server['build']['directory'])))
+                modules = hem_config.catalog_modules(retained)
+                self.assertEqual((retained / modules.control).read_bytes(), (source_catalog / modules.control).read_bytes())
+                self.assertEqual(retained, Path(server['build']['directory']) / 'loom-pipeline' / source_catalog.relative_to(source_catalog.parents[2]))
+                self.assertFalse(list((Path(server['build']['directory']) / 'instances').glob('*/sources-*')))
+                self.assertIn(str(retained), row['dependencies'])
                 # Removing the package cannot invalidate the retained sources or
                 # prevent safe stop of the already observed original incarnation.
                 shutil.rmtree(package)
-                self.assertTrue((retained / 'prepare.loom').is_file())
+                self.assertTrue((retained / modules.prepare).is_file())
+                with patch.object(hem_config, 'select_pipeline', return_value='qwen-08b'), \
+                     patch.object(hem_config, 'pipeline_info', side_effect=info):
+                    with self.assertRaises(HemError):
+                        manager.start(server, 'tiny', Deadline.after(3), name='new-alias')
+                self.assertEqual(len(registry.list_instances()), 1)
+                with self.assertRaisesRegex(HemError, 'live or unresolved'):
+                    processes.cleanup(server, Deadline.after(2))
                 stopped = manager.stop(server, 'chat', Deadline.after(3))
                 self.assertTrue(stopped['completed'])
                 self.assertEqual(registry.list_instances(), [])

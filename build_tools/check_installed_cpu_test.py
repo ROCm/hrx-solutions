@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -75,6 +76,54 @@ class InstalledPayloadTest(unittest.TestCase):
             module.__file__ = str(source / 'fixture.py')
             with self.assertRaisesRegex(AssertionError, 'import escaped installed package'):
                 gate.source_parity(self.root / 'source', self.package)
+
+    def test_generated_catalog_parity_rejects_stale_sources_or_modified_bytecode(self):
+        from build_tools import loom_catalog
+        from binding.python.pipeline_validation import catalog_modules
+        repository = Path(__file__).resolve().parents[1]
+        source_root = self.root / 'catalog-source'
+        shutil.copytree(repository / 'loom-pipeline', source_root / 'loom-pipeline', symlinks=True)
+        inventory = source_root / 'loom-pipeline/catalog_sources.bzl'
+        products = {}
+        for architecture, variant in loom_catalog.variants(inventory).items():
+            output = self.root / 'bc' / variant['output']
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b'LOOMfixture')
+            products[architecture] = output
+        with patch.object(loom_catalog, 'validate_bytecode_artifact'):
+            loom_catalog.stage_bytecode_catalog(self.package / 'loom-pipeline/llm', products, inventory, decoder=Path('fixture-decoder'))
+        (self.package / 'loom-pipeline/qwen/control.loom').unlink()
+        adapter = types.ModuleType('hrx_solutions.pipeline_validation')
+        adapter.catalog_modules = catalog_modules
+        with patch.dict(sys.modules, {adapter.__name__:adapter}):
+            self.assertIn('loom-pipeline/llm/qwen/qwen_08b/prepare.loom', gate.source_parity(source_root,self.package))
+            source = source_root / 'loom-pipeline/llm/qwen/qwen_08b/prepare.loom'
+            original = source.read_bytes()
+            source.write_bytes(original+b'\n// current source changed')
+            with self.assertRaisesRegex(AssertionError,'stale installed catalog input'):
+                gate.source_parity(source_root,self.package)
+            source.write_bytes(original)
+            output = self.package / 'loom-pipeline/llm/qwen/qwen_08b/pipeline.loombc'
+            output.write_bytes(b'LOOMchanged')
+            with self.assertRaisesRegex(AssertionError,'installed bytecode mismatch'):
+                gate.source_parity(source_root,self.package)
+            output.write_bytes(b'LOOMfixture')
+            local = output.parent
+            mutations = (
+                ('pipeline.json', 'installed pipeline descriptor mismatch'),
+                ('compatibility.json', 'installed compatibility profile mismatch'),
+                ('weights.loombc', 'unexpected executable modules'),
+            )
+            for filename, error in mutations:
+                target = local / filename
+                original = target.read_bytes() if target.exists() else None
+                target.write_bytes(b'{}' if filename.endswith('.json') else b'LOOMextra')
+                with self.subTest(filename=filename), self.assertRaisesRegex((AssertionError, ValueError), error):
+                    gate.source_parity(source_root, self.package)
+                if original is None:
+                    target.unlink()
+                else:
+                    target.write_bytes(original)
 
 
 class RunnerFailureTest(unittest.TestCase):

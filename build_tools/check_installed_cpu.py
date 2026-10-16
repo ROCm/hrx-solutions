@@ -25,7 +25,7 @@ import zipfile
 HELPERS = ('gguf_fixtures', 'hem_http_test', 'hem_process_test', 'hem_instances_test')
 CONTRACTS = ('hem_process_test', 'hem_model_cli_test', 'hem_server_cli_test',
              'hem_instance_cli_test', 'hem_shutdown_test', 'hem_help_test',
-             'hem_render_test', 'hem_contracts_test', 'hem_config_test')
+             'hem_render_test', 'hem_contracts_test', 'hem_config_test', 'pipeline_catalog_test', 'hem_instances_test')
 
 
 def digest(path):
@@ -66,11 +66,48 @@ def source_parity(source_root, package):
         assert installed == (package / source.name).resolve(), f'import escaped installed package: {module}'
         assert source.read_bytes() == installed.read_bytes(), f'stale installed module: {source}'
         checked[str(source.relative_to(source_root))] = digest(source)
-    for source in sorted((source_root / 'loom-pipeline').rglob('*')):
-        if source.is_file():
-            installed = package / source.relative_to(source_root)
-            assert source.read_bytes() == installed.read_bytes(), f'stale installed catalog: {source}'
-            checked[str(source.relative_to(source_root))] = digest(source)
+    authored_root = source_root / 'loom-pipeline/llm'
+    if authored_root.is_dir():
+        from hrx_solutions.pipeline_validation import catalog_modules
+        installed_root = package / 'loom-pipeline/llm'
+        build = json.loads((installed_root / 'catalog-build.json').read_text())
+        assert build.get('format') == 2, 'unsupported catalog build metadata'
+        architectures = {'qwen_27b', 'qwen_08b'}
+        assert set(build.get('variants', {})) == architectures, 'catalog build inventory mismatch'
+        allowed = {'catalog-build.json', 'LICENSE-APACHE-2.0'}
+        for architecture in sorted(architectures):
+            relative = Path('qwen') / architecture
+            authored_manifest = authored_root / relative / 'sources.txt'
+            entries = [line.strip() for line in authored_manifest.read_text().splitlines()
+                       if line.strip() and not line.strip().startswith('#')]
+            expected = {os.path.normpath((relative / entry).as_posix()) for entry in entries}
+            assert all(not p.startswith(('../', '/')) for p in expected), 'authored catalog path escapes root'
+            variant = build['variants'][architecture]
+            assert set(variant) == {'identifier', 'sources', 'bytecode_sha256'}, 'catalog variant metadata mismatch'
+            assert set(variant.get('sources', {})) == expected, 'catalog source inventory mismatch'
+            for identity in sorted(expected):
+                authored = authored_root / identity
+                authored.resolve(strict=True).relative_to(authored_root.resolve())
+                assert digest(authored) == variant['sources'][identity], f'stale installed catalog input: {identity}'
+                checked['loom-pipeline/llm/' + identity] = variant['sources'][identity]
+            profile = relative / 'compatibility.json'
+            assert (authored_root / profile).read_bytes() == (installed_root / profile).read_bytes(), 'installed compatibility profile mismatch'
+            identifier = json.loads((authored_root / profile).read_text())['identifier']
+            assert variant['identifier'] == identifier, 'installed variant mismatch'
+            artifact = installed_root / relative / 'pipeline.loombc'
+            assert artifact.read_bytes().startswith(b'LOOM') and digest(artifact) == variant['bytecode_sha256'], f'installed bytecode mismatch: {architecture}'
+            descriptor = relative / 'pipeline.json'
+            assert json.loads((installed_root / descriptor).read_text()) == {
+                'format': 1, 'variant': identifier, 'module': 'pipeline.loombc',
+                'sha256': variant['bytecode_sha256']}, 'installed pipeline descriptor mismatch'
+            modules = catalog_modules(installed_root / relative)
+            assert (modules.prepare, modules.control, modules.weights, modules.providers) == (
+                'pipeline.loombc', 'pipeline.loombc', 'pipeline.loombc', ('pipeline.loombc',)), 'installed pipeline roles mismatch'
+            allowed.update({(relative / 'pipeline.loombc').as_posix(), profile.as_posix(), descriptor.as_posix()})
+        actual = {p.relative_to(installed_root).as_posix() for p in installed_root.rglob('*') if p.is_file()}
+        assert actual == allowed, 'installed catalog file inventory mismatch'
+        assert not list(package.rglob('*.loom')), 'installed wheel contains executable sources'
+        assert (authored_root / 'LICENSE-APACHE-2.0').read_bytes() == (installed_root / 'LICENSE-APACHE-2.0').read_bytes()
     assert checked, 'no source files checked'
     return checked
 

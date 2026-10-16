@@ -308,7 +308,7 @@ def instance(args, data, width):
     return [f'Deployment exported for instance {name}.', details([
         ('Output', data.get('output')), ('Model', data.get('model')), ('Pipeline', data.get('pipeline'))]),
         settings(data.get('settings') or {}, width),
-        'Preserve the referenced weights, tokenizer and pipeline sources through retirement.',
+        'Preserve the referenced weights, tokenizer and pipeline modules through retirement.',
         'Registration curl is printed on stderr. Replace SERVER:PORT with a compatible server endpoint.']
 
 

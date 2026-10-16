@@ -17,7 +17,7 @@ from typing import Mapping, Optional
 from .gguf import inspect_gguf_set
 from .hem_common import HemError, InvalidInput
 from .model_store import ModelFiles
-from .pipeline_validation import available_pipelines, catalog_for_model, resolve_catalog
+from .pipeline_validation import available_pipelines, catalog_modules, resolve_catalog
 from .qwen_validation import compare_gguf, compare_tokenizer, load_profile
 
 # Bounds in pinned configuration.c and Qwen prepare.loom, not memory-fit promises.
@@ -34,7 +34,7 @@ LIMITS = {key: metadata[1] for key, metadata in SETTINGS.items()}
 DEFAULTS = {key: metadata[0] for key, metadata in SETTINGS.items() if key != "mtp_depth"}
 EXPORT_RESPONSIBILITY = (
     "Export does not reserve dependencies or validate a running server. You must "
-    "preserve the referenced weights, tokenizer and pipeline source files, and use "
+    "preserve the referenced weights, tokenizer and pipeline modules, and use "
     "a compatible server for the entire raw-curl registration lifetime. Package "
     "upgrades or external file changes may invalidate paths; revalidate/regenerate "
     "before use."
@@ -179,9 +179,9 @@ def resolve(model: ModelFiles, overrides: Optional[Mapping] = None,
 
 def deployment_document(resolved: ResolvedConfiguration, name: str, *,
                         catalog: Path, device: int = 0) -> dict:
-    """Create the native drained document using a retained, named source bundle.
+    """Create the native drained document using an immutable retained catalog.
 
-    The caller must supply the source catalog configured for `name`, retaining
+    The caller supplies a catalog independent of the deployment name, retaining
     its complete source closure and all `resolved.dependencies` through retirement.
     Offline exports instead leave those lifetime obligations with the operator.
     Paths remain server-local, including an index's referenced GGUF fragments.
@@ -192,12 +192,11 @@ def deployment_document(resolved: ResolvedConfiguration, name: str, *,
         raise InvalidInput("Device group index must be a nonnegative integer")
     catalog = Path(catalog).absolute()
     try:
-        sources = [line.strip() for line in (catalog / "sources.txt").read_text(encoding="utf-8").splitlines()
-                   if line.strip() and not line.strip().startswith("#")]
-    except (OSError, UnicodeError) as exc:
-        raise InvalidInput(f"Cannot read pipeline source list: {exc}") from exc
-    definition = {"kind": "text", "prepare": "prepare.loom", "control": "control.loom",
-                  "sources": [entry for entry in sources if entry not in {"prepare.loom", "control.loom", "weights.loom"}],
+        modules = catalog_modules(catalog)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise InvalidInput(f"Cannot resolve pipeline modules: {exc}") from exc
+    definition = {"kind": "text", "prepare": modules.prepare, "control": modules.control,
+                  "sources": list(modules.providers),
                   "weights": str(resolved.model.weights.absolute()),
                   "tokenizer": str(resolved.model.tokenizer.absolute()),
                   **{key: resolved.settings[key] for key in DEFAULTS},
@@ -212,10 +211,7 @@ def export_deployment(model: ModelFiles, output: Path, name: str, *,
     """Validate and atomically export, without registry access or native calls."""
     resolved = resolve(model, overrides, config_path, pipeline=pipeline)
     try:
-        # Validate name/device/source input before any named catalog cache write.
-        deployment_document(resolved, name, catalog=resolved.catalog)
-        catalog = catalog_for_model(resolved.pipeline, resolved.catalog, name)
-        document = deployment_document(resolved, name, catalog=catalog)
+        document = deployment_document(resolved, name, catalog=resolved.catalog)
         output = Path(output).absolute()
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent,
                                          prefix=f".{output.name}.", delete=False) as stream:

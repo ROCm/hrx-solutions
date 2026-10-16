@@ -14,8 +14,10 @@ from typing import Callable, Optional
 
 try:
     from .versioning import read_package_version
+    from . import loom_catalog
 except ImportError:
     from versioning import read_package_version
+    import loom_catalog
 
 from setuptools import Distribution
 from setuptools.command.bdist_wheel import bdist_wheel
@@ -178,19 +180,25 @@ def _query_bazel_output(
     return output.resolve()
 
 
-def build_native_executables(bazel: Path, rocm_root: Path) -> dict[str, Path]:
-    """Builds the root Bazel targets included in the wheel."""
-    build_options = (
+def wheel_build_options(rocm_root: Path) -> tuple[str, ...]:
+    """Use identical configuration/cache identity for build and all output queries."""
+    options = (
         *BAZEL_BUILD_OPTIONS,
         f"--repo_env=IREE_ROCM_PATH={rocm_root}",
     )
     # An explicit container disable also overrides stale generated rc entries.
     if os.environ.get("HRX_BAZEL_CACHE_ENABLED") == "0":
-        build_options += (
+        options += (
             "--disk_cache=",
             "--action_env=HRX_WHEEL_COMPILER_INPUTS=",
             "--host_action_env=HRX_WHEEL_COMPILER_INPUTS=",
         )
+    return options
+
+
+def build_native_executables(bazel: Path, rocm_root: Path) -> dict[str, Path]:
+    """Builds the root Bazel targets included in the wheel."""
+    build_options = wheel_build_options(rocm_root)
     environment = bazel_environment()
     metrics_options = []
     if metrics_dir := os.environ.get("HRX_BAZEL_METRICS_DIR"):
@@ -201,7 +209,7 @@ def build_native_executables(bazel: Path, rocm_root: Path) -> dict[str, Path]:
             f"--build_event_json_file={metrics_path / 'native-build.events.json'}",
         ]
     subprocess.run(
-        [str(bazel), "build", *build_options, *metrics_options, *BAZEL_TARGETS.values()],
+        [str(bazel), "build", *build_options, *metrics_options, *BAZEL_TARGETS.values(), loom_catalog.DECODER_TARGET, loom_catalog.CATALOG_TARGET],
         cwd=REPO_ROOT,
         check=True,
         env=environment,
@@ -215,32 +223,6 @@ def build_native_executables(bazel: Path, rocm_root: Path) -> dict[str, Path]:
 def _copy_file(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source.resolve(), destination)
-
-
-def stage_loom_source_catalog(package_root: Path) -> list[Path]:
-    """Stages checked-in pipeline sources and validates both Qwen manifests."""
-    repository_catalog = REPO_ROOT / "loom-pipeline" / "llm"
-    packaged_catalog = package_root / "loom-pipeline" / "llm"
-    if packaged_catalog.exists():
-        shutil.rmtree(packaged_catalog)
-    for source in sorted(repository_catalog.rglob("*")):
-        if source.is_file():
-            _copy_file(source, packaged_catalog / source.relative_to(repository_catalog))
-
-    catalog_root = packaged_catalog.resolve()
-    for architecture in ("qwen_27b", "qwen_08b"):
-        manifest = packaged_catalog / "qwen" / architecture / "sources.txt"
-        if not manifest.is_file():
-            raise RuntimeError(f"Checked-in Qwen source manifest is missing: {manifest}")
-        for raw_line in manifest.read_text(encoding="utf-8").splitlines():
-            relative = raw_line.strip()
-            if not relative or relative.startswith("#"):
-                continue
-            source = (manifest.parent / relative).resolve(strict=True)
-            source.relative_to(catalog_root)
-            if not source.is_file():
-                raise RuntimeError(f"Qwen manifest entry is not a file: {relative}")
-    return [path for path in packaged_catalog.rglob("*") if path.is_file()]
 
 
 def _find_llvm_readelf(rocm_root: Path) -> Path:
@@ -407,11 +389,20 @@ class BazelBuildPy(build_py):
         bazel = discover_bazel()
         rocm_root = discover_rocm_root()
         executables = build_native_executables(bazel, rocm_root)
+        bytecodes = loom_catalog.query_bytecode_outputs(
+            bazel, REPO_ROOT, build_options=wheel_build_options(rocm_root),
+            environment=bazel_environment(),
+        )
         package_root = Path(self.build_lib) / "hrx_solutions"
         if package_root.exists():
             shutil.rmtree(package_root)
         super().run()
-        self._catalog_outputs = stage_loom_source_catalog(package_root)
+        self._catalog_outputs = loom_catalog.stage_bytecode_catalog(
+            package_root / "loom-pipeline/llm", bytecodes,
+            REPO_ROOT / "loom-pipeline/catalog_sources.bzl",
+            decoder=loom_catalog.query_decoder(bazel, REPO_ROOT, build_options=wheel_build_options(rocm_root),
+                                               environment=bazel_environment()),
+        )
         native_root = package_root / "_native"
         self._native_outputs = stage_native_payload(
             native_root, executables, rocm_root, discover_hrx_source(bazel)

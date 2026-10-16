@@ -7,6 +7,7 @@ import argparse
 import configparser
 import email.parser
 import hashlib
+import json
 import zipfile
 from collections import defaultdict
 from pathlib import Path
@@ -14,8 +15,10 @@ from pathlib import Path
 
 try:
     from .versioning import read_package_version
+    from . import loom_catalog
 except ImportError:
     from versioning import read_package_version
+    import loom_catalog
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -92,11 +95,6 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         required_files = {
             PACKAGE_PREFIX + "_native/bin/loom-serve",
             PIPELINE_PREFIX + "LICENSE-APACHE-2.0",
-            PIPELINE_PREFIX + "qwen/qwen_27b/sources.txt",
-            PIPELINE_PREFIX + "qwen/qwen_27b/prepare.loom",
-            PIPELINE_PREFIX + "qwen/qwen_27b/control.loom",
-            PIPELINE_PREFIX + "qwen/qwen_27b/weights.loom",
-            PIPELINE_PREFIX + "qwen/qwen_27b/compatibility.json",
             PACKAGE_PREFIX + "gguf.py",
             PACKAGE_PREFIX + "qwen_validation.py",
             PACKAGE_PREFIX + "_native/share/loom-serve/LICENSE",
@@ -111,7 +109,7 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         for architecture in ("qwen_27b", "qwen_08b"):
             required_files.update(
                 PIPELINE_PREFIX + f"qwen/{architecture}/{filename}"
-                for filename in ("sources.txt", "config.loom", "prepare.loom", "control.loom", "weights.loom", "compatibility.json")
+                for filename in ("pipeline.loombc", "pipeline.json", "compatibility.json")
             )
         missing = sorted(required_files - names)
         if missing:
@@ -139,22 +137,46 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             if parser.get("console_scripts", command, fallback=None) != target:
                 raise RuntimeError(f"wheel does not expose the {command} command")
 
-        expected_sources = []
-        for architecture in ("qwen_27b", "qwen_08b"):
-            manifest_path = REPO_ROOT / "loom-pipeline" / "llm" / "qwen" / architecture / "sources.txt"
-            for raw_line in manifest_path.read_text(encoding="utf-8").splitlines():
-                relative = raw_line.strip()
-                if not relative or relative.startswith("#"):
-                    continue
-                expected_sources.append((manifest_path.parent / relative).resolve())
-        catalog_root = (REPO_ROOT / "loom-pipeline" / "llm").resolve()
-        expected_members = {
-            PIPELINE_PREFIX + path.relative_to(catalog_root).as_posix()
-            for path in expected_sources
-        }
-        missing = sorted(expected_members - names)
-        if missing:
-            raise RuntimeError("wheel is missing Qwen manifest sources: " + ", ".join(missing))
+        if any(name.endswith(".loom") for name in names):
+            raise RuntimeError("wheel must not contain executable .loom sources")
+        inventory = REPO_ROOT / "loom-pipeline/catalog_sources.bzl"
+        loom_catalog.validate_catalog(inventory)
+        variants = loom_catalog.variants(inventory)
+        build_name = PIPELINE_PREFIX + "catalog-build.json"
+        if build_name not in names:
+            raise RuntimeError("wheel is missing catalog build hashes")
+        build = json.loads(wheel.read(build_name))
+        if build.get("format") != 2 or set(build.get("variants", {})) != set(variants):
+            raise RuntimeError("wheel catalog build inventory does not match authored variants")
+        allowed = {build_name, PIPELINE_PREFIX + "LICENSE-APACHE-2.0"}
+        root = inventory.parent / "llm"
+        if wheel.read(PIPELINE_PREFIX + "LICENSE-APACHE-2.0") != (root / "LICENSE-APACHE-2.0").read_bytes():
+            raise RuntimeError("wheel catalog license does not match authored license")
+        for architecture, variant in variants.items():
+            relative = f"qwen/{architecture}/"
+            name = PIPELINE_PREFIX + variant["output"]
+            content = wheel.read(name)
+            digest = hashlib.sha256(content).hexdigest()
+            expected = {
+                "identifier": variant["identifier"],
+                "sources": {source: hashlib.sha256((root / source).read_bytes()).hexdigest()
+                            for source in variant["sources"]},
+                "bytecode_sha256": digest,
+            }
+            if not content.startswith(b"LOOM") or build["variants"][architecture] != expected:
+                raise RuntimeError(f"wheel catalog source/bytecode hash mismatch: {name}")
+            descriptor = PIPELINE_PREFIX + relative + "pipeline.json"
+            if json.loads(wheel.read(descriptor)) != {
+                    "format": 1, "variant": variant["identifier"],
+                    "module": "pipeline.loombc", "sha256": digest}:
+                raise RuntimeError(f"wheel catalog descriptor mismatch: {descriptor}")
+            profile = PIPELINE_PREFIX + relative + "compatibility.json"
+            if wheel.read(profile) != (root / relative / "compatibility.json").read_bytes():
+                raise RuntimeError(f"wheel compatibility profile mismatch: {profile}")
+            allowed.update({name, descriptor, profile})
+        actual = {name for name in names if name.startswith(PIPELINE_PREFIX) and not name.endswith("/")}
+        if actual != allowed:
+            raise RuntimeError(f"wheel catalog file inventory mismatch: extra={sorted(actual-allowed)}, missing={sorted(allowed-actual)}")
 
         weight_suffixes = {".gguf", ".safetensors", ".pt", ".pth", ".ckpt"}
         bundled_weights = sorted(

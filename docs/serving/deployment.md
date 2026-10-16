@@ -9,13 +9,13 @@ keep JSON escaping valid for quotes or backslashes in paths.
 
 | Field | Meaning and changes |
 | --- | --- |
-| `name` | Routing registration name. Keep `qwen3.8-27b` to match the packaged source chat identity, including for the 0.8B fixture. An alias alone does not rename source policy. |
+| `name` | Public routing and response model name. `qwen3.8-27b` is the example name; choose another name and use it consistently in HTTP requests and clients. It is independent of the control module’s internal policy name. |
 | `device` | Nonnegative index into this process's ordered device group, published in `server.resources.devices`; not necessarily an OS GPU ordinal. |
 | `admission` | `drained` registers metadata without source I/O, loading weights or allocating model storage. Activation can prepare it while admission remains closed. |
-| `base_directory` | Absolute server-local base for relative source references, including `../` providers. |
+| `base_directory` | Absolute server-local base for relative module references, including `../` providers. |
 | `definition.kind` | `text` selects the text service. |
-| `prepare`, `control` | Primary VM programs for cold preparation and warm request/execution policy. |
-| `sources` | Shared provider closure from this wheel's `qwen_08b/sources.txt`, excluding `prepare.loom`, `control.loom` and `weights.loom`. Preparation selects its weight policy itself. |
+| `prepare`, `control` | Both select `pipeline.loombc`, the complete module for cold preparation and warm request/execution policy. |
+| `sources` | A single entry, `pipeline.loombc`; providers and the self-referencing weight policy reside in this same module. |
 | `weights`, `tokenizer` | Absolute server-local paths to the exact checkpoint and matching tokenizer. |
 | `rows` | Concurrent execution rows; example 1, native range 1–16. |
 | `context_capacity` | Per-row logical token-position limit, example 8192. Input plus requested completion must fit. |
@@ -25,10 +25,15 @@ keep JSON escaping valid for quotes or backslashes in paths.
 | `draft_depth` | Zero disables MTP; required for 0.8B. The packaged 27B pipeline supports depths 1–3. |
 | `options` | Source-owned preparation/request defaults; `{}` in this example. Native configuration does not interpret arbitrary source option keys. |
 
-Keep the complete installed `loom-pipeline/llm` tree. Copying only `qwen_08b`
-breaks shared providers. Provider order supplies the linker, not an execution
-schedule. A different wheel may change this closure: compare its manifest before
-reusing an older example. Do not edit installed package sources to rename a model.
+The wheel contains exactly one complete `pipeline.loombc` per declared model
+specification: Qwen 0.8B and 27B. The adjacent `pipeline.json` descriptor and
+`compatibility.json` identify and validate the selected module. All three
+executable locators in this example select the same artifact; preparation also
+loads its embedded weight policy from that artifact. Preserve the selected
+catalog and external weights/tokenizer for the registration lifetime. No
+separate linker command is needed on the deployment host; device and capacity
+specialization and native compilation still happen at runtime. Model aliases
+come from `name`; keep installed modules immutable.
 
 Capacities are logical limits, not a guarantee that weights, retained state and
 execution workspace fit on a device. Changing capacities requires retirement
@@ -38,13 +43,13 @@ model settings have registration lifetime.
 Native JSON rejects unknown fields, duplicate keys and wrong types. HTTP paths
 are resolved on the server. An absolute `base_directory` is necessary here
 because an HTTP document has no containing file directory. Posting JSON does
-not copy checkpoint files or sources. Preserve dependencies through retirement;
-stop the server before replacing the installed wheel.
+not copy checkpoint files or pipeline modules. Preserve dependencies through
+retirement; stop the server before replacing the installed wheel.
 
 ## Assets
 
 The `qwen-08b` compatibility profile is
-`qwen35-08b-ud-q5-k-xl-v1`, installed beside the sources as
+`qwen35-08b-ud-q5-k-xl-v1`, installed beside the bytecode modules as
 `qwen_08b/compatibility.json`. The pinned download coordinates in the walkthrough
 identify its known asset set. Checkpoint and tokenizer repositories/revisions
 are independent.

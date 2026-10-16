@@ -188,10 +188,11 @@ confirmed retirement; uncertain outcomes preserve evidence for inspection.
 The [operator walkthrough](../../docs/solutions/llm-serving.md) describes these
 commands, configuration and recovery behavior.
 
-The Qwen adapter makes a source-fingerprinted catalog with `@chat_model_name`
-configured for the instance name. This keeps public HTTP routing distinct from
-the local model ID and leaves packaged sources unchanged. Managed launches
-retain their own source/build copies independently of package replacement.
+The Qwen adapter uses the immutable catalog without rewriting its control
+module. The deployment document’s `name` determines public HTTP routing and
+response identity, independently of the control policy’s static `model_name`.
+Managed launches retain their own catalog/build copies independently of package
+replacement.
 
 The lower-level `loom-serve` command forwards native deployment arguments and
 can run in the foreground. For compatibility, catalog-directory invocations
@@ -205,12 +206,26 @@ for bundled native libraries. Linux binaries also receive a relative
 `$ORIGIN/../lib` RUNPATH from
 [`.bazelrc`](../../.bazelrc).
 
-### The source catalog is the runtime input
+### Authored sources and the installed bytecode catalog
 
 [`qwen/qwen_27b/sources.txt`](qwen/qwen_27b/sources.txt) lists the configuration, VM functions,
 command programs, and kernel providers needed for serving. Every path is
 relative to `qwen/qwen_27b/`; the `../../motifs/ggml/` entries are part of the package.
 Copy the whole `llm/` tree when moving a catalog so those paths still resolve.
+
+The repository and source archive keep these authored `.loom` files. Wheel
+builds merge each complete ordered manifest into one `pipeline.loombc`, with
+all preparation, control, configuration, weight-policy and provider definitions.
+Exactly two portable modules ship, one each for the declared 0.8B and 27B
+model/data-type specifications. Each installed catalog has a `pipeline.json`
+descriptor and `compatibility.json`; it has no source manifest or auxiliary
+executable modules. Preparation's checked policy locator references the same
+`pipeline.loombc`. Both native deployment builders select this module for
+prepare, control and the sole sources entry.
+
+No `.loom` files or linker CLI ship. The server loads the complete bytecode,
+then specializes device/capacity settings and compiles native code at runtime.
+This packaging step does not freeze capacities or precompile GPU machine code.
 
 [`prepare.loom`](qwen/qwen_27b/prepare.loom) is the cold startup entry. It receives
 prefill, context, pool, row, and checkpoint capacities, the MTP selection,
@@ -244,8 +259,9 @@ scales, and total size. Other tensors retain their file representation.
 
 The 0.8B [`weights.loom`](qwen/qwen_08b/weights.loom) uses no transformation:
 its static recipes consume each mixed encoding in canonical checkpoint order.
-Both architecture catalogs and the shared providers are included in the wheel;
-their manifests resolve relative to their respective architecture directories.
+Both architecture catalogs include their complete provider closure in one module
+in the wheel; their descriptors resolve relative to their respective architecture
+directories.
 
 Consumers must agree with that prepared layout. A kernel change that alters
 weight interpretation must also review preparation and parameter views. The
@@ -278,7 +294,7 @@ the supported chat request fields and calls these source hooks in
 
 | Hooks | Responsibility |
 | --- | --- |
-| `model_name` | Public instance name, configured by the Python adapter. |
+| `model_name` | Static internal policy name; the deployment’s `name` owns public routing and response identity. |
 | `chat_begin`, `chat_message`, `chat_end` | Prompt fragments, role transitions, and model-specific request options. |
 | `prepare_input` | Input framing and bounded tokenization, including continuation boundaries. |
 | `render_tool`, `parse_tools` | Canonical tool-call spelling and parsing of generated calls. |
@@ -379,7 +395,7 @@ native execution options are available through `loom-serve`.
 | --- | --- |
 | Import/download behavior or visible asset paths | `hem_models.py`, `hem_state.py`, `model_download.py` and `model_store.py`. Preserve per-model paths and external ownership. |
 | Add a pipeline to the managed CLI | Adapter registration and catalog handling in `pipeline_validation.py`, qualification in `hem_config.py`, and wheel staging in `python_packaging.py`. |
-| Public model identity | Qwen `catalog_for_model` and `control.loom`'s `model_name`. Keep inventory, advertised ID, and routing consistent. |
+| Public model identity | Deployment `name` in the Python deployment builders and native registration. Keep inventory, response identity, and routing consistent; do not rewrite the control module. |
 | Prompt, reasoning, or tool conventions | Chat and text hooks in `control.loom`; inspect native chat validation if the request contract must expand. |
 | Architecture, layer order, or tensor names | `config.loom`, `prepare.loom`, layer programs, and weight policy together. |
 | Faster projection or attention | The relevant kernel, its layer caller, specialization bounds, and any prepared weight layout. |

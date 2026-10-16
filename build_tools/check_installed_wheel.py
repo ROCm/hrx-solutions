@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: MIT
 """Validate installed assets without a GPU; optionally qualify native lifecycle."""
 import argparse
+import hashlib
 import importlib
 import importlib.metadata
 import os
@@ -61,22 +62,24 @@ assert (package_root / "_native/share/loom-serve/LICENSE").is_file()
 assert not (package_root / "_native/bin/loom-qwen-epoch-check").exists()
 from hrx_solutions.gguf import inspect_gguf
 from hrx_solutions.qwen_validation import load_profile
-from hrx_solutions.pipeline_validation import resolve_catalog
+from hrx_solutions.pipeline_validation import resolve_catalog, catalog_modules
 catalog_root = package_root / "loom-pipeline/llm"
 for pipeline, architecture in (("qwen", "qwen_27b"), ("qwen-08b", "qwen_08b")):
     catalog = catalog_root / "qwen" / architecture
     assert resolve_catalog(pipeline) == catalog
+    modules = catalog_modules(catalog)
+    assert all(name.endswith(".loombc") for name in (modules.prepare, modules.control, modules.weights, *modules.providers))
     contract = load_profile(catalog)
     assert contract["metadata"]["general.architecture"] == "qwen35"
-    manifest = catalog / "sources.txt"
-    assert manifest.is_file()
-    for line in manifest.read_text().splitlines():
-        relative = line.strip()
-        if relative and not relative.startswith("#"):
-            source = (catalog / relative).resolve(strict=True)
-            source.relative_to(catalog_root)
-            assert source.is_file()
+    assert (modules.prepare, modules.control, modules.weights, modules.providers) == (
+        "pipeline.loombc", "pipeline.loombc", "pipeline.loombc", ("pipeline.loombc",))
+    artifact = catalog / "pipeline.loombc"
+    descriptor = json.loads((catalog / "pipeline.json").read_text())
+    assert descriptor == {"format": 1, "variant": contract["identifier"],
+                          "module": "pipeline.loombc", "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest()}
+    assert {p.name for p in catalog.iterdir()} == {"pipeline.loombc", "pipeline.json", "compatibility.json"}
 assert (package_root / "loom-pipeline/llm/LICENSE-APACHE-2.0").is_file()
+assert not list(package_root.rglob("*.loom"))
 import struct
 import tempfile
 from hrx_solutions.pipeline_validation import ModelFiles, validate_model
@@ -161,7 +164,7 @@ def check_native_lifecycle():
             moved.append((source, backup))
         status, _ = invoke("server", "status", "wheel-check")
         assert status["native"]["data"] == []
-        assert (retained / "loom-pipeline/llm/qwen/qwen_08b/control.loom").is_file()
+        assert (retained / "loom-pipeline/llm/qwen/qwen_08b/pipeline.loombc").is_file()
         stopped, _ = invoke("server", "shutdown", "wheel-check")
         assert stopped["completed"]
         assert _confirmed_exit(record["process"])

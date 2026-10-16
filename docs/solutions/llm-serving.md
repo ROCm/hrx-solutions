@@ -77,8 +77,8 @@ printf '%s\n' "$PIPELINE_DIR"
 realpath models/Qwen3.5-0.8B-UD-Q5_K_XL.gguf models/tokenizer.json
 ```
 
-Keep the model files and installed source tree available until model retirement.
-Do not edit the installed sources or replace the wheel while its model is loaded.
+Keep the model files and installed bytecode tree available until model retirement.
+Do not edit the installed modules or replace the wheel while its model is loaded.
 
 ## Write the deployment
 
@@ -108,10 +108,11 @@ complete example also contains the required source-provider list:
 }
 ```
 
-The 0.8B pipeline inherits the packaged chat-policy name **`qwen3.8-27b`**. Use
-that exact served identity in the deployment, HTTP requests and Pi; it does not
-mean 27B weights are loaded. Changing the registration alias alone does not
-rename the source policy.
+The deployment’s `name` determines HTTP routing and response model identity.
+This walkthrough uses **`qwen3.8-27b`** as an example name, even for 0.8B weights.
+You can choose another name; update the deployment, HTTP requests and Pi
+configuration consistently. The control module’s internal policy name does not
+restrict this choice.
 
 `device: 0` selects the first member of the server's device group. One execution
 row has an 8192-token context and shares an 8192-position retained-state pool;
@@ -119,7 +120,7 @@ prefill runs in packed shapes up to 128 tokens. Requests default to at most 512
 output tokens. Input plus requested completion must fit the context. These are
 logical limits, not a memory-fit promise. `draft_depth: 0` disables MTP, which
 this small pipeline does not support. The [deployment reference](../serving/deployment.md)
-explains source paths and every editable field.
+explains bytecode paths and every editable field.
 
 ```bash
 jq . qwen08.json

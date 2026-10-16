@@ -1,0 +1,3 @@
+include .bazelrc .bazelversion BUILD.bazel MODULE.bazel MODULE.bazel.lock version.json
+recursive-include build_tools *.py *.sh *.bazel
+recursive-include loom-pipeline *.loom *.json *.txt *.bzl *.bazel LICENSE*
