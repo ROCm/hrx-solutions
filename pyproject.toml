@@ -37,3 +37,6 @@ packages = ["hrx_solutions"]
 
 [tool.setuptools.package-dir]
 hrx_solutions = "binding/python"
+
+[tool.setuptools.package-data]
+hrx_solutions = ["pi_extension/*.ts", "pi_extension/*.json"]

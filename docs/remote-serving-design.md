@@ -8,3 +8,7 @@ for a static client configuration against that endpoint.
 Model assets, installed pipeline sources and deployment paths remain on the
 inference host. Posting a registration document does not transfer files.
 Provisioning, automatic restart and service installation are outside this manual.
+
+Loom Control also provides [`pi configure`](solutions/loom-control.md#connect-pi-once)
+for local managed loopback servers. That integration does not manage remote
+servers or SSH tunnels; use the manual client configuration for those endpoints.

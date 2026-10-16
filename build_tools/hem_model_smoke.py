@@ -39,8 +39,19 @@ class Gate:
     def save(self):
         (self.root / 'results.json').write_text(json.dumps(self.results, indent=2) + '\n')
 
-    def command(self, namespace, *args, expected=0, command_timeout=15):
+    def verify_empty_state(self, namespace):
+        with sqlite3.connect(self.root / namespace / 'state/control.sqlite3') as connection:
+            tables = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+            assert set(tables) == {'models', 'servers', 'instances', 'pi_target'}, tables
+            assert connection.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+            counts = {table: connection.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0] for table in tables}
+            assert counts['instances'] == 0, counts
+            assert counts['pi_target'] == 0, counts
+            return counts
+
+    def command(self, namespace, *args, expected=0, command_timeout=15, env_overrides=None):
         env = dict(os.environ, LOOM_SERVE_DIR=str(self.root / self.namespace_roots.get(namespace, namespace) / 'state'), PYTHONNOUSERSITE='1')
+        env.update(env_overrides or {})
         env.pop('PYTHONPATH', None)
         env.pop('PYTHONHOME', None)
         python = self.states[namespace]
@@ -60,9 +71,11 @@ class Gate:
         assert process.returncode in codes, (item, f'see {self.root / f"{number:03}-{namespace}.stderr"} and matching stdout')
         payload = json.loads(process.stdout)
         if args[:2] == ('instance', 'start') and process.returncode == 0:
-            operations = [line.split('/v1/models/')[1].split()[0] for line in process.stderr.splitlines() if '--request POST' in line and '/v1/models/' in line]
+            # Human equivalents use shell continuations; inspect logical commands.
+            commands = process.stderr.replace('\\\n', '').splitlines()
+            operations = [line.split('/v1/models/')[1].split()[0] for line in commands if '--request POST' in line and '/v1/models/' in line]
             assert operations == ['register', 'activate', 'undrain'], operations
-            register_line = next(line for line in process.stderr.splitlines() if '--request POST' in line and '/v1/models/register' in line)
+            register_line = next(line for line in commands if '--request POST' in line and '/v1/models/register' in line)
             argv = shlex.split(register_line)
             document = json.loads(Path(argv[argv.index('--data-binary') + 1].removeprefix('@')).read_text())
             assert document['admission'] == 'drained', document
@@ -75,19 +88,14 @@ class Gate:
         assert 'PYTHONPATH' not in os.environ and 'PYTHONHOME' not in os.environ
         assert not Path.cwd().is_relative_to(self.args.source.resolve())
         assert digest(self.args.wheel) == self.args.wheel_sha256
-        with zipfile.ZipFile(self.args.wheel) as archive:
-            parity = {}
-            for name in archive.namelist():
-                relative = name.removeprefix('hrx_solutions/')
-                source = self.args.source / 'binding/python' / relative
-                if relative.endswith('.py') and '/' not in relative:
-                    assert archive.read(name) == source.read_bytes(), name
-                    parity[name] = hashlib.sha256(archive.read(name)).hexdigest()
-                elif relative.startswith('loom-pipeline/') and not name.endswith('/'):
-                    source = self.args.source / relative
-                    assert archive.read(name) == source.read_bytes(), name
-                    parity[name] = hashlib.sha256(archive.read(name)).hexdigest()
-            self.results['source_parity'] = parity
+        # Reuse the installed contract authority: catalog-build metadata maps
+        # authored source inputs to packaged bytecode instead of source files.
+        import hrx_solutions
+        from check_installed_cpu import source_parity, verify_wheel_payload
+        package = Path(hrx_solutions.__file__).resolve().parent
+        package.relative_to(Path(sys.prefix).resolve())
+        verify_wheel_payload(self.args.wheel, package)
+        self.results['source_parity'] = source_parity(self.args.source, package)
         namespaces = ('a',) if self.args.profile == 'ci08' else ('a', 'b')
         for namespace in namespaces:
             directory = self.root / namespace
@@ -308,6 +316,84 @@ print(json.dumps(dict(record=record, exited=(not process or
         self.servers.pop(namespace, None)
         del self.attempts[namespace]
 
+    def pi_configuration(self):
+        """Exercise only our generated installation against two real model IDs.
+
+        Explicit previously qualified capacities make Pi's ordinary budgets fit;
+        they do not promote defaults or qualify a full-context request.
+        """
+        runtime = self.args.pi_runtime.resolve()
+        node_bin = runtime / 'node-v22.22.1-linux-x64/bin'
+        pi_bin = runtime / 'node_modules/.bin'
+        target = self.root / 'pi-agent'
+        project = self.root / 'pi-project'
+        target.mkdir(mode=0o700)
+        project.mkdir(mode=0o700)
+        original = '{"quietStartup":true}\n'
+        (target / 'settings.json').write_text(original)
+        environment = dict(os.environ, LOOM_SERVE_DIR=str(self.root / 'a/state'),
+                           PI_CODING_AGENT_DIR=str(target), PYTHONNOUSERSITE='1', PI_OFFLINE='1')
+        environment.pop('PYTHONPATH', None)
+        environment.pop('PYTHONHOME', None)
+        environment['PATH'] = os.pathsep.join((str(node_bin), str(pi_bin), str(self.states['a'].parent), environment.get('PATH', '')))
+        assert subprocess.check_output([str(node_bin / 'node'), '--version'], env=environment, text=True).strip() == 'v22.22.1'
+        assert digest(runtime / 'package-lock.json') == digest(self.args.source / 'build_tools/pi_runtime/package-lock.json')
+        metadata = json.loads((runtime / 'node_modules/@earendil-works/pi-coding-agent/package.json').read_text())
+        assert metadata['version'] == '1.3.0'
+        self.results['pi_runtime'] = dict(node='22.22.1', package=metadata['name'], version=metadata['version'],
+                                          lock_sha256=digest(runtime / 'package-lock.json'))
+        self.states['c'] = self.states['a']
+        self.namespace_roots['c'] = 'a'
+        self.start_server('c', 'server-pi-sibling')
+        for namespace, name in (('a', 'pi-qwen-a'), ('c', 'pi-qwen-b')):
+            answer = self.command(namespace, 'instance', 'start', 'small-a', '--name', name,
+                                  '--server', self.servers[namespace][0], '--pipeline', 'qwen-08b',
+                                  '--context-capacity', '262144', '--pool-capacity', '262144',
+                                  '--rows', '4', '--prefill-capacity', '128')
+            assert answer['completed'] and answer['accepted'], answer
+        configure_environment = {key: environment[key] for key in ('PATH', 'PI_CODING_AGENT_DIR', 'PI_OFFLINE')}
+        configured = self.command('a', 'pi', 'configure', '--pi-dir', str(target), env_overrides=configure_environment)
+        assert {item['id'] for item in configured['available']} == {'pi-qwen-a', 'pi-qwen-b'}, configured
+        import hrx_solutions
+        assets = Path(hrx_solutions.__file__).parent / 'pi_extension'
+        for source in assets.iterdir():
+            if source.is_file():
+                assert source.read_bytes() == (target / 'extensions/loom-hem' / source.name).read_bytes()
+        self.results['pi_responses'] = []
+        for item in configured['available']:
+            argv = [str(pi_bin / 'pi'), '--provider', item['provider'], '--model', item['id'],
+                    '--print', '--mode', 'json', '--no-session', '--no-tools', '--thinking', 'off',
+                    '--system-prompt', 'Reply briefly to the user.', 'Say hello in two words.']
+            started = time.monotonic()
+            response = subprocess.run(argv, cwd=project, env=environment, capture_output=True, text=True, timeout=30)
+            prefix = 'pi-' + item['id']
+            (self.root / (prefix + '.stdout')).write_text(response.stdout)
+            (self.root / (prefix + '.stderr')).write_text(response.stderr)
+            evidence = dict(selected=item, exit=response.returncode, seconds=time.monotonic() - started)
+            self.results['pi_responses'].append(evidence)
+            self.save()
+            assert response.returncode == 0, prefix
+            events = [json.loads(line) for line in response.stdout.splitlines() if line.startswith('{')]
+            messages = [event['message'] for event in events if event.get('type') == 'message_end'
+                        and event.get('message', {}).get('role') == 'assistant']
+            assert messages, prefix
+            message = messages[-1]
+            assert message.get('stopReason') == 'stop', message
+            assert message.get('model') == item['id'] and message.get('provider') == item['provider'], message
+            assert any(part.get('type') == 'text' and part.get('text', '').strip() for part in message.get('content', [])), message
+            evidence['assistant'] = message
+            self.save()
+        repeated = self.command('a', 'pi', 'configure', '--pi-dir', str(target), env_overrides=configure_environment)
+        assert repeated['changed'] is False, repeated
+        assert (target / 'settings.json').read_text() == original
+        self.command('a', 'instance', 'stop', 'pi-qwen-a', '--server', self.servers['a'][0])
+        checked = self.command('a', 'pi', 'configure', '--check', '--pi-dir', str(target), env_overrides=configure_environment)
+        assert [item['id'] for item in checked['available']] == ['pi-qwen-b'], checked
+        self.command('c', 'instance', 'stop', 'pi-qwen-b', '--server', self.servers['c'][0])
+        self.shutdown('c')
+        self.results['pi_configuration'] = 'generated configuration passed two short real requests; full-context/default promotion not qualified'
+        self.save()
+
     def run_ci08(self):
         """Required GPU CI profile; full two-model qualification remains explicit."""
         self.start_server('a', 'server-a')
@@ -322,6 +408,8 @@ print(json.dumps(dict(record=record, exited=(not process or
         self.query('a', 'small-a')
         self.command('a', 'instance', 'stop', 'small-a', '--server', 'server-a')
         assert self.command('a', 'instance', 'list', '--server', 'server-a')['items'] == []
+        if getattr(self.args, 'pi_runtime', None):
+            self.pi_configuration()
         self.shutdown('a')
         with sqlite3.connect(self.root / 'a/state/control.sqlite3') as connection:
             assert connection.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
@@ -423,12 +511,7 @@ print(json.dumps(dict(record=record, exited=(not process or
             self.results['graceful_stream_completed'] = True
             self.results['state_tables'] = {}
             for namespace in ('a', 'b'):
-                with sqlite3.connect(self.root / namespace / 'state/control.sqlite3') as connection:
-                    tables = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-                    assert set(tables) == {'models', 'servers', 'instances'}, tables
-                    assert connection.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-                    assert connection.execute('SELECT COUNT(*) FROM instances').fetchone()[0] == 0
-                    self.results['state_tables'][namespace] = {table: connection.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0] for table in tables}
+                self.results['state_tables'][namespace] = self.verify_empty_state(namespace)
             self.results['success'] = True
         finally:
             original_error = sys.exc_info()[1]
@@ -465,6 +548,7 @@ def main():
     parser.add_argument('--wheel-sha256', required=True)
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--profile', choices=('ci08', 'full'), default='full')
+    parser.add_argument('--pi-runtime', type=Path, help='CI-only integrity-pinned runtime staged by stage-pi-runtime.sh')
     parser.add_argument('--model08', type=Path)
     parser.add_argument('--model27', type=Path)
     parser.add_argument('--acquire08', action='store_true', help='Acquire exact pinned 0.8B recipe with Loom Control (CI only)')

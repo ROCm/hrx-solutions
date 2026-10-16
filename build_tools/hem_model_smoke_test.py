@@ -14,12 +14,15 @@ from contextlib import redirect_stderr
 import io
 
 from build_tools import check_installed_wheel_test as checker_fixtures
-from binding.python import hem_process
+from binding.python import hem_process, hem_display
 from binding.python.hem_common import Deadline
 from binding.python.hem_shutdown import ShutdownManager
+from binding.python.hem_state import Registry
 from unittest import mock
 
 import hem_model_smoke
+import check_installed_cpu
+import types
 
 
 class SmokeFailureTest(unittest.TestCase):
@@ -30,6 +33,16 @@ class SmokeFailureTest(unittest.TestCase):
         self.gate = hem_model_smoke.Gate(argparse.Namespace(run=self.root))
         self.gate.states['a'] = self.root / 'venv/bin/python'
 
+    def test_full_profile_accepts_current_schema_and_requires_empty_pi_reservation(self):
+        registry = Registry(self.root / 'a/state')
+        counts = self.gate.verify_empty_state('a')
+        self.assertEqual(set(counts), {'models', 'servers', 'instances', 'pi_target'})
+        self.assertEqual(counts['pi_target'], 0)
+        with sqlite3.connect(registry.database) as connection:
+            connection.execute('INSERT INTO pi_target VALUES(1,?,?)', ('/unused/pi', 'test-integration'))
+        with self.assertRaises(AssertionError):
+            self.gate.verify_empty_state('a')
+
     def test_failed_child_is_recorded_and_fails_gate(self):
         failed = subprocess.CompletedProcess([], 1, '{"completed":false}', 'native failure')
         with mock.patch.object(hem_model_smoke.subprocess, 'run', return_value=failed):
@@ -38,6 +51,56 @@ class SmokeFailureTest(unittest.TestCase):
         evidence = json.loads((self.root / 'results.json').read_text())
         self.assertEqual(evidence['commands'][0]['exit'], 1)
         self.assertFalse(evidence['success'])
+
+    def test_staged_pi_environment_is_used_by_public_configure(self):
+        child = subprocess.CompletedProcess([], 0, '{"completed":true}', '')
+        overrides = {'PATH': '/isolated-node/bin:/isolated-pi/node_modules/.bin',
+                     'PI_CODING_AGENT_DIR': '/isolated/pi', 'PI_OFFLINE': '1'}
+        with mock.patch.object(hem_model_smoke.subprocess, 'run', return_value=child) as run:
+            self.gate.command('a', 'pi', 'configure', '--pi-dir', '/isolated/pi', env_overrides=overrides)
+        environment = run.call_args.kwargs['env']
+        self.assertEqual(environment['PI_CODING_AGENT_DIR'], '/isolated/pi')
+        self.assertIn('/isolated-pi/node_modules/.bin', environment['PATH'])
+        self.assertEqual(environment['LOOM_SERVE_DIR'], str(self.root / 'a/state'))
+        self.assertNotIn('PYTHONPATH', environment)
+        self.assertNotIn('PYTHONHOME', environment)
+
+    def test_multiline_equivalents_preserve_native_order_and_document_check(self):
+        document = self.root / 'registration.json'
+        document.write_text('{"admission":"drained"}')
+        output = io.StringIO()
+        for action in ('register', 'activate', 'undrain'):
+            argv = ['curl', '--fail-with-body', '--request', 'POST',
+                    'http://localhost/v1/models/' + action]
+            if action == 'register':
+                argv += ['--data-binary', '@' + str(document)]
+            hem_display.emit(hem_display.command(argv), stream=output)
+        diagnostic = output.getvalue()
+        self.assertIn('\\\n', diagnostic)
+        child = subprocess.CompletedProcess([], 0, '{"completed":true}', diagnostic)
+        with mock.patch.object(hem_model_smoke.subprocess, 'run', return_value=child):
+            self.gate.command('a', 'instance', 'start', 'model')
+        self.assertEqual(self.gate.results['commands'][0]['native_order'],
+                         ['register', 'activate', 'undrain'])
+
+    def test_setup_uses_installed_catalog_authority_and_propagates_rejection(self):
+        wheel = self.root / 'wheel.whl'
+        wheel.write_bytes(b'fixture identity')
+        source = self.root / 'source'
+        package = Path(sys.prefix) / 'lib/fixture-hrx-solutions'
+        self.gate.args = argparse.Namespace(wheel=wheel, wheel_sha256=hem_model_smoke.digest(wheel),
+                                            source=source, run=self.root)
+        fake_package = types.ModuleType('hrx_solutions')
+        fake_package.__file__ = str(package / '__init__.py')
+        with mock.patch.dict(sys.modules, hrx_solutions=fake_package), \
+             mock.patch.object(check_installed_cpu, 'verify_wheel_payload') as verify, \
+             mock.patch.object(check_installed_cpu, 'source_parity',
+                               side_effect=AssertionError('installed bytecode mismatch')) as parity:
+            with self.assertRaisesRegex(AssertionError, 'installed bytecode mismatch'):
+                self.gate.setup()
+        verify.assert_called_once_with(wheel, package)
+        parity.assert_called_once_with(source, package)
+        self.assertFalse(self.gate.attempts)
 
     def test_successful_exit_cannot_mask_invalid_native_order(self):
         diagnostic = '\n'.join('curl --request POST http://localhost/v1/models/' + action

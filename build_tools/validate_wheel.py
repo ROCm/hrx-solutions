@@ -8,6 +8,7 @@ import configparser
 import email.parser
 import hashlib
 import json
+import tarfile
 import zipfile
 from collections import defaultdict
 from pathlib import Path
@@ -39,8 +40,12 @@ HEM_MODULES = (
     "hem_arguments", "hem_bootstrap", "hem_cli", "hem_common", "hem_config",
     "hem_display", "hem_help", "hem_http", "hem_instance_cli", "hem_instances", "hem_render",
     "hem_model_cli", "hem_models", "hem_pipeline_cli", "hem_process",
-    "hem_server_cli", "hem_shutdown", "hem_state",
+    "hem_server_cli", "hem_shutdown", "hem_state", "hem_pi_assets",
+    "hem_pi_cli", "hem_pi_contracts", "hem_pi", "hem_pi_endpoints",
+    "hem_pi_files", "hem_pi_state",
 )
+PI_ASSETS = ("index.ts", "discovery.ts", "budgets.ts", "stream.ts",
+             "profile.json", "package.json")
 OBSOLETE_MODULES = (
     "setup_cli", "serve_start", "connection_manager", "server_manager",
     "remote_registry", "state_store",
@@ -50,6 +55,19 @@ REQUIRED_ENTRY_POINTS = {
     "loom-control": "hrx_solutions.hem_cli:main",
     "loom-serve": "hrx_solutions.loom_serve:main",
 }
+
+
+def validate_pi_sdist(path: Path) -> None:
+    """The source archive must carry the same reviewed extension resource set."""
+    with tarfile.open(path) as archive:
+        for name in PI_ASSETS:
+            suffix = "/binding/python/pi_extension/" + name
+            matches = [member for member in archive.getmembers() if member.name.endswith(suffix)]
+            if len(matches) != 1 or not matches[0].isfile():
+                raise RuntimeError("sdist is missing or duplicates Pi asset: " + name)
+            expected = (REPO_ROOT / "binding/python/pi_extension" / name).read_bytes()
+            if matches[0].size != len(expected) or archive.extractfile(matches[0]).read() != expected:
+                raise RuntimeError("sdist Pi asset differs from reviewed source: " + name)
 
 
 def validate_wheel(path: Path) -> tuple[int, int]:
@@ -104,6 +122,7 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             PACKAGE_PREFIX + "model_download.py",
         }
         required_files.update(PACKAGE_PREFIX + name + ".py" for name in HEM_MODULES)
+        required_files.update(PACKAGE_PREFIX + "pi_extension/" + name for name in PI_ASSETS)
         required_files.update(target.split(":")[0].replace(".", "/") + ".py"
                               for target in REQUIRED_ENTRY_POINTS.values())
         for architecture in ("qwen_27b", "qwen_08b"):
@@ -114,6 +133,12 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         missing = sorted(required_files - names)
         if missing:
             raise RuntimeError("wheel is missing setup assets: " + ", ".join(missing))
+
+        for name in PI_ASSETS:
+            member = PACKAGE_PREFIX + "pi_extension/" + name
+            expected = (REPO_ROOT / "binding/python/pi_extension" / name).read_bytes()
+            if wheel.read(member) != expected:
+                raise RuntimeError("wheel Pi asset differs from reviewed source: " + member)
 
         obsolete_checkers = sorted(
             name for name in names
@@ -222,8 +247,11 @@ def validate_wheel(path: Path) -> tuple[int, int]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wheel", type=Path)
+    parser.add_argument("--sdist", type=Path, help="also verify identical reviewed Pi source assets")
     args = parser.parse_args()
     count, size = validate_wheel(args.wheel)
+    if args.sdist:
+        validate_pi_sdist(args.sdist)
     print(f"Validated {args.wheel}: {count} native libraries, {size} bytes")
     return 0
 

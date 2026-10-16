@@ -48,8 +48,11 @@ jobs:
         with:
           name: hrx-solutions-wheel-linux-x86_64
           path: ${{ runner.temp }}/model-wheel
-      - name: Qualify exact pinned 0.8B with Loom Control
+      - name: Stage qualified Pi runtime for generated-configuration smoke
+        run: bash build_tools/stage-pi-runtime.sh "${RUNNER_TEMP}/pi-runtime"
+      - name: Qualify exact pinned 0.8B with Loom Control and generated Pi configuration
         env:
+          LOOM_PI_RUNTIME: ${{ runner.temp }}/pi-runtime
           HF_HUB_CACHE: ${{ runner.temp }}/huggingface/hub
         run: |
           shopt -s nullglob

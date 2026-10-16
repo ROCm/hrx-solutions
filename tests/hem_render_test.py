@@ -58,6 +58,7 @@ def fixtures():
     result['instance', 'export'] = dict(instance='chat-small', model='qwen08', pipeline='qwen-08b', output='/exports/register.json', settings=SETTINGS)
     for resource in ('server', 'instance'):
         result[resource, 'logs'] = dict(logs='native log line\n', followed=False)
+    result['pi', 'configure'] = dict(state='configured', configured=True, changed=False, completed=True, compatibility=dict(state='compatible'), next_action='loom-control pi configure --check')
     return result
 
 
@@ -75,9 +76,9 @@ class RendererTest(unittest.TestCase):
                 code = hem_cli.main(argv)
         return code, output.getvalue(), diagnostics.getvalue()
 
-    def test_all_22_presentations_and_json_payloads(self):
+    def test_all_resource_presentations_and_json_payloads(self):
         cases = fixtures()
-        self.assertEqual(len(cases), 22)
+        self.assertEqual(len(cases), 23)
         for (resource, command), data in cases.items():
             example = hem_help.ACTIONS[resource][command][1].splitlines()[0]
             argv = shlex.split(example)

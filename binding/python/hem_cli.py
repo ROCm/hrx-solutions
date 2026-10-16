@@ -1,4 +1,4 @@
-"""Thin four-resource entry point for Loom Control."""
+"""Thin resource entry point for Loom Control."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ import shlex
 import sys
 import textwrap
 
-from . import hem_arguments, hem_help, hem_instance_cli, hem_model_cli, hem_pipeline_cli, hem_server_cli, hem_render
+from . import hem_arguments, hem_help, hem_instance_cli, hem_model_cli, hem_pi_cli, hem_pipeline_cli, hem_server_cli, hem_render
 from .hem_common import Deadline, HemError, InvalidInput, result
 
 
 DOMAINS = {"model": hem_model_cli, "pipeline": hem_pipeline_cli,
-           "server": hem_server_cli, "instance": hem_instance_cli}
+           "server": hem_server_cli, "instance": hem_instance_cli, "pi": hem_pi_cli}
 
 
 class HelpFormatter(argparse.RawDescriptionHelpFormatter):

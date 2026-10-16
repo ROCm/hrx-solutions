@@ -1,4 +1,4 @@
-"""Help copy and presentation for the existing four-resource grammar.
+"""Help copy and presentation for the resource grammar.
 
 This module only describes parsers. It never opens registries, inspects assets or
 contacts services. Configuration numbers come from the validation authority.
@@ -12,12 +12,14 @@ from .hem_config import SETTINGS, EXPORT_RESPONSIBILITY
 from .hem_common import DEFAULT_TIMEOUT
 
 RESOURCES = {
+    'pi': 'Owned Pi coding-agent configuration for local managed servers.',
     'model': 'Checkpoint files acquired or imported locally, with structural validation.',
     'pipeline': 'Packaged model implementation, compatibility rules and serving defaults.',
     'server': 'Saved device/listener settings and the managed native process.',
     'instance': 'A model loaded on a server, with its submitted serving configuration.',
 }
 ACTIONS = {
+    'pi': {'configure': ('Configure Pi, inspect configuration, or remove unchanged owned files.', 'pi configure\nloom-control pi configure --check')},
     'model': {
         'available': ('Discover downloadable recipes (not local inventory).', 'model available'),
         'download': ('Acquire external checkpoint files and validate them locally.', 'model download qwen35-08b-q5-k-xl --id qwen08'),
@@ -118,6 +120,9 @@ def describe(root, domains):
 
 def _arguments(parser, resource, command):
     helps = {
+        'check': 'Inspect owned configuration and report Pi compatibility separately without writing.',
+        'disable': 'Remove unchanged owned integration files without requiring Pi or Node; preserve edited files.',
+        'pi_dir': 'Alternate Pi agent directory; default uses Pi’s configured agent directory.',
         'json': 'Write one JSON action result to stdout; equivalents and diagnostics stay on stderr. Help remains text.',
         'model': 'Local model ID (letters/digits, dot, underscore or hyphen; starts with a letter/digit).',
         'instance': 'Instance name on the selected server, distinct from the local model ID.',

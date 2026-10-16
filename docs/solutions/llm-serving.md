@@ -231,6 +231,10 @@ and rejects thinking mode; it does not implement every OpenAI API feature.
 
 ## Connect Pi
 
+For automatically maintained configuration against local managed servers, use
+[Loom Control’s Pi integration](loom-control.md#connect-pi-once). The steps below
+configure a direct native endpoint manually.
+
 Pi uses `~/.pi/agent/models.json` for static provider/model entries. This example
 targets `@earendil-works/pi-coding-agent` **1.3.0**, requiring Node **22.19.0+**.
 If Pi is not installed, install that version using your normal npm setup:

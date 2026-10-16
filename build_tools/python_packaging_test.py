@@ -10,7 +10,13 @@ import zipfile
 
 from build_tools import python_packaging as packaging
 from build_tools import loom_catalog
-from build_tools.validate_wheel import HEM_MODULES, OBSOLETE_MODULES, OBSOLETE_ENTRY_POINTS, REQUIRED_ENTRY_POINTS, validate_wheel
+from build_tools.validate_wheel import HEM_MODULES, OBSOLETE_MODULES, OBSOLETE_ENTRY_POINTS, REQUIRED_ENTRY_POINTS, PI_ASSETS, validate_wheel
+from binding.python import hem_pi_assets, hem_pi_contracts
+import hashlib
+import json
+import io
+import tarfile
+from build_tools.validate_wheel import validate_pi_sdist
 from build_tools.versioning import read_package_version
 
 
@@ -90,6 +96,9 @@ class PackagingTest(unittest.TestCase):
             'hrx_solutions/_native/lib/libhsa-amd-aqlprofile64.so.1':b'profile',
         }
         members.update({'hrx_solutions/'+path.relative_to(package).as_posix():path.read_bytes() for path in catalog})
+        members.update({'hrx_solutions/pi_extension/'+name:
+                        (packaging.REPO_ROOT/'binding/python/pi_extension'/name).read_bytes()
+                        for name in PI_ASSETS})
         for name in ('pipeline_validation.py','runtime_paths.py','model_store.py','model_download.py','gguf.py','qwen_validation.py','loom_serve.py', *(name+'.py' for name in HEM_MODULES)):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         version=read_package_version()
@@ -105,6 +114,58 @@ class PackagingTest(unittest.TestCase):
             for name,data in members.items():
                 archive.writestr(name,data)
         return wheel
+
+    def test_pi_resources_match_contract_and_loader_metadata(self):
+        assets = hem_pi_assets.bundled_assets()
+        prefix = hem_pi_contracts.EXTENSION_PATH + '/'
+        self.assertEqual(set(assets), {prefix + name for name in PI_ASSETS})
+        self.assertEqual(hem_pi_assets.asset_digests(assets),
+                         {name: hashlib.sha256(data).hexdigest() for name, data in assets.items()})
+        profile = json.loads(assets[prefix+'profile.json'])
+        for key, value in profile.items():
+            expected = getattr(hem_pi_contracts, key.upper())
+            self.assertEqual(value, list(expected) if isinstance(expected, tuple) else expected)
+        metadata = json.loads(assets[prefix+'package.json'])
+        self.assertEqual(metadata['pi']['extensions'], ['./index.ts'])
+        self.assertFalse(metadata.get('dependencies'))
+        self.assertFalse(metadata.get('scripts'))
+
+    def test_wheel_requires_every_pi_resource_and_reviewed_bytes(self):
+        for name in PI_ASSETS:
+            with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
+                validate_wheel(self.wheel(missing='hrx_solutions/pi_extension/'+name))
+        wheel = self.wheel()
+        with zipfile.ZipFile(wheel) as archive:
+            members = {name: archive.read(name) for name in archive.namelist()}
+        members['hrx_solutions/pi_extension/index.ts'] += b'\n// changed\n'
+        with zipfile.ZipFile(wheel, 'w') as archive:
+            for name, data in members.items():
+                archive.writestr(name, data)
+        with self.assertRaisesRegex(RuntimeError, 'Pi asset differs'):
+            validate_wheel(wheel)
+
+    def test_sdist_requires_identical_regular_pi_resources(self):
+        for failure in (None, 'missing', 'changed', 'symlink'):
+            path = self.root/'source.tar.gz'
+            with tarfile.open(path, 'w:gz') as archive:
+                for name in PI_ASSETS:
+                    data = (packaging.REPO_ROOT/'binding/python/pi_extension'/name).read_bytes()
+                    if name == 'index.ts' and failure == 'missing':
+                        continue
+                    if name == 'index.ts' and failure == 'changed':
+                        data += b'// changed'
+                    member = tarfile.TarInfo('hrx-solutions/binding/python/pi_extension/'+name)
+                    member.size = len(data)
+                    if name == 'index.ts' and failure == 'symlink':
+                        member.type = tarfile.SYMTYPE
+                        member.linkname = '/unreviewed/index.ts'
+                    archive.addfile(member, io.BytesIO(data))
+            with self.subTest(failure=failure):
+                if failure:
+                    with self.assertRaisesRegex(RuntimeError, 'Pi asset'):
+                        validate_pi_sdist(path)
+                else:
+                    validate_pi_sdist(path)
 
     def test_wheel_contains_new_validation_assets(self):
         libraries,size=validate_wheel(self.wheel())

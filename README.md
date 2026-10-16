@@ -79,6 +79,8 @@ configure Pi. For a wheel obtained before PyPI publication, begin with the
 To manage model assets and server lifecycles with `loom-control`, use the
 [Loom Control companion guide](docs/solutions/loom-control.md). Loom Control
 prints readable results by default; scripts that previously parsed default JSON should add `--json`.
+For automatically maintained local Pi configuration, see
+[Connect Pi once](docs/solutions/loom-control.md#connect-pi-once).
 Native/HF/curl equivalents remain visible on stderr. Run `loom-control` or a bare
 resource such as `loom-control instance` for guidance and configuration help.
 

@@ -16,6 +16,7 @@ launch settings, and an **instance** is a model registration on a server.
 | `pipeline` | `list`, `show` |
 | `server` | `start`, `list`, `show`, `status`, `logs`, `reconcile`, `shutdown` |
 | `instance` | `start`, `stop`, `list`, `show`, `status`, `logs`, `export` |
+| `pi` | `configure` (including `--check` and `--disable`) |
 
 Run `loom-control` for a getting-started sequence. Bare resource commands such as
 `loom-control model` list their actions and examples. These show the same guidance
@@ -376,7 +377,8 @@ GPUs or replace the resource-qualified 27B/concurrent-isolation gates.
 ## Migrating from the setup helpers
 
 `loom-serve-setup` and `loom-serve-start` entry points are removed. Use Loom Control's
-four resource types for acquisition and lifecycle; direct `loom-serve` remains.
+`model`, `pipeline`, `server` and `instance` types for acquisition and lifecycle,
+and `pi` for local Pi configuration; direct `loom-serve` remains.
 Old state files and external checkpoints remain untouched and are not adopted
 or replayed. Prefer a fresh state namespace (for example, set
 `LOOM_SERVE_DIR="$HOME/.loom-hem"` before running Loom Control), or choose fresh model IDs
@@ -387,6 +389,139 @@ old services to be stopped through their original tooling before uninstalling
 that tooling, or use an unused port for Loom Control. Loom Control does not manage legacy or
 arbitrary external processes merely because their endpoint responds.
 
-Remote setup/tunnels and application configuration are outside Loom Control's four-type
-interface. Configure clients yourself against the streaming chat endpoint;
-there is no Pi configuration, remote provisioning or automatic migration command.
+Local Pi integration is covered by [Connect Pi once](#connect-pi-once).
+Remote setup/tunnels, general client configuration and automatic migration remain
+outside Loom Control. Configure other clients against the streaming chat endpoint.
+
+## Connect Pi once
+
+`loom-control pi configure` installs a bundled, read-only discovery provider for
+local Loom Control-managed servers. Pi reads the current model inventory and sends
+inference requests; it never downloads models or starts/stops Loom. This
+integration is qualified with `@earendil-works/pi-coding-agent` **1.3.0** and
+Node **22.22.1**; installing/updating configuration requires Node >=22.19.0. Select that Pi installation
+and its Node runtime on `PATH` yourself. Loom Control does not install or upgrade either,
+and older `@mariozechner` packages are not interchangeable.
+
+The ordinary serving defaults remain **8192 context / 32768 shared pool**.
+Those capacities may not fit Pi's effective compaction and summary budgets.
+The real-model configuration check used explicit capacities below, with two
+Qwen3.5-0.8B instances and ordinary short prompts. It proves our generated
+configuration and routing; it does not qualify long-context performance,
+compaction, or Pi's session/tool behavior. Larger defaults have **not** been
+promoted.
+
+After importing and validating `qwen08` as above, choose free loopback ports
+and sufficient GPU memory. Use a fresh server name if `local` already exists:
+
+```bash
+loom-control server start --name pi-local --device amdgpu --listen 127.0.0.1:8081
+loom-control instance start qwen08 --name pi-small-a --server pi-local \
+  --pipeline qwen-08b --context-capacity 262144 --pool-capacity 262144 \
+  --rows 4 --prefill-capacity 128
+loom-control instance start qwen08 --name pi-small-b --server pi-local \
+  --pipeline qwen-08b --context-capacity 262144 --pool-capacity 262144 \
+  --rows 4 --prefill-capacity 128
+loom-control pi configure
+pi
+```
+
+In Pi, open `/model` and select `pi-small-a` or `pi-small-b` under the
+`loom-hem-…` provider for `pi-local`, then send a short prompt. Each instance's
+pool is shared across its four rows: this does not provide four independent
+262144-token windows or promise both instances fit every device. These explicit
+overrides do not change pipeline defaults or resize other running instances.
+Use `loom-control instance stop NAME --server pi-local` and
+`loom-control server shutdown pi-local` when finished.
+
+Pi sees **instance names**, not downloaded model IDs. Provider IDs are stable
+`loom-hem-` names followed by the unpadded base64url encoding of the server name.
+Discovery joins live `/v1/models` and `/v1/status`; it exposes ready, active,
+admitting text instances with supported metadata. Context comes from actual
+native metadata; output is capped at the minimum of 8192, native output limit
+and actual context. Initial visibility is budget-unverified. Before each
+inference, the provider checks effective user/project/exact-model budgets and
+current metadata/origin, refusing unsafe or unavailable settings with remediation
+instead of rewriting settings, inflating capacity or silently routing elsewhere.
+
+### Persistence, refresh and configuration modes
+
+Configure once, then launch Pi normally. No periodic configure job is needed.
+Configuration survives restarts and boots, but it does not start Loom or reload
+instances. Restart a saved server with `loom-control server start pi-local`, then
+explicitly start the instances you want. Existing-server model changes appear
+on startup or Pi's model-picker refresh; an open picker is not a continuous
+inventory. Adding a **new server name**, including the first server after an
+empty setup, requires Pi `/reload` or restart. Endpoint changes for existing
+names refresh without reconfiguration. Offline/unsupported servers report
+unavailable; durable setup can succeed with no currently usable models.
+
+```bash
+loom-control pi configure --check
+loom-control pi configure --json
+loom-control pi configure --disable
+```
+
+Normal configure idempotently installs/updates or repairs unchanged owned files.
+`--check` passively inspects without creating directories, migrating SQLite or
+writing configuration, even when Pi or Node is missing or unsupported. It reports
+owned-configuration findings separately from runtime compatibility: exit 0 means
+no changes required and a qualified runtime; exit 1 means changes are required or
+the runtime is unqualified. JSON retains the configuration `state` and adds
+`runtime_compatibility` (`state`, `reason`, `next_action`); `runtime` is null when
+qualification fails or is skipped. Ownership conflicts and uncertain state retain
+their existing stronger exits. `--check` and `--disable` are mutually exclusive. All modes accept
+`--pi-dir PATH`, `--json` and `--timeout SECONDS` (default 10). Operational,
+invalid-input, pending and uncertain exits follow the existing 1/2/3/4 contract.
+Progress and exact discovery GET curl equivalents go to stderr; JSON stdout
+stays structured. File installation prints affected paths and explains that
+there is no equivalent native Loom command.
+
+Target precedence is `--pi-dir` > `PI_CODING_AGENT_DIR` > `~/.pi/agent`. For an
+alternate target, launch Pi with the same directory:
+
+```bash
+export PI_CODING_AGENT_DIR="$HOME/.pi-loom/agent"
+loom-control pi configure --pi-dir "$PI_CODING_AGENT_DIR"
+pi
+```
+
+Use the same absolute `LOOM_SERVE_DIR` across Hem commands if overriding its
+default. State/target directory ancestors must be trusted, owned by the user
+or root, and not writable by others; managed files must not be symlinks.
+A deliberately selected symlink agent directory is resolved to its canonical
+target. Unsafe existing paths are refused; do not bypass this by weakening
+permissions. Each Loom Control root owns at most one Pi target and each target belongs
+to one root; another root cannot silently retarget it.
+
+Under the chosen Pi agent directory, Loom Control owns `extensions/loom-hem/` and
+`loom-hem/config.json` (identity, versions, owned hashes and endpoint pointer).
+Under the Hem root, `integrations/pi/endpoints.json` projects saved local server
+definitions; SQLite retains the minimal target identity. These are current
+configuration, not a persisted model inventory or inference log. Copied assets
+come from the installed wheel, with no runtime package installation. Loom Control uses
+durable atomic replacement and detects owned-file drift; multiple files and
+SQLite are not one transaction. After an interrupted update, inspect with
+`--check`, then rerun configure. If owned files were edited, preserve/export
+your edits yourself and restore the expected owned bytes before retrying;
+Hem refuses to overwrite or remove conflicting content. An uncoordinated editor
+can still race a final ownership check; subsequent checks detect drift.
+
+Pi `settings.json`, `models.json`, authentication, defaults and session choices
+remain unchanged. Unmanaged legacy `hrx-loom` listings may coexist and are
+reported without deletion; unreachable means unknown, not obsolete. Back up
+or export them yourself, inspect default-model references, then manually remove
+only entries you know are obsolete. Loom Control does not manage exports or credentials.
+
+Run `loom-control pi configure --disable` **before uninstalling the wheel**. Disable
+removes only unchanged owned integration artifacts, reports retained conflicts,
+and does not require installed/supported Pi or Node or run runtime qualification.
+All ownership, path and edited/foreign-file protections still apply. It does not
+cancel an in-flight request; reload/restart Pi afterward. Uninstall
+alone may leave copied files. After upgrading the wheel, rerun configure and
+reload/restart Pi to update those copies.
+
+This is a same-user loopback trust boundary: schema/profile checks reject
+detectable wrong listeners, but cannot authenticate ownership of an
+indistinguishable replacement at a recycled port. Pi has no lifecycle authority.
+Remote URLs, SSH tunnels and arbitrary external servers are outside this setup.

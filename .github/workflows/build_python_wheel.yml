@@ -104,6 +104,10 @@ jobs:
           "${RUNNER_TEMP}/hem-source-venv/bin/python" build_tools/wheel_cache.py prepare \
             --directory "$HRX_BAZEL_CACHE_DIR" --restore-state "$state" | tee "${RUNNER_TEMP}/wheel-cache-diagnostics/prepare.json"
           echo "$(( $(date +%s) - $(cat "${RUNNER_TEMP}/wheel-cache-diagnostics/restore.started") ))" > "${RUNNER_TEMP}/wheel-cache-diagnostics/restore.seconds"
+      - name: Stage qualified Pi runtime for our extension checks
+        run: bash build_tools/stage-pi-runtime.sh "${RUNNER_TEMP}/pi-runtime"
+      - name: Check our source Pi assets and public loader integration
+        run: bash build_tools/check-pi-assets.sh "${RUNNER_TEMP}/pi-runtime" binding/python/pi_extension
       - name: Build and repair wheel in manylinux container
         env:
           HRX_BAZEL_CACHE_DIR: ${{ runner.temp }}/hrx-wheel-bazel-cache
@@ -127,6 +131,10 @@ jobs:
           if [[ -d "${RUNNER_TEMP}/wheel-cache-diagnostics" ]]; then
             echo "$SECONDS" > "${RUNNER_TEMP}/wheel-cache-diagnostics/validation.seconds" || true
           fi
+      - name: Check installed Pi assets from the repaired wheel
+        run: |
+          assets=$(env -u PYTHONPATH -u PYTHONHOME "${RUNNER_TEMP}/wheel-install-venv/bin/python" -c 'import hrx_solutions; from pathlib import Path; print(Path(hrx_solutions.__file__).parent / "pi_extension")')
+          bash build_tools/check-pi-assets.sh "${RUNNER_TEMP}/pi-runtime" "$assets"
       - name: Upload validated manylinux wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

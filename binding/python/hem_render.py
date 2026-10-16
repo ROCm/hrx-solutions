@@ -312,7 +312,13 @@ def instance(args, data, width):
         'Registration curl is printed on stderr. Replace SERVER:PORT with a compatible server endpoint.']
 
 
-RENDERERS = {'model': model, 'pipeline': pipeline, 'server': server, 'instance': instance}
+def pi(args, data, width):
+    return [f'Pi integration: {text(data.get("state"))}.',
+            details([(key.replace('_', ' ').capitalize(), issue(value))
+                     for key, value in data.items() if key != 'state'])]
+
+
+RENDERERS = {'model': model, 'pipeline': pipeline, 'server': server, 'instance': instance, 'pi': pi}
 
 
 def render(args, data, *, width=None):
