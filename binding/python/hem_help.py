@@ -97,6 +97,8 @@ def describe(root, domains):
                          + f'\n\nUse loom-hem {resource} ACTION --help for arguments and examples.')
         commands = next(a for a in domain._actions if isinstance(a, argparse._SubParsersAction))
         commands.required = False
+        commands.metavar = 'ACTION'
+        domain._positionals.title = 'Actions'
         domain.set_defaults(_help_parser=domain)
         for command, child in commands.choices.items():
             description, example = ACTIONS[resource][command]

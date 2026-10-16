@@ -34,7 +34,7 @@ STABLE_RUNTIME_NAMES = {
 ROCM_LIBRARY_PREFIXES = ("libamd", "libhsa", "libroc")
 HEM_MODULES = (
     "hem_arguments", "hem_bootstrap", "hem_cli", "hem_common", "hem_config",
-    "hem_display", "hem_http", "hem_instance_cli", "hem_instances",
+    "hem_display", "hem_help", "hem_http", "hem_instance_cli", "hem_instances", "hem_render",
     "hem_model_cli", "hem_models", "hem_pipeline_cli", "hem_process",
     "hem_server_cli", "hem_shutdown", "hem_state",
 )

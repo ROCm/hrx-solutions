@@ -76,6 +76,12 @@ to acquire the pinned assets, author deployment JSON, start the server, and
 configure Pi. For a wheel obtained before PyPI publication, begin with the
 [installation instructions](docs/solutions/llm-serving.md#install-and-choose-your-files).
 
+To manage model assets and server lifecycles with `loom-hem`, use the
+[Hem companion guide](docs/solutions/loom-hem.md). Hem prints readable results
+by default; scripts that previously parsed default JSON should add `--json`.
+Native/HF/curl equivalents remain visible on stderr. Run `loom-hem` or a bare
+resource such as `loom-hem instance` for guidance and configuration help.
+
 ## Agent Guidebooks
 
 Guidebooks trace execution through the source and explain the design choices

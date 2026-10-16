@@ -24,7 +24,8 @@ import zipfile
 
 HELPERS = ('gguf_fixtures', 'hem_http_test', 'hem_process_test', 'hem_instances_test')
 CONTRACTS = ('hem_process_test', 'hem_model_cli_test', 'hem_server_cli_test',
-             'hem_instance_cli_test', 'hem_shutdown_test')
+             'hem_instance_cli_test', 'hem_shutdown_test', 'hem_help_test',
+             'hem_render_test', 'hem_contracts_test', 'hem_config_test')
 
 
 def digest(path):

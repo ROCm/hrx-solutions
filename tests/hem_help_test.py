@@ -68,6 +68,25 @@ class HelpTest(unittest.TestCase):
                     self.assertEqual(errors, '')
         self.assertEqual(count, 22)
 
+    def test_resource_and_action_lists_have_no_redundant_choice_heading(self):
+        _, output, _ = self.invoke([])
+        self.assertIn('Resources:', output)
+        self.assertIn('RESOURCE ...', output)
+        self.assertNotIn('{model,pipeline,server,instance}', output)
+        self.assertNotIn('\n  RESOURCE', output)
+        for resource, description in hem_help.RESOURCES.items():
+            self.assertIn(resource, output)
+            self.assertIn(description, ' '.join(output.split()))
+            _, guidance, _ = self.invoke([resource])
+            self.assertIn('Actions:', guidance)
+            self.assertIn('ACTION ...', guidance)
+            self.assertNotIn('{', guidance)
+            self.assertNotIn('\n  ACTION', guidance)
+            normalized = ' '.join(guidance.split())
+            for action, (description, _) in hem_help.ACTIONS[resource].items():
+                self.assertIn(action, guidance)
+                self.assertIn(description, normalized)
+
     def test_contextual_errors_and_unchanged_json_error_contract(self):
         for argv, context in ((['model', 'import'], 'loom-hem model import'),
                               (['server', 'start'], 'loom-hem server start'),

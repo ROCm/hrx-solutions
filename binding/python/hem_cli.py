@@ -6,6 +6,7 @@ import argparse
 import json
 import shlex
 import sys
+import textwrap
 
 from . import hem_arguments, hem_help, hem_instance_cli, hem_model_cli, hem_pipeline_cli, hem_server_cli, hem_render
 from .hem_common import Deadline, HemError, InvalidInput, result
@@ -15,10 +16,22 @@ DOMAINS = {"model": hem_model_cli, "pipeline": hem_pipeline_cli,
            "server": hem_server_cli, "instance": hem_instance_cli}
 
 
+class HelpFormatter(argparse.RawDescriptionHelpFormatter):
+    def _split_lines(self, text, width):
+        return textwrap.wrap(text, width, break_long_words=False, break_on_hyphens=False)
+
+    def _format_action(self, action):
+        if isinstance(action, argparse._SubParsersAction):
+            # Usage names the selector; the command list needs no duplicate
+            # choice-enumeration heading above its descriptive entries.
+            return ''.join(self._format_action(choice) for choice in action._get_subactions())
+        return super()._format_action(action)
+
+
 class Parser(argparse.ArgumentParser):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **dict(kwargs, allow_abbrev=False,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter))
+                                     formatter_class=HelpFormatter))
 
     def error(self, message):
         error = InvalidInput(message)
@@ -36,7 +49,7 @@ class Parser(argparse.ArgumentParser):
 def parser():
     root = Parser(prog="loom-hem", description="Thin setup and control for Loom Serve")
     hem_arguments.output(root)
-    types = root.add_subparsers(dest="resource")
+    types = root.add_subparsers(dest="resource", title="Resources", metavar="RESOURCE")
     domains = {}
     for name, module in DOMAINS.items():
         domain = types.add_parser(name, help=hem_help.RESOURCES[name])

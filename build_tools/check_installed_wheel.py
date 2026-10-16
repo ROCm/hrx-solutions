@@ -33,7 +33,7 @@ package_root = Path(hrx_solutions.__file__).resolve().parent
 package_root.relative_to(Path(sys.prefix).resolve())
 for name in (
     "hem_arguments", "hem_bootstrap", "hem_cli", "hem_common", "hem_config",
-    "hem_display", "hem_http", "hem_instance_cli", "hem_instances",
+    "hem_display", "hem_help", "hem_http", "hem_instance_cli", "hem_instances", "hem_render",
     "hem_model_cli", "hem_models", "hem_pipeline_cli", "hem_process",
     "hem_server_cli", "hem_shutdown", "hem_state",
 ):
