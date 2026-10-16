@@ -18,6 +18,10 @@ on:
       use_bazel_cache:
         type: boolean
         default: false # Enable after compiler tracking and integrated local gates pass.
+      cache_write_pilot:
+        type: boolean
+        default: false
+        description: Allow a trusted manual main run to seed the cache during qualification.
       artifact_set:
         type: string
         default: core
@@ -116,7 +120,7 @@ jobs:
         id: cache_admit
         env:
           HRX_BAZEL_CACHE_DIR: ${{ runner.temp }}/hrx-wheel-bazel-cache
-        if: inputs.use_bazel_cache && steps.cache_prepare.outputs.enabled == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: inputs.use_bazel_cache && steps.cache_prepare.outputs.enabled == 'true' && github.repository == 'ROCm/hrx-solutions' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.cache_write_pilot))
         continue-on-error: true
         run: |
           unset PYTHONPATH PYTHONHOME

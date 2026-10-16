@@ -12,6 +12,10 @@ on:
         type: boolean
         description: "Use the optional Bazel cache (experimental; disabled pending local gates)."
         default: false
+      cache_write_pilot:
+        type: boolean
+        description: "Pilot only: permit cache publication on a manual main run (also enable use_bazel_cache)."
+        default: false
       test_model:
         type: boolean
         description: "Run the gfx1151 Hem 0.8B lifecycle test after building the wheel."
@@ -53,6 +57,7 @@ jobs:
       contents: read
     with:
       use_bazel_cache: ${{ inputs.use_bazel_cache || false }}
+      cache_write_pilot: ${{ inputs.cache_write_pilot || false }}
       name: manylinux x86-64
       release_type: ${{ inputs.release_type || 'nightly' }}
       run_id: ${{ inputs.run_id || '' }}
@@ -67,7 +72,7 @@ jobs:
   wheel_cache_cleanup:
     name: Maintain optional wheel cache
     needs: python_wheel
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.python_wheel.result == 'success' && needs.python_wheel.outputs.cache_attempted_key != ''
+    if: github.repository == 'ROCm/hrx-solutions' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.cache_write_pilot)) && needs.python_wheel.result == 'success' && needs.python_wheel.outputs.cache_attempted_key != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     continue-on-error: true
