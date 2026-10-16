@@ -20,8 +20,8 @@ import uuid
 import local_ci_source as source
 import local_ci_runtime as runtime
 
-STAGES = ('preflight', 'capture', 'source-tests', 'pi-source', 'build',
-          'installed-cpu', 'installed-pi', 'gpu')
+STAGES = ('preflight', 'capture', 'clients-source', 'source-tests', 'pi-source', 'build',
+          'installed-cpu', 'installed-pi', 'installed-clients', 'gpu')
 NATIVE_OVERRIDES = ('HSA_OVERRIDE_GFX_VERSION', 'IREE_HAL_AMDGPU_LIBHSA_PATH',
                     'IREE_HAL_AMDGPU_LIBAQLPROFILE_PATH', 'LD_LIBRARY_PATH', 'LD_PRELOAD',
                     'LD_AUDIT', 'IREE_ROCM_PATH', 'CC', 'CXX', 'CMAKE_PREFIX_PATH')
@@ -251,6 +251,23 @@ class Runner:
         self.summary['source'] = captured
         self.summary['source']['manifest'] = str(self.run / 'source-inputs.json')
 
+    def clients_source(self):
+        # Stage immutable, client-specific public runtimes before Python tests,
+        # so optional genuine loader tests are exercised rather than skipped.
+        for client, assets in (('opencode', 'opencode_plugin'), ('omp', 'omp_extension')):
+            self.command(['bash', f'build_tools/stage-{client}-runtime.sh',
+                          self.run / f'{client}-runtime'])
+            if client == 'opencode':
+                self.env['PATH'] = str(self.run / 'opencode-runtime/node-v24.10.0-linux-x64/bin') + os.pathsep + self.env.get('PATH', '')
+            self.command(['bash', f'build_tools/check-{client}-assets.sh',
+                          self.run / f'{client}-runtime', self.snapshot / 'binding/python' / assets])
+        node_bin = self.run / 'opencode-runtime/node-v24.10.0-linux-x64/bin'
+        self.env.update(
+            PATH=str(node_bin) + os.pathsep + self.env.get('PATH', ''),
+            LOOM_OPENCODE_TEST_NODE=str(node_bin / 'node'),
+            LOOM_OMP_TEST_BUN=str(self.run / 'omp-runtime/runtime/node_modules/.bin/bun'),
+            LOOM_OMP_TEST_PACKAGE=str(self.run / 'omp-runtime/client/node_modules/@oh-my-pi/pi-coding-agent'))
+
     def source_tests(self):
         venv = self.run / 'source-venv'
         self.command(['python3', '-m', 'venv', venv])
@@ -302,6 +319,18 @@ class Runner:
         self.command(['bash', self.snapshot / 'build_tools/check-pi-assets.sh', self.run / 'pi-runtime',
                       result.read_text()], cwd=self.run)
 
+    def installed_clients(self):
+        python = self.run / 'installed-venv/bin/python'
+        for client, assets in (('opencode', 'opencode_plugin'), ('omp', 'omp_extension')):
+            result = self.run / f'installed-{client}-assets.txt'
+            code = ('import hrx_solutions,sys; from pathlib import Path; '
+                    'p=Path(hrx_solutions.__file__).resolve(); '
+                    'assert p.is_relative_to(Path(sys.prefix).resolve()); '
+                    f'Path({str(result)!r}).write_text(str(p.parent / {assets!r}))')
+            self.command([python, '-c', code], cwd=self.run)
+            self.command(['bash', self.snapshot / f'build_tools/check-{client}-assets.sh',
+                          self.run / f'{client}-runtime', result.read_text()], cwd=self.run)
+
     def gpu(self):
         lock = self.workspace / 'gates/qwen08-gpu.lock'
         lock.parent.mkdir(parents=True, exist_ok=True)
@@ -320,6 +349,8 @@ class Runner:
                 command.append(self.args.model08)
             self.command(command, cwd=self.run, env={
                 'LOOM_PI_RUNTIME': str(self.run / 'pi-runtime'),
+                'LOOM_OPENCODE_RUNTIME': str(self.run / 'opencode-runtime'),
+                'LOOM_OMP_RUNTIME': str(self.run / 'omp-runtime'),
                 'HRX_LOCAL_CI_RUNTIME_ROOT': str(self.runtime / 'model'),
                 'HRX_LOCAL_CI_CLEANUP_FILE': str(self.run / 'gpu-cleanup.json')}, cooperative=True)
 
@@ -328,8 +359,8 @@ class Runner:
                         for number in (signal.SIGINT, signal.SIGTERM)}
         exit_code = 0
         try:
-            actions = (self.preflight, self.capture, self.source_tests, self.pi_source,
-                       self.build, self.installed_cpu, self.installed_pi, self.gpu)
+            actions = (self.preflight, self.capture, self.clients_source, self.source_tests, self.pi_source,
+                       self.build, self.installed_cpu, self.installed_pi, self.installed_clients, self.gpu)
             for name, action in zip(STAGES, actions):
                 if name == 'gpu' and self.args.cpu_only:
                     continue

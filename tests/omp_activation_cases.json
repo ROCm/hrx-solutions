@@ -1,0 +1,18 @@
+[
+ {"name":"absent providers","text":"# keep\n","providers":{}},
+ {"name":"empty mapping","text":"providers: {}\n","providers":{}},
+ {"name":"borrowed exact activation","text":"# keep\nproviders:\n  loom-hem-YQ:\n    auth: none # local\n","providers":{"loom-hem-YQ":true}},
+ {"name":"extra transport is conflict","text":"providers:\n  loom-hem-YQ:\n    auth: none\n    baseUrl: http://localhost:1\n","providers":{"loom-hem-YQ":false}},
+ {"name":"wrong auth conflict","text":"providers:\n  loom-hem-YQ:\n    auth: key\n","providers":{"loom-hem-YQ":false}},
+ {"name":"duplicate auth","text":"providers:\n  loom-hem-YQ:\n    auth: none\n    auth: none\n","error":true},
+ {"name":"duplicate provider","text":"providers:\n  local:\n    auth: none\n  local:\n    auth: none\n","error":true},
+ {"name":"duplicate roots","text":"providers: {}\nproviders: {}\n","error":true},
+ {"name":"flow provider","text":"providers:\n  local: {auth: none}\n","error":true},
+ {"name":"quoted heading","text":"'providers':\n  local:\n    auth: none\n","error":true},
+ {"name":"multiline scalar trap","text":"note: |\n providers:\n  local:\n    auth: none\n","error":true},
+ {"name":"quoted scalar trap","text":"note: \"providers:\n  local:\n    auth: none\n","error":true},
+ {"name":"tabs","text":"providers:\n\tlocal:\n    auth: none\n","error":true},
+ {"name":"alias","text":"providers:\n  local: *auth\n","error":true},
+ {"name":"markers damaged","text":"providers:\n  # loom-control omp begin damaged\n","error":true},
+ {"name":"comment heading is not mapping","text":"# providers:\n  local:\n    auth: none\n","providers":{}}
+]

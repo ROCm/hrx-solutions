@@ -12,6 +12,8 @@ from .hem_config import SETTINGS, EXPORT_RESPONSIBILITY
 from .hem_common import DEFAULT_TIMEOUT
 
 RESOURCES = {
+    'omp': 'Owned Oh My Pi configuration for local managed servers.',
+    'opencode': 'Owned OpenCode 2 configuration for local managed servers.',
     'pi': 'Owned Pi coding-agent configuration for local managed servers.',
     'model': 'Checkpoint files acquired or imported locally, with structural validation.',
     'pipeline': 'Packaged model implementation, compatibility rules and serving defaults.',
@@ -19,6 +21,8 @@ RESOURCES = {
     'instance': 'A model loaded on a server, with its submitted serving configuration.',
 }
 ACTIONS = {
+    'omp': {'configure': ('Configure Oh My Pi, inspect configuration, or remove unchanged owned entries.', 'omp configure\nloom-control omp configure --check')},
+    'opencode': {'configure': ('Configure OpenCode 2, inspect configuration, or remove unchanged owned files.', 'opencode configure\nloom-control opencode configure --check')},
     'pi': {'configure': ('Configure Pi, inspect configuration, or remove unchanged owned files.', 'pi configure\nloom-control pi configure --check')},
     'model': {
         'available': ('Discover downloadable recipes (not local inventory).', 'model available'),
@@ -155,6 +159,14 @@ def _arguments(parser, resource, command):
     for key, (default, maximum, description) in SETTINGS.items():
         default_text = f'{default} when supported/enabled' if key == 'mtp_depth' else str(default)
         helps[key] = f'{description}; range 1..{maximum}, default {default_text}. JSON key: {key}.'
+    if resource == 'omp':
+        helps.update(check='Inspect activation and runtime compatibility separately; no writes or client execution.',
+                     disable='Remove unchanged owned files and native entries without OMP or Bun; preserve edits.',
+                     omp_dir='Explicit default-profile OMP agent directory; conflicts with named profile selectors. Use printed launch recipe.')
+    if resource == 'opencode':
+        helps.update(check='Inspect configuration and binary compatibility separately; no writes or client execution.',
+                     disable='Remove unchanged owned files without requiring OpenCode; preserve edited files.',
+                     opencode_dir='Explicit OpenCode configuration directory; overrides OPENCODE_CONFIG_DIR. Launch with the printed environment setting.')
     groups = {name: parser.add_argument_group(name) for name in
               ('Targeting', 'Serving configuration', 'Lifecycle', 'Output')}
     for action in list(parser._actions):

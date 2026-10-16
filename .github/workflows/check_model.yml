@@ -31,7 +31,7 @@ jobs:
       - name: Install test prerequisites
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends python3 python3-venv curl ca-certificates git
+          apt-get install -y --no-install-recommends python3 python3-venv curl ca-certificates git npm
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install ROCm diagnostic tool
@@ -50,9 +50,15 @@ jobs:
           path: ${{ runner.temp }}/model-wheel
       - name: Stage qualified Pi runtime for generated-configuration smoke
         run: bash build_tools/stage-pi-runtime.sh "${RUNNER_TEMP}/pi-runtime"
-      - name: Qualify exact pinned 0.8B with Loom Control and generated Pi configuration
+      - name: Stage qualified OpenCode 2 runtime for generated-configuration smoke
+        run: bash build_tools/stage-opencode-runtime.sh "${RUNNER_TEMP}/opencode-runtime"
+      - name: Stage qualified OMP runtime for generated-configuration smoke
+        run: bash build_tools/stage-omp-runtime.sh "${RUNNER_TEMP}/omp-runtime"
+      - name: Qualify pinned 0.8B with Loom Control and generated Pi/OMP/OpenCode configuration
         env:
           LOOM_PI_RUNTIME: ${{ runner.temp }}/pi-runtime
+          LOOM_OPENCODE_RUNTIME: ${{ runner.temp }}/opencode-runtime
+          LOOM_OMP_RUNTIME: ${{ runner.temp }}/omp-runtime
           HF_HUB_CACHE: ${{ runner.temp }}/huggingface/hub
         run: |
           shopt -s nullglob

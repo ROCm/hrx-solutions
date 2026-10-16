@@ -253,6 +253,7 @@ with integration_lock(Path(sys.argv[1]),Deadline.after()): os._exit(25)
                          dict(self.identity,target=str(self.target/'..'/'pi'))):
             with self.assertRaises(InvalidInput): set_target(registry,identity)
         self.target.mkdir(mode=0o755)
+        self.target.chmod(0o755)  # Exercise unsafe permissions even under umask 077.
         with self.assertRaises(HemError):
             with target_lock(self.target,Deadline.after()): pass
         self.assertFalse((self.target/'loom-hem.lock').exists())

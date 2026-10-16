@@ -5,6 +5,7 @@
 # Install a wheel in a new venv; native lifecycle is opt-in on an AMD GPU host.
 # Usage: bash build_tools/check-wheel.sh WHEEL NEW_VENV_DIRECTORY [--native-lifecycle]
 set -euo pipefail
+umask 077
 if [[ $# -lt 2 || $# -gt 3 || ! -f $1 || $1 != *.whl || -e $2 || (${3:-} != "" && ${3:-} != --native-lifecycle) ]]; then
   echo "Usage: $0 WHEEL NEW_VENV_DIRECTORY [--native-lifecycle] (venv must not exist)" >&2
   exit 2

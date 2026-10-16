@@ -17,6 +17,8 @@ launch settings, and an **instance** is a model registration on a server.
 | `server` | `start`, `list`, `show`, `status`, `logs`, `reconcile`, `shutdown` |
 | `instance` | `start`, `stop`, `list`, `show`, `status`, `logs`, `export` |
 | `pi` | `configure` (including `--check` and `--disable`) |
+| `opencode` | `configure` (including `--check` and `--disable`) |
+| `omp` | `configure` (including `--check` and `--disable`) |
 
 Run `loom-control` for a getting-started sequence. Bare resource commands such as
 `loom-control model` list their actions and examples. These show the same guidance
@@ -378,7 +380,7 @@ GPUs or replace the resource-qualified 27B/concurrent-isolation gates.
 
 `loom-serve-setup` and `loom-serve-start` entry points are removed. Use Loom Control's
 `model`, `pipeline`, `server` and `instance` types for acquisition and lifecycle,
-and `pi` for local Pi configuration; direct `loom-serve` remains.
+and `pi`/`opencode`/`omp` for local client configuration; direct `loom-serve` remains.
 Old state files and external checkpoints remain untouched and are not adopted
 or replayed. Prefer a fresh state namespace (for example, set
 `LOOM_SERVE_DIR="$HOME/.loom-hem"` before running Loom Control), or choose fresh model IDs
@@ -525,3 +527,211 @@ This is a same-user loopback trust boundary: schema/profile checks reject
 detectable wrong listeners, but cannot authenticate ownership of an
 indistinguishable replacement at a recycled port. Pi has no lifecycle authority.
 Remote URLs, SSH tunnels and arbitrary external servers are outside this setup.
+
+
+## Connect OpenCode 2 once
+
+`loom-control opencode configure` installs a bundled local discovery plugin for
+**OpenCode 2.0.31** (`@opencode/cli`). The executable is also named `opencode`;
+OpenCode 1.x is a different integration and is unsupported. Install/select the
+qualified client on `PATH` yourself. Configure never installs or upgrades it.
+The standalone client works without Node; pinned Node 24.10.0 in our CI only
+runs source tests and stages test dependencies.
+
+After importing the `qwen08` model as described above, for example:
+
+```bash
+loom-control server start --name oc-local --device amdgpu --listen 127.0.0.1:8082
+loom-control instance start qwen08 --name oc-small-a --server oc-local \
+  --pipeline qwen-08b --context-capacity 32768 --pool-capacity 32768 \
+  --rows 4 --prefill-capacity 128
+loom-control instance start qwen08 --name oc-small-b --server oc-local \
+  --pipeline qwen-08b --context-capacity 32768 --pool-capacity 32768 \
+  --rows 4 --prefill-capacity 128
+loom-control opencode configure
+opencode
+```
+
+Use the OpenCode model selector to choose the exact instance name under the
+stable `loom-hem-…` provider for `oc-local`. Requests use OpenCode's built-in
+OpenAI-compatible transport directly to the local Loom `/v1/chat/completions`
+endpoint. No inference API key, dummy key, login, proxy or Pi installation is
+needed. OpenCode does not start or stop Loom servers/models.
+
+Startup captures ready, active, admitting text instances by joining native
+`/v1/models` and `/v1/status`. Context comes from the actual instance; output is
+the smaller of native output limit and context. Current validated profile
+advertises text input/output and `tools:false`, without reasoning variants.
+No tools, agent quality, compaction, session restoration or full context window
+is certified by this integration. The example's explicit 32768 capacities fit
+our bounded configuration smoke; serving defaults remain **8192 context /
+32768 shared pool**. These overrides do not promote larger defaults or promise
+that every client workload fits.
+
+Configure once. Ordinary model start/stop and new saved server creation require
+client refresh, not another configure. An open picker is a captured snapshot,
+not a continuously updated inventory. Refresh the **correct running OpenCode
+server**, or restart the client as the fallback:
+
+```bash
+opencode reload --server http://127.0.0.1:PORT
+```
+
+`PORT` is the OpenCode control-plane port, not a Loom inference port. Use that
+OpenCode server's own authentication (for example its `OPENCODE_PASSWORD`).
+This control-plane password is separate from keyless local inference. Changing
+the config directory does not retarget an already-running default server.
+There is no Loom polling service, watcher or additional refresh command.
+Unavailable/stopped servers contribute no usable models after refresh; their
+saved provider identity can remain in the endpoint projection. A request made
+against a stale captured model may be rejected by Loom until refresh.
+
+```bash
+loom-control opencode configure --check
+loom-control opencode configure --json
+loom-control opencode configure --disable
+```
+
+`--check` is passive: it does not run OpenCode, contact models or write files.
+It reports configuration/ownership separately from runtime qualification and
+availability. An absent/unsupported client does not prevent configuration
+inspection, but produces an unqualified compatibility finding. Passive binary
+qualification currently recognizes the exact qualified Linux x64 2.0.31 build;
+other binary identities are reported unqualified without executing them.
+`--disable` needs no client and removes only verified unchanged owned files.
+Reload/restart OpenCode afterward. Disable before uninstalling the wheel;
+rerun configure after a wheel upgrade to update copied assets. Export/backups
+of your own configuration are your responsibility.
+
+Destination precedence is `--opencode-dir PATH` > `OPENCODE_CONFIG_DIR` >
+`$XDG_CONFIG_HOME/opencode` (normally `~/.config/opencode`). For an alternate
+installation, select the same directory when launching and refreshing:
+
+```bash
+export OPENCODE_CONFIG_DIR="$HOME/.opencode-loom"
+loom-control opencode configure --opencode-dir "$OPENCODE_CONFIG_DIR"
+opencode
+# For an already-running server launched with this environment:
+opencode reload --server http://127.0.0.1:PORT
+```
+
+The only owned client directory is `plugins/loom-control-opencode/`, with five
+bundled assets plus generated config/manifest. Installation uses bounded
+atomic replacements, a pending intent and matching generations. Interrupted
+updates fail closed and can be retried; unknown or edited contents are retained
+for explicit resolution. Shared `opencode.json`/JSONC, credentials, default
+models/providers and other plugins are preserved. Explicit known provider
+suppression is reported; effective managed/project policy is evaluated by
+OpenCode, so check actual visibility after launch. No general policy evaluator
+is added here.
+
+The root-owned `clients/endpoints.json` is a derived projection of saved local
+server endpoints, independent of Pi configuration. It stores neither model
+inventory nor request history. Lifecycle commands keep an existing projection
+current; disable retains it because another client may reference it. Targets
+and their existing ancestors must be owned, non-symlink directories without
+unsafe write permissions, as with Pi.
+
+GPU CI runs the installed repaired wheel's generated plugin unchanged against
+two real named Qwen3.5 0.8B routes, then validates explicit reload, server/client
+restart, newly created server routing, zero usable models after shutdown,
+idempotence, passive check and client-independent disable. Source and installed
+asset contract tests separately cover changed origins/provider deletion and
+unsafe/edited files. Oh My Pi uses the separate integration described below.
+
+## Connect Oh My Pi
+
+`loom-control omp configure` supports **Oh My Pi 18.11.2** through its qualified
+**Bun 1.3.14 npm route** (`@oh-my-pi/pi-coding-agent`, executable `omp`). It does
+not install or upgrade either dependency; other versions and standalone binaries
+are not yet qualified. Pi and Oh My Pi are distinct clients with separate assets.
+
+Start your local Loom server and model first. For an ordinary OMP prompt, use an
+explicit adequate allocation; the standard client prompt exceeds the unchanged
+8192-token default. The configuration gate uses 32768 context and pool capacity:
+
+```sh
+loom-control server start --name omp-local --device amdgpu --listen 127.0.0.1:8080
+loom-control instance start small --name qwen-local --server omp-local \
+  --pipeline qwen-08b --context-capacity 32768 --pool-capacity 32768
+loom-control omp configure
+omp
+```
+
+Choose the `loom-hem-…/qwen-local` route in OMP. The collision-safe provider ID
+identifies the saved server; the model ID is the exact native registration ID.
+The bundled adapter discovers only ready text models by joining native models
+and status, and exposes actual effective context/output limits with tools and
+reasoning disabled for the qualified profile. It uses OMP's built-in compatible
+transport directly, with native keyless activation, without storing a dummy key
+or changing your credentials/default selection. Loom Control owns lifecycle;
+OMP never starts or stops servers/models.
+
+Configure installs `extensions/loom-control-omp/` and minimal `auth: none` entries
+for each known server in OMP's native models YAML. Existing `models.yml` wins,
+otherwise `models.yaml` is used, otherwise `models.yml` is created. Equivalent
+user-owned activation entries are borrowed and retained. Unrelated comments,
+provider credentials/order, settings and defaults are preserved. Only a narrow
+unambiguous block YAML subset is supported: ordinary bare keys with two-space
+provider/four-space auth indentation. Empty `providers: {}` is supported; quoted
+keys, multiline/flow values, aliases/merges/tags, duplicates and damaged ownership
+markers are refused without rewriting. Inspect/export and manually simplify an
+unsupported layout; backups/exports are your responsibility. A legacy models.json
+requires explicit user migration, never an automatic vendor migration.
+
+Discovery occurs at startup and explicit refresh, with no polling. After starting
+or stopping models on an already configured server, exit and restart OMP:
+
+```sh
+omp
+```
+
+`omp models refresh --json` is an optional inventory diagnostic; a separate refresh
+process does not update an existing session's picker. Restart
+forces online discovery instead of trusting OMP's 24-hour cache. Until refresh,
+visible inventory is a snapshot; request-time checks reject stale origin,
+incarnation, readiness or limits without rerouting. Unavailable/invalid endpoints
+contribute zero usable models after refresh. F5/live picker reload is not qualified.
+
+**Adding a new saved Loom server requires rerunning `loom-control omp configure`,
+then restart OMP.** Missing activation is excluded and reported with that
+instruction. Lifecycle and discovery never rewrite client YAML. Ordinary model
+changes on previously configured servers require no reconfiguration.
+
+```sh
+loom-control omp configure --check
+loom-control omp configure --disable
+```
+
+Check is passive: no client execution, inference, server start or repair. It
+separates owned configuration findings from client compatibility and does not
+certify live readiness. Disable needs neither OMP nor Bun and removes only owned,
+unchanged assets/stanzas. Borrowed activation, unrelated YAML, settings and the
+shared root endpoint document remain. Edited/foreign files and ambiguous partial
+updates are preserved with repair guidance; do not force-delete them. Repeating
+configure without changed inputs does not rewrite owned bytes.
+
+The default destination follows OMP's active profile: normally `~/.omp/agent`,
+or `~/.omp/profiles/NAME/agent` for a named profile. Profile precedence is
+`OMP_PROFILE` (including empty) then `PI_PROFILE`; named profiles ignore
+`PI_CODING_AGENT_DIR`. The explicit `--omp-dir` avoids inferred targeting and
+conflicting explicit selectors are rejected. For an isolated alternate target:
+
+```sh
+export PI_CODING_AGENT_DIR="$HOME/.omp-loom-agent"
+export OMP_PROFILE= PI_PROFILE=
+loom-control omp configure --omp-dir "$PI_CODING_AGENT_DIR"
+omp
+```
+
+Use a private directory with private ancestors; do not change shared directory
+permissions to bypass safety checks. OMP `--config` overlays settings and is not
+a models-file selector. Configure prints the resolved launch/refresh invocation
+and the truthful configuration action; there is no single native curl equivalent
+to installing several owned client files.
+
+The delivery gate runs the installed wheel's public configure against two real
+named 0.8B routes and a newly added server, with short genuine client requests,
+metadata, model refresh, restart, preservation, passive check and absent-client
+disable. These validate generated wiring, not agent tool quality, vendor session
+restoration, compaction or a full context window. Defaults remain unchanged.

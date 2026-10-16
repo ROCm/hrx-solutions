@@ -126,10 +126,14 @@ try:
         os.chdir(run)
         import hashlib
         sha = hashlib.sha256(Path(wheel).read_bytes()).hexdigest()
-        pi = ['--pi-runtime', str(Path(os.environ['LOOM_PI_RUNTIME']).resolve())] if os.environ.get('LOOM_PI_RUNTIME') else []
+        clients = []
+        for name in ('pi', 'opencode', 'omp'):
+            value = os.environ.get('LOOM_' + name.upper() + '_RUNTIME')
+            if value:
+                clients.extend(['--' + name + '-runtime', str(Path(value).resolve())])
         code = invoke([str(run / 'venv/bin/python'), str(Path(scripts) / 'hem_model_smoke.py'),
                        '--run', str(run / 'lifecycle'), '--wheel', wheel, '--wheel-sha256', sha,
-                       '--source', source, '--profile', 'ci08', *model, *pi], helper=True)
+                       '--source', source, '--profile', 'ci08', *model, *clients], helper=True)
 finally:
     if unresolved:
         publish('unresolved', error=unresolved, child_pid=child.pid if child else None)

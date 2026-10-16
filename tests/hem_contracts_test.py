@@ -22,8 +22,12 @@ class GrammarTest(unittest.TestCase):
     def parse(self, text):
         return hem_cli.parse_args(shlex.split(text))
 
-    def test_complete_five_type_inventory(self):
+    def test_complete_type_inventory(self):
         examples = {
+            'omp': ['configure', 'configure --check', 'configure --disable',
+                    'configure --omp-dir /alternate/omp'],
+            'opencode': ['configure', 'configure --check', 'configure --disable',
+                         'configure --opencode-dir /alternate/opencode'],
             'pi': ['configure', 'configure --check', 'configure --disable',
                    'configure --pi-dir /alternate/pi'],
             'model': ['available', 'download recipe --id qwen08',

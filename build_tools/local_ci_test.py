@@ -191,7 +191,9 @@ class RunnerTest(unittest.TestCase):
         calls = command.call_args_list
         self.assertEqual(calls[1].args[0][2], wheel)
         self.assertEqual(calls[2].args[0][2], wheel)
-        self.assertEqual(calls[2].kwargs['env']['LOOM_PI_RUNTIME'], str(runner.run / 'pi-runtime'))
+        for client in ('pi', 'opencode', 'omp'):
+            self.assertEqual(calls[2].kwargs['env']['LOOM_' + client.upper() + '_RUNTIME'],
+                             str(runner.run / f'{client}-runtime'))
         self.assertEqual(calls[2].args[0][-1], self.base / 'model')
         self.assertEqual(runner.summary['wheel']['sha256'], local_ci.hashlib.sha256(wheel.read_bytes()).hexdigest())
         (wheelhouse / 'stale.whl').write_bytes(b'other')
@@ -199,10 +201,24 @@ class RunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(local_ci.Failure, 'exactly one'):
                 runner.build()
 
+    def test_clients_stage_before_python_tests_and_pass_qualified_runtime_paths(self):
+        runner = self.runner()
+        with mock.patch.object(runner, 'command') as command:
+            runner.clients_source()
+        self.assertEqual([str(call.args[0][1]) for call in command.call_args_list], [
+            'build_tools/stage-opencode-runtime.sh', 'build_tools/check-opencode-assets.sh',
+            'build_tools/stage-omp-runtime.sh', 'build_tools/check-omp-assets.sh'])
+        self.assertEqual(runner.env['LOOM_OPENCODE_TEST_NODE'],
+                         str(runner.run / 'opencode-runtime/node-v24.10.0-linux-x64/bin/node'))
+        self.assertEqual(runner.env['LOOM_OMP_TEST_PACKAGE'],
+                         str(runner.run / 'omp-runtime/client/node_modules/@oh-my-pi/pi-coding-agent'))
+        self.assertLess(local_ci.STAGES.index('clients-source'), local_ci.STAGES.index('source-tests'))
+
     def test_failure_preserves_original_code_and_stops(self):
         runner = self.runner('--cpu-only')
         runner.preflight = lambda: None
         runner.capture = lambda: None
+        runner.clients_source = lambda: None
         runner.source_tests = lambda: runner.command(['bash', '-c', 'echo failure; exit 37'], cwd=self.base)
         self.assertEqual(runner.execute(), 1)
         self.assertEqual(runner.summary['failure']['exit_code'], 37)
@@ -239,6 +255,7 @@ class RunnerTest(unittest.TestCase):
         runner = self.runner()
         runner.preflight = lambda: None
         runner.capture = lambda: None
+        runner.clients_source = lambda: None
         runner.source_tests = lambda: None
         runner.pi_source = lambda: None
         ready = runner.run / 'ready'
@@ -288,6 +305,7 @@ class RunnerTest(unittest.TestCase):
         runner = self.runner('--cpu-only')
         runner.preflight = lambda: None
         runner.capture = lambda: None
+        runner.clients_source = lambda: None
         pid_file = runner.runtime / 'tmp/fixture.pid'
         token = 'local-ci-fixture-' + local_ci.uuid.uuid4().hex
         program = ("import subprocess,sys,time,pathlib; "

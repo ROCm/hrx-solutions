@@ -493,6 +493,12 @@ print(json.dumps(dict(record=record, exited=(not process or
         assert self.command('a', 'instance', 'list', '--server', 'server-a')['items'] == []
         if getattr(self.args, 'pi_runtime', None):
             self.pi_configuration()
+        if getattr(self.args, 'opencode_runtime', None):
+            from opencode_configuration_smoke import qualify
+            qualify(self)
+        if getattr(self.args, 'omp_runtime', None):
+            from omp_configuration_smoke import qualify
+            qualify(self)
         self.shutdown('a')
         with sqlite3.connect(self.state_path('a') / 'control.sqlite3') as connection:
             assert connection.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
@@ -654,6 +660,8 @@ def main():
     parser.add_argument('--wheel-sha256', required=True)
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--profile', choices=('ci08', 'full'), default='full')
+    parser.add_argument('--opencode-runtime', type=Path, help='CI-only pinned OpenCode 2 runtime staged by stage-opencode-runtime.sh')
+    parser.add_argument('--omp-runtime', type=Path, help='CI-only qualified Bun/OMP runtime staged by stage-omp-runtime.sh')
     parser.add_argument('--pi-runtime', type=Path, help='CI-only integrity-pinned runtime staged by stage-pi-runtime.sh')
     parser.add_argument('--model08', type=Path)
     parser.add_argument('--model27', type=Path)

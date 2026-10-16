@@ -318,7 +318,18 @@ def pi(args, data, width):
                      for key, value in data.items() if key != 'state'])]
 
 
-RENDERERS = {'model': model, 'pipeline': pipeline, 'server': server, 'instance': instance, 'pi': pi}
+def opencode(args, data, width):
+    return [f'OpenCode integration: {text(data.get("state"))}.',
+            details([(key.replace('_', ' ').capitalize(), issue(value))
+                     for key, value in data.items() if key != 'state'])]
+
+
+def omp(args, data, width):
+    return ['OMP integration: ' + text(data.get('state')) + '.',
+            details([(key.replace('_', ' ').capitalize(), issue(value)) for key,value in data.items() if key != 'state'])]
+
+
+RENDERERS = {'omp': omp, 'opencode': opencode, 'model': model, 'pipeline': pipeline, 'server': server, 'instance': instance, 'pi': pi}
 
 
 def render(args, data, *, width=None):

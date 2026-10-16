@@ -30,7 +30,8 @@ CONTRACTS = ('hem_process_test', 'hem_model_cli_test', 'hem_server_cli_test',
              'hem_instance_cli_test', 'hem_shutdown_test', 'hem_help_test',
              'hem_render_test', 'hem_contracts_test', 'hem_config_test', 'pipeline_catalog_test', 'hem_instances_test',
              'hem_pi_contracts_test',
-             'hem_pi_state_test', 'hem_pi_endpoints_test', 'hem_pi_cli_test')
+             'hem_pi_state_test', 'hem_pi_endpoints_test', 'hem_pi_cli_test', 'hem_clients_endpoints_test',
+             'hem_omp_cli_test', 'hem_omp_installer_test')
 
 
 def digest(path):

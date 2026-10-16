@@ -80,7 +80,9 @@ To manage model assets and server lifecycles with `loom-control`, use the
 [Loom Control companion guide](docs/solutions/loom-control.md). Loom Control
 prints readable results by default; scripts that previously parsed default JSON should add `--json`.
 For automatically maintained local Pi configuration, see
-[Connect Pi once](docs/solutions/loom-control.md#connect-pi-once).
+[Connect Pi once](docs/solutions/loom-control.md#connect-pi-once) or
+[connect OpenCode 2 once](docs/solutions/loom-control.md#connect-opencode-2-once).
+For Oh My Pi, see [connect OMP](docs/solutions/loom-control.md#connect-oh-my-pi).
 Native/HF/curl equivalents remain visible on stderr. Run `loom-control` or a bare
 resource such as `loom-control instance` for guidance and configuration help.
 
@@ -231,15 +233,15 @@ files are authoritative; see the [pipeline notices](loom-pipeline/llm/README.md#
 
 ### Run CI locally
 
-Run the complete ordinary wheel checks, including real 0.8B serving and Pi
+Run the complete ordinary wheel checks, including real 0.8B serving and Pi, OMP and OpenCode 2
 requests, with one command on a Linux x86-64 AMD GPU host with Docker:
 
 ```bash
 bash build_tools/local-ci.sh
 ```
 
-Use `--cpu-only` for source tests, source Pi checks, the manylinux build and
-installed wheel/Pi checks without GPU inference. `--model08 DIRECTORY` uses an
+Use `--cpu-only` for source tests, source client checks, the manylinux build and
+installed wheel/client checks without GPU inference. `--model08 DIRECTORY` uses an
 existing `Qwen3.5-0.8B-UD-Q5_K_XL.gguf` and adjacent `tokenizer.json` instead of
 Hugging Face acquisition. Otherwise the existing Hugging Face cache and login
 are reused; only missing pinned model files download. `HF_HUB_OFFLINE=1` rejects
@@ -256,7 +258,7 @@ stage exits and cleanup evidence. Failed and interrupted runs retain diagnostics
 remove their directory only after owned cleanup is complete. This does not run
 27B inference, publish releases or emulate GitHub artifact/cache transport.
 
-Safety-sensitive test and Pi state use a separate unique private directory under
+Safety-sensitive test and client state use a separate unique private directory under
 `/tmp`, so group-writable workspace ancestors do not require permission changes.
 The printed path and ownership record are retained in `summary.json`; reports,
 source, wheels and venvs stay in the selected run directory. Both directories

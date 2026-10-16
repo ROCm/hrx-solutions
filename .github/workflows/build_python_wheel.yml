@@ -57,9 +57,17 @@ jobs:
           env -u PYTHONPATH -u PYTHONHOME python3 -m venv "${RUNNER_TEMP}/hem-source-venv"
           env -u PYTHONPATH -u PYTHONHOME "${RUNNER_TEMP}/hem-source-venv/bin/python" -m pip install \
             'setuptools>=77' 'wheel>=0.45' 'packaging>=24.2'
+      - name: Stage pinned OpenCode 2 and TypeScript source-test runtime
+        run: bash build_tools/stage-opencode-runtime.sh "${RUNNER_TEMP}/opencode-runtime"
+      - name: Stage pinned OMP and Bun source-test runtime
+        run: bash build_tools/stage-omp-runtime.sh "${RUNNER_TEMP}/omp-runtime"
       - name: Run Python unit tests
+        # Both source TS contracts and actual released OMP loader must run.
         env:
           LOOM_SERVE_DIR: ${{ runner.temp }}/hem-source-state
+          LOOM_OPENCODE_TEST_NODE: ${{ runner.temp }}/opencode-runtime/node-v24.10.0-linux-x64/bin/node
+          LOOM_OMP_TEST_BUN: ${{ runner.temp }}/omp-runtime/runtime/node_modules/.bin/bun
+          LOOM_OMP_TEST_PACKAGE: ${{ runner.temp }}/omp-runtime/client/node_modules/@oh-my-pi/pi-coding-agent
         run: |
           # Unit-test fixtures must not inherit the enclosing CI run's identity.
           unset PYTHONPATH PYTHONHOME GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
@@ -108,6 +116,10 @@ jobs:
         run: bash build_tools/stage-pi-runtime.sh "${RUNNER_TEMP}/pi-runtime"
       - name: Check our source Pi assets and public loader integration
         run: bash build_tools/check-pi-assets.sh "${RUNNER_TEMP}/pi-runtime" binding/python/pi_extension
+      - name: Check our source OpenCode discovery assets
+        run: bash build_tools/check-opencode-assets.sh "${RUNNER_TEMP}/opencode-runtime" binding/python/opencode_plugin
+      - name: Check our source OMP assets and genuine public loader
+        run: bash build_tools/check-omp-assets.sh "${RUNNER_TEMP}/omp-runtime" binding/python/omp_extension
       - name: Build and repair wheel in manylinux container
         env:
           HRX_BAZEL_CACHE_DIR: ${{ runner.temp }}/hrx-wheel-bazel-cache
@@ -122,6 +134,9 @@ jobs:
             echo "$SECONDS" > "${RUNNER_TEMP}/wheel-cache-diagnostics/build.seconds" || true
           fi
       - name: Check wheel installation on Ubuntu host
+        env:
+          LOOM_OMP_TEST_BUN: ${{ runner.temp }}/omp-runtime/runtime/node_modules/.bin/bun
+          LOOM_OMP_TEST_PACKAGE: ${{ runner.temp }}/omp-runtime/client/node_modules/@oh-my-pi/pi-coding-agent
         run: |
           SECONDS=0
           shopt -s nullglob
@@ -135,6 +150,14 @@ jobs:
         run: |
           assets=$(env -u PYTHONPATH -u PYTHONHOME "${RUNNER_TEMP}/wheel-install-venv/bin/python" -c 'import hrx_solutions; from pathlib import Path; print(Path(hrx_solutions.__file__).parent / "pi_extension")')
           bash build_tools/check-pi-assets.sh "${RUNNER_TEMP}/pi-runtime" "$assets"
+      - name: Check installed OpenCode assets from the repaired wheel
+        run: |
+          assets=$(env -u PYTHONPATH -u PYTHONHOME "${RUNNER_TEMP}/wheel-install-venv/bin/python" -c 'import hrx_solutions; from pathlib import Path; print(Path(hrx_solutions.__file__).parent / "opencode_plugin")')
+          bash build_tools/check-opencode-assets.sh "${RUNNER_TEMP}/opencode-runtime" "$assets"
+      - name: Check installed OMP assets from the repaired wheel
+        run: |
+          assets=$(env -u PYTHONPATH -u PYTHONHOME "${RUNNER_TEMP}/wheel-install-venv/bin/python" -c 'import hrx_solutions; from pathlib import Path; print(Path(hrx_solutions.__file__).parent / "omp_extension")')
+          bash build_tools/check-omp-assets.sh "${RUNNER_TEMP}/omp-runtime" "$assets"
       - name: Upload validated manylinux wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
