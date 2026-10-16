@@ -1,4 +1,4 @@
-"""Owned Pi install/recovery. Public CLI checks Pi/Node compatibility first.
+"""Owned Pi install/recovery. CLI qualifies Pi/Node before configuration.
 
 No Pi process, settings file, package installer, HTTP or lifecycle operation is
 invoked here. One root reservation plus one bounded pending plan bridge SQLite
@@ -271,7 +271,7 @@ def _result(target, *, state, configured=False, changed=False, completed=True, e
 
 
 def configure_pi(root, target, deadline, *, check=False, disable=False):
-    """Configure/check/disable owned resources; CLI supplies qualified Pi runtime.
+    """Configure/check/disable owned resources; only configure requires qualified Pi.
 
     check is strictly passive, including an absent state namespace. Mutation
     errors preserve reservation/recovery evidence rather than guessing rollback.

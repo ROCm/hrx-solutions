@@ -160,7 +160,7 @@ suppressed when MTP is disabled.
 local Hem-managed servers. Pi reads the current model inventory and sends
 inference requests; it never downloads models or starts/stops Loom. This
 integration is qualified with `@earendil-works/pi-coding-agent` **1.3.0** and
-Node **22.22.1**; the command requires Node >=22.19.0. Select that Pi installation
+Node **22.22.1**; installing/updating configuration requires Node >=22.19.0. Select that Pi installation
 and its Node runtime on `PATH` yourself. Hem does not install or upgrade either,
 and older `@mariozechner` packages are not interchangeable.
 
@@ -225,8 +225,13 @@ loom-hem pi configure --disable
 
 Normal configure idempotently installs/updates or repairs unchanged owned files.
 `--check` passively inspects without creating directories, migrating SQLite or
-writing configuration: exit 0 means no changes required, exit 1 means changes
-are required. `--check` and `--disable` are mutually exclusive. All modes accept
+writing configuration, even when Pi or Node is missing or unsupported. It reports
+owned-configuration findings separately from runtime compatibility: exit 0 means
+no changes required and a qualified runtime; exit 1 means changes are required or
+the runtime is unqualified. JSON retains the configuration `state` and adds
+`runtime_compatibility` (`state`, `reason`, `next_action`); `runtime` is null when
+qualification fails or is skipped. Ownership conflicts and uncertain state retain
+their existing stronger exits. `--check` and `--disable` are mutually exclusive. All modes accept
 `--pi-dir PATH`, `--json` and `--timeout SECONDS` (default 10). Operational,
 invalid-input, pending and uncertain exits follow the existing 1/2/3/4 contract.
 Progress and exact discovery GET curl equivalents go to stderr; JSON stdout
@@ -271,7 +276,9 @@ only entries you know are obsolete. Hem does not manage exports or credentials.
 
 Run `loom-hem pi configure --disable` **before uninstalling the wheel**. Disable
 removes only unchanged owned integration artifacts, reports retained conflicts,
-and does not cancel an in-flight request; reload/restart Pi afterward. Uninstall
+and does not require installed/supported Pi or Node or run runtime qualification.
+All ownership, path and edited/foreign-file protections still apply. It does not
+cancel an in-flight request; reload/restart Pi afterward. Uninstall
 alone may leave copied files. After upgrading the wheel, rerun configure and
 reload/restart Pi to update those copies.
 

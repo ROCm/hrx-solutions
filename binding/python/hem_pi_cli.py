@@ -289,8 +289,22 @@ def run(args, deadline):
         raise InvalidInput("LOOM_SERVE_DIR/state root must be absolute")
     root, target = root.resolve(), resolve_target(args.pi_dir)
     managed_providers = []
+    runtime = None
+    compatibility = dict(state="not_checked", reason="runtime qualification is unnecessary for safe owned-file removal",
+                         next_action=None)
     try:
-        runtime = inspect_runtime(deadline)
+        if not args.disable:
+            try:
+                runtime = inspect_runtime(deadline)
+                compatibility = dict(state="compatible", reason="selected Pi and Node match the qualified package profile",
+                                     next_action=None)
+            except (HemError, OSError) as error:
+                if not args.check:
+                    raise
+                compatibility = dict(state="unqualified", reason=str(error),
+                                     next_action="select qualified Pi 1.3.0 and Node >=22.19.0 on PATH, then rerun loom-hem pi configure --check")
+                hem_display.emit("Pi runtime compatibility: " + compatibility["reason"])
+                hem_display.emit("Next: " + compatibility["next_action"])
         bundled_assets()  # Missing packaged resources are a known pre-write failure.
         if not args.disable:
             snapshot = passive_snapshot(root, deadline)
@@ -316,7 +330,10 @@ def run(args, deadline):
         if args.check:
             raise HemError("Pi inspection failed without writes", accepted=False) from error
         raise UncertainOutcome("Pi update interrupted; inspect with loom-hem pi configure --check before retrying") from error
-    response.update(runtime=runtime, legacy=legacy)
+    response.update(runtime=runtime, runtime_compatibility=compatibility, legacy=legacy)
+    if args.check and compatibility["state"] == "unqualified":
+        # Preserve the configuration findings and existing stronger failure codes.
+        response.exit_code = response.exit_code or 1
     if response.get("affected_paths"):
         response["affected_paths"] = sorted(set(response["affected_paths"]) | {str(root / ENDPOINT_PATH), str(root / "control.sqlite3")})
     for path in response.get("affected_paths", []):

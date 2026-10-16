@@ -88,6 +88,7 @@ class PiCliTest(unittest.TestCase):
         body, stderr = self.invoke()
         self.assertTrue(body["configured"] and body["changed"] and body["accepted"])
         self.assertEqual(body["runtime"]["version"], "1.3.0")
+        self.assertEqual(body["runtime_compatibility"]["state"], "compatible")
         self.assertEqual(body["legacy"][0]["ids"], ["old-qwen"])
         self.assertIn("Export/back up", stderr)
         self.assertNotIn("secret-sentinel", json.dumps(body) + stderr)
@@ -123,6 +124,118 @@ class PiCliTest(unittest.TestCase):
         (self.package / "dist/index.js").unlink()
         before = self.snapshot()
         self.invoke(expected=2)
+        self.assertEqual(before, self.snapshot())
+
+    def test_check_retains_findings_without_qualified_runtime(self):
+        self.invoke()
+        for failure in ("missing_pi", "unsupported_pi", "missing_node", "unsupported_node", "broken_node"):
+            with self.subTest(failure=failure):
+                self.metadata["version"] = "1.3.0"
+                self.write_metadata()
+                if not (self.bin / "pi").exists():
+                    (self.bin / "pi").symlink_to(self.package / "dist/cli.js")
+                self.node("22.22.1")
+                if failure == "missing_pi":
+                    (self.bin / "pi").unlink()
+                elif failure == "unsupported_pi":
+                    self.metadata["version"] = "1.1.0"
+                    self.write_metadata()
+                elif failure == "missing_node":
+                    (self.bin / "node").unlink()
+                elif failure == "unsupported_node":
+                    self.node("22.18.0")
+                else:
+                    # Executable selected on PATH, but its interpreter is absent.
+                    (self.bin / "node").write_text("#!/missing/interpreter\n")
+                before = self.snapshot()
+                body, stderr = self.invoke("--check", expected=1)
+                self.assertTrue(body["completed"] and body["configured"])
+                self.assertEqual(body["state"], "configured")
+                self.assertIsNone(body["runtime"])
+                self.assertEqual(body["runtime_compatibility"]["state"], "unqualified")
+                self.assertIn("Next:", stderr)
+                self.assertIn("--check", body["runtime_compatibility"]["next_action"])
+                self.assertEqual(before, self.snapshot())
+                self.invoke(expected=2)
+                self.assertEqual(before, self.snapshot())
+
+    def test_runtime_free_disable_preserves_user_files_and_rejects_unsafe_cleanup(self):
+        self.invoke()
+        (self.bin / "pi").unlink()
+        (self.bin / "node").unlink()
+        extension = self.target / "extensions/loom-hem"
+        index = extension / "index.ts"
+        original = index.read_bytes()
+        index.write_bytes(original + b"\n// user edit\n")
+        foreign = extension / "user.txt"
+        foreign.write_text("user file")
+        before = self.snapshot()
+        _, stderr = self.invoke("--disable", expected=2)
+        self.assertIn("unknown Pi extension content retained", stderr)
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(foreign.read_text(), "user file")
+        foreign.unlink()  # Explicit user cleanup for this test-owned file only.
+        body, stderr = self.invoke("--disable", expected=1)
+        self.assertEqual(body["state"], "cleanup_required")
+        self.assertIn(str(index), body["retained_paths"])
+        self.assertIn("restore retained owned files", stderr)
+        self.assertEqual(index.read_bytes(), original + b"\n// user edit\n")
+        self.assertEqual(body["runtime_compatibility"]["state"], "not_checked")
+        index.write_bytes(original)
+        body, _ = self.invoke("--disable")
+        self.assertEqual(body["state"], "disabled")
+        self.assertIsNone(body["runtime"])
+        before = self.snapshot()
+        self.invoke("--disable")
+        self.assertEqual(before, self.snapshot())
+
+    def test_absent_runtime_check_with_absent_schema1_and_corrupt_state_is_passive(self):
+        (self.bin / "pi").unlink()
+        before = self.snapshot()
+        body, _ = self.invoke("--check", expected=1)
+        self.assertEqual(body["state"], "changes_required")
+        self.assertEqual(body["runtime_compatibility"]["state"], "unqualified")
+        self.assertEqual(before, self.snapshot())
+        registry = Registry(self.root)
+        with sqlite3.connect(registry.database) as db:
+            db.execute("DROP TABLE pi_target")
+            db.execute("PRAGMA user_version=1")
+        before = self.snapshot()
+        self.invoke("--check", expected=1)
+        self.assertEqual(before, self.snapshot())
+        registry.database.write_bytes(b"corrupt SQLite")
+        before = self.snapshot()
+        body, stderr = self.invoke("--check", expected=1)
+        self.assertFalse(body["completed"])
+        self.assertIn("state snapshot unavailable; inventory retained", stderr)
+        self.assertEqual(before, self.snapshot())
+
+    def test_disable_never_qualifies_runtime_and_stronger_refusals_are_preserved(self):
+        self.invoke()
+        args = hem_cli.parse_args(["pi", "configure", "--disable"])
+        with patch.dict(os.environ, self.env), patch.object(hem_pi_cli, "inspect_runtime", side_effect=AssertionError("runtime probe forbidden")):
+            body = hem_pi_cli.run(args, hem_pi_cli.Deadline.after())
+        self.assertEqual(body["state"], "disabled")
+        self.invoke()
+        (self.bin / "pi").unlink()
+        before = self.snapshot()
+        self.invoke("--check", "--pi-dir", str(self.base / "other"), expected=2)
+        self.invoke("--disable", "--pi-dir", str(self.base / "other"), expected=2)
+        self.assertEqual(before, self.snapshot())
+        args = hem_cli.parse_args(["pi", "configure", "--check"])
+        with patch.dict(os.environ, self.env), patch.object(hem_pi_cli, "configure_pi", side_effect=UncertainOutcome("uncertain ownership")):
+            with self.assertRaises(UncertainOutcome):
+                hem_pi_cli.run(args, hem_pi_cli.Deadline.after())
+
+    def test_check_inaccessible_runtime_retains_passive_configuration_findings(self):
+        self.invoke()
+        args = hem_cli.parse_args(["pi", "configure", "--check"])
+        before = self.snapshot()
+        with patch.dict(os.environ, self.env), patch.object(hem_pi_cli, "_metadata", side_effect=PermissionError("selected Pi metadata inaccessible")), redirect_stderr(io.StringIO()):
+            body = hem_pi_cli.run(args, hem_pi_cli.Deadline.after())
+        self.assertEqual(body.exit_code, 1)
+        self.assertTrue(body["configured"])
+        self.assertIn("metadata inaccessible", body["runtime_compatibility"]["reason"])
         self.assertEqual(before, self.snapshot())
 
     def test_static_provider_collision_is_rejected_before_schema_or_ownership_writes(self):
