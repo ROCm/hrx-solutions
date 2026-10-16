@@ -16,7 +16,7 @@ library stack.
 
 ![HRX platform architecture: Loom compiler and C API, libhrx and HIP APIs, shared runtime, and pluggable GPU, NPU, and CPU HAL modules.](docs/assets/hrx-platform.svg)
 
-*HRX platform architecture. The [current serving example](docs/solutions/llm-serving.md#current-example)
+*HRX platform architecture. The [tested serving profile](docs/serving/profiles.md)
 documents the hardware, model, and interface coverage of this solution.*
 
 ## What the serving solution demonstrates
@@ -53,7 +53,7 @@ and adaptation are encouraged.
 
 | Solution | What you can do |
 | --- | --- |
-| [LLM serving](docs/solutions/llm-serving.md) | Import and validate a model, serve streaming chat locally, and inspect its configuration. |
+| [LLM serving](docs/solutions/llm-serving.md) | Acquire model assets, operate Loom Serve directly, and configure Pi. |
 
 Image serving, audio, NPU workloads, and interactive applications such as [Doom](https://gist.github.com/benvanik/20fbfd298ab1d53588ad12aedade6457)
 are candidates for future worked solutions.
@@ -67,16 +67,14 @@ virtual environment:
 # Installing in a venv is recommended.
 python -m pip install hrx-solutions
 
-# Discover models, pipelines and lifecycle commands.
-loom-hem --help
-loom-hem model available
-loom-hem pipeline list
-loom-hem server start --help
-loom-hem instance start --help
+# Inspect the direct native launcher.
+loom-serve --help
 ```
 
 Continue with the [LLM serving walkthrough](docs/solutions/llm-serving.md)
-to import a checkpoint, validate it, and start the server.
+to acquire the pinned assets, author deployment JSON, start the server, and
+configure Pi. For a wheel obtained before PyPI publication, begin with the
+[installation instructions](docs/solutions/llm-serving.md#install-and-choose-your-files).
 
 ## Agent Guidebooks
 

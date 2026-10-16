@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="470" viewBox="0 0 960 470" role="img" aria-labelledby="title description">
+  <title id="title">Files, configuration, and processes in a Loom Serve setup</title>
+  <desc id="description">The user supplies checkpoint and tokenizer files. The hrx-solutions wheel supplies packaged Loom pipeline sources. A user-authored deployment JSON references both sets of files on the inference host. The user registers that configuration with a running Loom Serve process. Pi uses its own provider configuration to send HTTP requests to Loom Serve and receive generated responses. Pi can run locally or connect through an SSH tunnel.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M1 1 9 5 1 9Z" fill="#a6b9dd"/>
+    </marker>
+    <style>
+      text { font-family: 'DejaVu Sans', Arial, sans-serif; fill: #f7f9ff; }
+      .kind { font-size: 13px; font-weight: 700; letter-spacing: 1.2px; fill: #b3c3df; }
+      .heading { font-size: 22px; font-weight: 700; }
+      .body { font-size: 16px; fill: #d3dff1; }
+      .note { font-size: 14px; fill: #b3c3df; }
+      .wire { fill: none; stroke: #a6b9dd; stroke-width: 2; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="960" height="470" rx="14" fill="#101b30"/>
+  <text x="32" y="39" class="kind">YOUR FILES AND CONFIGURATION</text>
+  <text x="652" y="39" class="kind">RUNNING PROCESSES</text>
+
+  <rect x="32" y="66" width="260" height="104" rx="9" fill="#243148" stroke="#536482"/>
+  <rect x="32" y="66" width="5" height="104" rx="2" fill="#fac05e"/>
+  <text x="52" y="92" class="kind">YOU PROVIDE</text>
+  <text x="52" y="123" class="heading">Model assets</text>
+  <text x="52" y="151" class="body">Checkpoint + tokenizer</text>
+
+  <rect x="32" y="216" width="260" height="104" rx="9" fill="#292640" stroke="#75639d"/>
+  <rect x="32" y="216" width="5" height="104" rx="2" fill="#b29ae8"/>
+  <text x="52" y="242" class="kind">THE WHEEL PROVIDES</text>
+  <text x="52" y="273" class="heading">Loom pipeline</text>
+  <text x="52" y="301" class="body">Packaged source programs</text>
+
+  <path d="M292 118 H316 V174 H344" class="wire"/>
+  <path d="M292 268 H316 V224 H344" class="wire"/>
+  <rect x="350" y="134" width="240" height="132" rx="9" fill="#243148" stroke="#536482"/>
+  <text x="370" y="161" class="kind">YOU WRITE</text>
+  <text x="370" y="193" font-size="20" font-weight="700">Deployment JSON</text>
+  <text x="370" y="222" class="body">File paths, device,</text>
+  <text x="370" y="246" class="body">capacities, admission</text>
+  <text x="350" y="298" class="note">References files on the server;</text>
+  <text x="350" y="319" class="note">does not upload them.</text>
+
+  <path d="M590 199 H645" class="wire"/>
+  <text x="620" y="183" class="note" text-anchor="middle">register</text>
+  <rect x="652" y="134" width="276" height="132" rx="9" fill="#17385b" stroke="#6d9ac7"/>
+  <text x="672" y="161" class="kind">YOU START AND CONTROL</text>
+  <text x="672" y="193" class="heading">Loom Serve</text>
+  <text x="672" y="222" class="body">Loads files on activation</text>
+  <text x="672" y="246" class="body">Serves HTTP on loopback</text>
+
+  <path d="M790 274 V348" class="wire" marker-start="url(#arrow)"/>
+  <text x="810" y="303" class="note">HTTP requests</text>
+  <text x="810" y="324" class="note">+ responses</text>
+  <rect x="652" y="356" width="276" height="88" rx="9" fill="#153b3e" stroke="#57b5ac"/>
+  <text x="672" y="383" class="kind">YOU CONFIGURE AND RUN</text>
+  <text x="672" y="419" class="heading">Pi</text>
+  <text x="711" y="418" class="body">Provider + model settings</text>
+
+  <text x="32" y="384" class="body">Keep model files and pipeline sources</text>
+  <text x="32" y="408" class="body">available until the model is retired.</text>
+  <text x="32" y="442" class="note">Pi runs locally, or reaches the same endpoint through SSH.</text>
+</svg>

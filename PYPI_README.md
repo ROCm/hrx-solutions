@@ -16,10 +16,9 @@ policy explicit in source while sharing native scheduling and execution
 infrastructure. Its [implementation guide](https://github.com/ROCm/hrx-solutions/blob/main/loom-pipeline/llm/README.md)
 explains the boundaries and how to change them.
 
-Loom Hem provides thin commands for model acquisition/validation, empty server
-startup, dynamic HTTP model registration, status and graceful shutdown. It
-prints equivalent native/HF/curl operations to stderr and supports JSON results
-on stdout. The direct `loom-serve` launcher remains available.
+Use `loom-serve` directly to start an empty foreground server, register a
+handwritten deployment document over HTTP, activate the model, and open admission
+after readiness checks. Configure Pi manually against the known endpoint.
 
 ## Install
 
@@ -27,18 +26,14 @@ On Linux x86-64 with Python 3.9 or newer, preferably in a virtual environment:
 
 ```bash
 python -m pip install hrx-solutions
-loom-hem --help
-loom-hem pipeline list
-loom-hem model available
-loom-hem server start --help
-loom-hem instance start --help
+loom-serve --help
 ```
 
 Inference requires a supported AMD GPU and driver. Follow the
 [LLM serving walkthrough](https://github.com/ROCm/hrx-solutions/blob/main/docs/solutions/llm-serving.md)
-for hardware coverage, checkpoint requirements, import and validation,
-streaming chat, configuration, state recovery and migration from the removed
-`loom-serve-setup` / `loom-serve-start` helpers.
+for checkpoint acquisition, native JSON configuration, streaming chat, manual
+Pi setup, SSH forwarding and graceful shutdown. PyPI publication is pending;
+use an available release or build wheel with the walkthrough installation steps.
 
 ## Learn more
 
