@@ -1,4 +1,4 @@
-"""Thin four-resource entry point for Loom Hem."""
+"""Thin four-resource entry point for Loom Control."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ class Parser(argparse.ArgumentParser):
 
 
 def parser():
-    root = Parser(prog="loom-hem", description="Thin setup and control for Loom Serve")
+    root = Parser(prog="loom-control", description="Thin setup and control for Loom Serve")
     hem_arguments.output(root)
     types = root.add_subparsers(dest="resource", title="Resources", metavar="RESOURCE")
     domains = {}
@@ -102,7 +102,7 @@ def main(argv=None):
             elif args.resource == 'server':
                 identifier = getattr(args, 'server', None) or getattr(args, 'name', None)
                 if identifier:
-                    print('Inspect before retrying: ' + shlex.join(['loom-hem', 'server', 'status', identifier]), file=sys.stderr)
+                    print('Inspect before retrying: ' + shlex.join(['loom-control', 'server', 'status', identifier]), file=sys.stderr)
         if json_output:
             identifiers = {}
             if args is not None:

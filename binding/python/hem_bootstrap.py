@@ -130,7 +130,7 @@ def main():
         root, server_id, token, descriptor, expires_at = sys.argv[1:]
         bootstrap(root, server_id, token, int(descriptor), Deadline(float(expires_at)))
     except Exception as error:
-        diagnostic = f'loom-hem bootstrap: {error}'[:4096]
+        diagnostic = f'loom-control bootstrap: {error}'[:4096]
         print(diagnostic, file=sys.stderr)
         # Early bootstrap errors precede stdout/stderr pipe capture. Preserve
         # one bounded diagnostic in this caller-selected launch directory.

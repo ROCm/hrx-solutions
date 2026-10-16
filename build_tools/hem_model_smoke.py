@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qualify an installed Hem wheel with immutable local Qwen fixtures.
+"""Qualify an installed Loom Control wheel with immutable local Qwen fixtures.
 
 Run with a standalone venv interpreter, outside the source checkout. The caller
 must hold the host GPU lock. Acquisition is explicit; HOME and credentials stay intact.
@@ -48,7 +48,7 @@ class Gate:
         # inherited tools, preserving the caller's HOME/HF cache/credentials.
         env['PATH'] = str(python.parent) + os.pathsep + env.get('PATH', '')
         start = time.monotonic()
-        process = subprocess.run([str(python.parent / 'loom-hem'), *args, '--json'],
+        process = subprocess.run([str(python.parent / 'loom-control'), *args, '--json'],
                                  env=env, cwd=self.root, capture_output=True, text=True, timeout=command_timeout)
         number = len(self.results['commands'])
         (self.root / f'{number:03}-{namespace}.stderr').write_text(process.stderr)
@@ -467,7 +467,7 @@ def main():
     parser.add_argument('--profile', choices=('ci08', 'full'), default='full')
     parser.add_argument('--model08', type=Path)
     parser.add_argument('--model27', type=Path)
-    parser.add_argument('--acquire08', action='store_true', help='Acquire exact pinned 0.8B recipe with Hem (CI only)')
+    parser.add_argument('--acquire08', action='store_true', help='Acquire exact pinned 0.8B recipe with Loom Control (CI only)')
     parser.add_argument('--native-provenance', default='Wheel bundled native payload; see wheel build provenance')
     args = parser.parse_args()
     if args.acquire08 and args.profile != 'ci08':

@@ -18,7 +18,7 @@ on:
         default: false
       test_model:
         type: boolean
-        description: "Run the gfx1151 Hem 0.8B lifecycle test after building the wheel. Pilot branch always skips this job."
+        description: "Run the gfx1151 Loom Control 0.8B lifecycle test after building the wheel. Pilot branch always skips this job."
         default: true
       release_type:
         type: choice
@@ -64,7 +64,7 @@ jobs:
       artifact_set: ${{ inputs.artifact_set || 'core' }}
 
   model:
-    name: Hem 0.8B dynamic lifecycle
+    name: Loom Control 0.8B dynamic lifecycle
     needs: python_wheel
     # Temporary pilot qualification bypass: gfx1151 startup is outside the cache gate.
     if: github.ref != 'refs/heads/pilot/wheel-bazel-cache' && (github.event_name != 'workflow_dispatch' || inputs.test_model)

@@ -161,7 +161,7 @@ class AcquisitionPathTest(unittest.TestCase):
                     'python_overrides_absent="PYTHONPATH" not in os.environ and "PYTHONHOME" not in os.environ,'
                     'user_site=site.ENABLE_USER_SITE)))\n')
                 hf.chmod(0o700)
-                cli = binary / 'loom-hem'
+                cli = binary / 'loom-control'
                 cli.write_text(
                     '#!' + sys.executable + '\nimport json,sys\n'
                     f'sys.path.insert(0,{str(source)!r})\n'
@@ -266,7 +266,7 @@ class SmokePendingLaunchTest(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.case = self.fixture.case
-        cli = self.case.root / 'loom-hem'
+        cli = self.case.root / 'loom-control'
         # Source-only fixture: the detached bootstrap must resolve binding.python
         # from this checkout too, without PYTHONPATH or an installed wheel.
         cli.write_text(self.fixture.cli.read_text().replace(
@@ -292,7 +292,7 @@ class SmokePendingLaunchTest(unittest.TestCase):
         original = self.gate.command
         captured = {}
         if outer_timeout:
-            cli = self.case.root / 'loom-hem'
+            cli = self.case.root / 'loom-control'
             cli.write_text(cli.read_text().replace('["--timeout","0.15"]', '["--timeout","5"]'))
 
         def command(namespace, *args, **kwargs):

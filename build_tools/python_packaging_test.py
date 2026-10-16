@@ -150,6 +150,28 @@ class PackagingTest(unittest.TestCase):
             with self.subTest(command=command), self.assertRaisesRegex(RuntimeError, 'retired commands'):
                 validate_wheel(wheel)
 
+    def test_wheel_requires_control_and_rejects_hem_even_alongside_control(self):
+        # Literal metadata is independent of the validator's required/retired sets.
+        for scripts, error in (
+            ('loom-serve = hrx_solutions.loom_serve:main\n', 'does not expose the loom-control command'),
+            ('loom-serve = hrx_solutions.loom_serve:main\n'
+             'loom-hem = hrx_solutions.hem_cli:main\n', 'retired commands: loom-hem'),
+            ('loom-serve = hrx_solutions.loom_serve:main\n'
+             'loom-control = hrx_solutions.hem_cli:main\n'
+             'loom-hem = hrx_solutions.hem_cli:main\n', 'retired commands: loom-hem'),
+        ):
+            with self.subTest(scripts=scripts):
+                wheel = self.wheel()
+                with zipfile.ZipFile(wheel) as archive:
+                    members = {name: archive.read(name) for name in archive.namelist()}
+                entrypoint = next(name for name in members if name.endswith('/entry_points.txt'))
+                members[entrypoint] = ('[console_scripts]\n' + scripts).encode()
+                with zipfile.ZipFile(wheel, 'w') as archive:
+                    for name, data in members.items():
+                        archive.writestr(name, data)
+                with self.assertRaisesRegex(RuntimeError, error):
+                    validate_wheel(wheel)
+
     def test_wheel_rejects_old_checker(self):
         with self.assertRaisesRegex(RuntimeError,'obsolete model execution checkers'):
             validate_wheel(self.wheel(obsolete=True))

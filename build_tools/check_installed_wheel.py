@@ -43,7 +43,7 @@ entrypoints = {entry.name: entry.value for entry in
                importlib.metadata.distribution("hrx-solutions").entry_points
                if entry.group == "console_scripts"}
 required_entrypoints = {
-    "loom-hem": "hrx_solutions.hem_cli:main",
+    "loom-control": "hrx_solutions.hem_cli:main",
     "loom-serve": "hrx_solutions.loom_serve:main",
 }
 assert entrypoints == required_entrypoints, entrypoints
@@ -52,7 +52,7 @@ for command, target in required_entrypoints.items():
     assert (Path(sys.prefix) / "bin" / command).is_file()
 for name in ("setup_cli", "serve_start", "connection_manager", "server_manager", "remote_registry", "state_store"):
     assert importlib.util.find_spec("hrx_solutions." + name) is None, name
-for name in ("loom-serve-setup", "loom-serve-start"):
+for name in ("loom-hem", "loom-serve-setup", "loom-serve-start"):
     assert not (Path(sys.prefix) / "bin" / name).exists(), name
 from check_installed_cpu import verify_wheel_payload
 provenance = verify_wheel_payload(args.wheel.resolve(strict=True), package_root)
@@ -106,11 +106,11 @@ subprocess.run(
 )
 
 # Exercise the public installed CLI without downloads or GPU initialization.
-cli = str(Path(sys.prefix) / "bin/loom-hem")
+cli = str(Path(sys.prefix) / "bin/loom-control")
 def invoke(*arguments, expected=0, timeout=15):
     process = subprocess.run([cli, *arguments, "--json"], capture_output=True,
                              text=True, timeout=timeout, check=False)
-    print("loom-hem", *arguments, "exit", process.returncode)
+    print("loom-control", *arguments, "exit", process.returncode)
     if process.stderr:
         print(process.stderr, file=sys.stderr, end="")
     expected_codes = expected if isinstance(expected, tuple) else (expected,)
@@ -214,7 +214,7 @@ def check_native_lifecycle():
 if args.native_lifecycle:
     check_native_lifecycle()
     print("Installed native lifecycle, payload identity and replacement retention passed")
-print("Installed Hem inventory, entrypoint and CPU descriptor checks passed")
+print("Installed Loom Control inventory, entrypoint and CPU descriptor checks passed")
 
 provenance.update(python=sys.executable, package=str(package_root), entrypoints=entrypoints,
                   native_lifecycle=args.native_lifecycle, success=True)

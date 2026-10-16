@@ -129,8 +129,11 @@ to the exact published version, then check the installed commands:
 ```bash
 python -m pip install --upgrade "hrx-solutions==${RELEASE_VERSION:?set the published version}"
 loom-serve --help
-loom-hem --help
+loom-control --help
 ```
+
+The management command is now `loom-control`. Update scripts using `loom-hem`;
+the wheel no longer installs that command. State and configuration are unchanged.
 
 Pin the exact version for an installation check, including prerelease suffixes.
 Ordinary pip upgrades generally prefer stable releases; use `--pre` when

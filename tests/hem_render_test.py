@@ -107,7 +107,7 @@ class RendererTest(unittest.TestCase):
             code, output, _ = self.invoke(argv, dict(items=[]))
             self.assertEqual(code, 0)
             self.assertIn(phrase, output)
-            self.assertIn('loom-hem ', output)
+            self.assertIn('loom-control ', output)
         for health in ('unknown', 'unhealthy'):
             args = hem_cli.parse_args(['instance', 'list'])
             output = hem_render.render(args, dict(items=[], server_health=health))
@@ -163,7 +163,7 @@ class RendererTest(unittest.TestCase):
         self.assertIn('Unknown', output)
         args = hem_cli.parse_args(['instance', 'start', identifier, '--url', 'http://127.0.0.1:8080'])
         output = hem_render.render(args, dict(INSTANCE, instance=identifier, state='running'), width=35)
-        self.assertIn('Inspect: loom-hem instance status ' + identifier + ' --url http://127.0.0.1:8080', output)
+        self.assertIn('Inspect: loom-control instance status ' + identifier + ' --url http://127.0.0.1:8080', output)
 
     def test_exit_codes_are_preserved_for_human_results_and_errors(self):
         for state, code in (('running', 0), ('unhealthy', 1), ('unknown', 4)):

@@ -90,7 +90,7 @@ def settings(data, width):
 
 
 def target(args, action, name):
-    argv = ['loom-hem', 'instance', action, name]
+    argv = ['loom-control', 'instance', action, name]
     if getattr(args, 'server', None):
         argv += ['--server', args.server]
     elif getattr(args, 'url', None):
@@ -109,11 +109,11 @@ def model(args, data, width):
         rows = [(item.get('id'), item.get('description'), item.get('pipeline')) for item in data.get('items', [])]
         return ['Download recipes (external checkpoints; not local inventory).',
                 table(['Recipe', 'Description', 'Pipeline'], rows, width) if rows else 'No download recipes are packaged.',
-                'For existing files: loom-hem model import --help']
+                'For existing files: loom-control model import --help']
     if command == 'list':
         items = data.get('items', [])
         if not items:
-            return ['No local models are registered.', 'Discover download recipes: loom-hem model available']
+            return ['No local models are registered.', 'Discover download recipes: loom-control model available']
         return [table(['Model', 'Asset / validation state', 'Pipeline'],
                       [(item.get('model', item.get('id')), model_state(item), item.get('pipeline')) for item in items], width),
                 *[f'{item.get("model", item.get("id"))}: {warnings(item)}' for item in items if warnings(item)]]
@@ -139,7 +139,7 @@ def model(args, data, width):
                                   ('Tokenizer', data.get('tokenizer'))]))
             if command == 'import':
                 lines.extend(Literal('Imported source: ' + text(asset.get('source_path'))) for asset in data.get('assets', []))
-            lines.append('Inspect assets: ' + shlex.join(['loom-hem', 'model', 'show', identifier or 'MODEL']))
+            lines.append('Inspect assets: ' + shlex.join(['loom-control', 'model', 'show', identifier or 'MODEL']))
         lines.append('Structural validation does not prove inference readiness or device memory fit.')
         return lines
     lines = [lead, warnings(data), details([('Pipeline', data.get('pipeline')),
@@ -170,7 +170,7 @@ def pipeline(args, data, width):
         return [table(['Pipeline', 'Profile', 'MTP supported'],
                       [(item.get('pipeline'), item.get('profile'), (item.get('capabilities') or {}).get('mtp'))
                        for item in items], width) if items else 'No pipelines are packaged.',
-                'Inspect defaults and limits: loom-hem pipeline show PIPELINE']
+                'Inspect defaults and limits: loom-control pipeline show PIPELINE']
     defaults, limits = data.get('defaults', {}), data.get('limits', {})
     rows = []
     for key in (*SETTINGS, 'mtp'):
@@ -190,7 +190,7 @@ def pipeline(args, data, width):
                      ('Layers', metadata.get('qwen35.block_count')),
                      ('Tokenizer fingerprint', compatibility.get('tokenizer_canonical_sha256')),
                      ('Catalog', catalog), ('Contract', str(catalog).rstrip('/') + '/compatibility.json' if catalog else None)]),
-            'Full compatibility metadata: loom-hem pipeline show ' + shlex.quote(data.get('pipeline', 'PIPELINE')) + ' --json',
+            'Full compatibility metadata: loom-control pipeline show ' + shlex.quote(data.get('pipeline', 'PIPELINE')) + ' --json',
             'Valid capacities do not guarantee device memory fit.']
 
 
@@ -218,7 +218,7 @@ def server(args, data, width):
     if args.command == 'list':
         items = data.get('items', [])
         if not items:
-            return ['No servers are configured.', 'Create a server: loom-hem server start --help']
+            return ['No servers are configured.', 'Create a server: loom-control server start --help']
         rows = [(item.get('server'), (item.get('record') or {}).get('endpoint', item.get('endpoint')),
                  item.get('state'), item.get('process_health'), item.get('http_health')) for item in items]
         return [table(['Server', 'Endpoint', 'State', 'Process', 'HTTP'], rows, width),
@@ -235,13 +235,13 @@ def server(args, data, width):
         return [f'Server {name}: {text(data.get("state"))}.', warnings(record),
                 details([('Endpoint', data.get('endpoint')), ('Device', (record.get('saved_settings') or {}).get('device'))]),
                 'New processes start without loaded instances.',
-                'Inspect: ' + shlex.join(['loom-hem', 'server', 'status', name or 'SERVER']),
-                'Logs: ' + shlex.join(['loom-hem', 'server', 'logs', name or 'SERVER'])]
+                'Inspect: ' + shlex.join(['loom-control', 'server', 'status', name or 'SERVER']),
+                'Logs: ' + shlex.join(['loom-control', 'server', 'logs', name or 'SERVER'])]
     mode = 'abort' if getattr(args, 'abort', False) else 'graceful shutdown'
     if data.get('state') == 'stopped' and data.get('completed'):
         return [f'Server {name} is stopped ({mode}).']
     return [f'Server {name}: {text(data.get("state"))}; shutdown is not confirmed ({mode}).',
-            warnings(data), 'Inspect: ' + shlex.join(['loom-hem', 'server', 'status', name or 'SERVER'])]
+            warnings(data), 'Inspect: ' + shlex.join(['loom-control', 'server', 'status', name or 'SERVER'])]
 
 
 def instance_observation(data, detailed, width):
@@ -283,7 +283,7 @@ def instance(args, data, width):
         if not items:
             if data.get('server_health') in ('unknown', 'unhealthy'):
                 return [context, 'Instance inventory unavailable: server health is ' + data['server_health'] + '.', warnings(data)]
-            return [context, 'No instances were observed.', 'Load a model: loom-hem instance start --help']
+            return [context, 'No instances were observed.', 'Load a model: loom-control instance start --help']
         return [context, table(['Instance', 'Tracked model', 'Observed state'],
                 [(item.get('instance'), item.get('model'), instance_state(item)) for item in items], width),
                 *[f'{item.get("instance")}: {warnings(item)}' for item in items if warnings(item)]]
@@ -323,5 +323,5 @@ def render(args, data, *, width=None):
     return '\n\n'.join(textwrap.fill(section, width=width, break_long_words=False,
                                     break_on_hyphens=False)
                        if not isinstance(section, Literal) and '\n' not in section
-                       and 'loom-hem ' not in section and len(section) > width else section
+                       and 'loom-control ' not in section and len(section) > width else section
                        for section in sections if section)

@@ -3,7 +3,7 @@
 This guide traces the LLM serving solution from model import through generated
 tokens. Use the [serving walkthrough](../../docs/solutions/llm-serving.md) to
 run it first, then return here to change model policy, kernels, or integration.
-Hem generates model registration JSON for an already running native server,
+Loom Control generates model registration JSON for an already running native server,
 using the selected catalog, model assets, capacities, and MTP capability.
 
 The pipeline ID `qwen` selects `qwen/qwen_27b` for Qwen3.8-27B
@@ -64,7 +64,7 @@ layouts, semantics, and fit with the native execution contract.
 ## 1. Import, validate, and select a pipeline
 
 [`model_download.py`](../../binding/python/model_download.py) supplies bundled
-qualified recipes for `loom-hem model available` and `loom-hem model download`. Recipes reuse
+qualified recipes for `loom-control model available` and `loom-control model download`. Recipes reuse
 the compatibility profile's independently pinned GGUF/tokenizer sources.
 Cache status is inspected locally and is separate from Loom registration.
 Downloads use one streamed `hf download` path and always alias HF-owned
@@ -97,7 +97,7 @@ and inconsistent metadata. All fragment files are checked before loading.
 
 Paths passed to native code must be absolute while preserving their visible
 filenames. Extensions matter for weight files, and aliases must preserve them.
-Legacy manifests remain untouched but are not adopted by Hem; explicit import
+Legacy manifests remain untouched but are not adopted by Loom Control; explicit import
 establishes new inventory records. Each model ID owns a separate directory.
 
 [`pipeline_validation.py`](../../binding/python/pipeline_validation.py) maps
@@ -146,12 +146,12 @@ execute model/tokenizer behavior. CPU-only Python regression tests live in
 For the 0.8B checkpoint, import its matching local files and select its catalog:
 
 ```sh
-loom-hem model import qwen-small --alias \
+loom-control model import qwen-small --alias \
   --gguf /path/to/Qwen3.5-0.8B-UD-Q5_K_XL.gguf \
   --tokenizer /path/to/tokenizer.json
-loom-hem model validate qwen-small --pipeline qwen-08b
-loom-hem server start --name local --device amdgpu --listen 127.0.0.1:8080
-loom-hem instance start qwen-small --server local
+loom-control model validate qwen-small --pipeline qwen-08b
+loom-control server start --name local --device amdgpu --listen 127.0.0.1:8080
+loom-control instance start qwen-small --server local
 ```
 
 Serving enables MTP at depth three automatically for `qwen`, and disables it
@@ -196,7 +196,7 @@ retain their own source/build copies independently of package replacement.
 The lower-level `loom-serve` command forwards native deployment arguments and
 can run in the foreground. For compatibility, catalog-directory invocations
 with `--weights` and `--tokenizer` are translated into deployment documents;
-omitting the catalog in that form selects 27B. This bypasses Hem's inventory
+omitting the catalog in that form selects 27B. This bypasses Loom Control's inventory
 and managed lifecycle. Native server registration requires positive pool
 capacity, so zero-pool dense execution is not exposed by that interface.
 
@@ -370,7 +370,7 @@ MTP adds a proposal block and private draft state to the target model:
 Committed carry, proposal scratch, target state, and feedback have different
 lifetimes. Keep acceptance and state publication consistent when changing any
 one of them. The optional device-fed continuation path issues bounded cohorts;
-the host still joins them. Loom Hem exposes MTP options, while additional
+the host still joins them. Loom Control exposes MTP options, while additional
 native execution options are available through `loom-serve`.
 
 ## Where to make a change
@@ -390,7 +390,7 @@ native execution options are available through `loom-serve`.
 A new source catalog can be exercised with the native `--model` argument
 before integrating it with the managed CLI. In that argument, “model” means
 a deployment JSON document referencing source providers; in
-`loom-hem instance start MODEL_ID`, it means an
+`loom-control instance start MODEL_ID`, it means an
 imported asset identity. The Python registry is an integration mechanism;
 the native server does not have a compiled-in model registration list.
 
@@ -402,7 +402,7 @@ model execution, retained continuation, and the HTTP behavior affected by
 the change. Include mixed spans and inactive or resumed rows when touching
 stateful execution. For MTP changes, include rejection and partial acceptance.
 
-The `loom-hem model validate` command performs CPU structural inspection, including
+The `loom-control model validate` command performs CPU structural inspection, including
 MTP tensor compatibility. The current HRX pin has removed the older Qwen model-specific tools, including
 `epoch_check` and `request_check`. Use the generic server with known-string
 requests and inspect `/v1/status` for registration diagnostics; successful
@@ -466,7 +466,7 @@ contracts. Trace the change through these steps:
    changes, use the upstream
    [`check_tools.py` harness](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/models/qwen/check_tools.py),
    supplying the edited catalog, to check generated calls and tool-result
-   follow-ups. The `loom-hem model validate` command checks structural compatibility
+   follow-ups. The `loom-control model validate` command checks structural compatibility
    of model assets; use the execution checks above to verify new chat framing.
 6. **Check the delivered solution.** Rebuild and reinstall the wheel, restart
    the server, and repeat the relevant request through the packaged launcher.

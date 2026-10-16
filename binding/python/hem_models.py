@@ -174,7 +174,7 @@ def download(registry, recipe_id, *, model_id, pipeline=None, offline=False, dry
         recipe = model_download.recipe_by_id(recipe_id)
         sources = model_download._sources(recipe)
     except ModelImportError as exc:
-        raise InvalidInput(str(exc).replace('loom-serve-setup models', 'loom-hem model')) from exc
+        raise InvalidInput(str(exc).replace('loom-serve-setup models', 'loom-control model')) from exc
     offline = offline or os.environ.get('HF_HUB_OFFLINE', '').upper() in ('1', 'ON', 'YES', 'TRUE')
     files = [model_download.source_status(source) for source in sources]
     paths = [Path(item['cache_path']) for item in files]

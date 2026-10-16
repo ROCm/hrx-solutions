@@ -1,12 +1,12 @@
-# Manage Loom Serve with Hem
+# Manage Loom Serve with Loom Control
 
 For direct foreground setup and manual Pi configuration, follow the
-[primary Loom Serve walkthrough](llm-serving.md). This companion covers Hem
+[primary Loom Serve walkthrough](llm-serving.md). This companion covers Loom Control
 model management and server/instance lifecycle commands.
 
-Loom Hem acquires and validates model files, starts empty Loom Serve processes,
+Loom Control acquires and validates model files, starts empty Loom Serve processes,
 and loads models through the native HTTP interface. Its commands use
-`loom-hem <type> <command>`. A **model** is a local asset set, a **pipeline** is
+`loom-control <type> <command>`. A **model** is a local asset set, a **pipeline** is
 its packaged implementation, a **server** is an owned native process with saved
 launch settings, and an **instance** is a model registration on a server.
 
@@ -17,15 +17,19 @@ launch settings, and an **instance** is a model registration on a server.
 | `server` | `start`, `list`, `show`, `status`, `logs`, `reconcile`, `shutdown` |
 | `instance` | `start`, `stop`, `list`, `show`, `status`, `logs`, `export` |
 
-Run `loom-hem` for a getting-started sequence. Bare resource commands such as
-`loom-hem model` list their actions and examples. These show the same guidance
+Run `loom-control` for a getting-started sequence. Bare resource commands such as
+`loom-control model` list their actions and examples. These show the same guidance
 as `--help`, exit successfully and do not initialize state or contact a server.
-Use `loom-hem TYPE COMMAND --help` for arguments, defaults and configuration
+Use `loom-control TYPE COMMAND --help` for arguments, defaults and configuration
 constraints. Incomplete actions still report missing inputs and exit 2.
 The native
 `loom-serve` command remains available for direct foreground execution.
 For implementation and extension points, see the
 [LLM pipeline guidebook](../../loom-pipeline/llm/README.md).
+
+The management command is now `loom-control`; update scripts that invoke
+`loom-hem`. No compatibility alias is installed. Existing state and configuration
+remain unchanged.
 
 ## Current example
 
@@ -51,19 +55,19 @@ checks belong to the [upstream pipeline checks](../../loom-pipeline/llm/README.m
 First inspect the packaged choices:
 
 ```bash
-loom-hem model available
-loom-hem pipeline list
-loom-hem pipeline show qwen-08b
+loom-control model available
+loom-control pipeline list
+loom-control pipeline show qwen-08b
 ```
 
 A recipe pins GGUF and tokenizer download coordinates. Install the external `hf`
 CLI if you want downloads (`python -m pip install huggingface_hub`; Python 3.9
 users can use `'huggingface_hub[cli]>=0.34,<1'`). Preserve your usual HF login,
-cache and credential environment. Hem prints resolved `hf download` commands.
+cache and credential environment. Loom Control prints resolved `hf download` commands.
 
 ```bash
-loom-hem model download qwen35-08b-q5-k-xl --id qwen08 --dry-run
-loom-hem model download qwen35-08b-q5-k-xl --id qwen08
+loom-control model download qwen35-08b-q5-k-xl --id qwen08 --dry-run
+loom-control model download qwen35-08b-q5-k-xl --id qwen08
 ```
 
 `--dry-run` previews without acquiring files or publishing model records.
@@ -73,7 +77,7 @@ referenced from the HF cache: keep them available and unchanged.
 Alternatively import your own checkpoint and its matching tokenizer:
 
 ```bash
-loom-hem model import qwen08 \
+loom-control model import qwen08 \
   --gguf /srv/models/qwen08/Qwen3.5-0.8B-UD-Q5_K_XL.gguf \
   --tokenizer /srv/models/qwen08/tokenizer.json \
   --alias --pipeline qwen-08b
@@ -96,9 +100,9 @@ assets under an existing ID are refused. Use another ID for a different asset
 set. There are no replacement, deletion or shared-cache pruning commands.
 
 ```bash
-loom-hem model list
-loom-hem model show qwen08 --json
-loom-hem model validate qwen08 --pipeline qwen-08b
+loom-control model list
+loom-control model show qwen08 --json
+loom-control model validate qwen08 --pipeline qwen-08b
 ```
 
 Inventory reports accessibility and validation state, including broken aliases;
@@ -111,10 +115,10 @@ structural validation rather than trusting a saved result.
 Create a named server definition with an explicit device and loopback listener:
 
 ```bash
-loom-hem server start --name local --device amdgpu --listen 127.0.0.1:8080
-loom-hem server show local
-loom-hem server status local --json
-loom-hem instance start qwen08 --name chat-small --server local
+loom-control server start --name local --device amdgpu --listen 127.0.0.1:8080
+loom-control server show local
+loom-control server status local --json
+loom-control instance start qwen08 --name chat-small --server local
 ```
 
 The server starts empty. Instance start validates, registers with admission
@@ -130,7 +134,7 @@ curl --fail-with-body -sS http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 `--name local` refuses an existing definition. After shutdown,
-`loom-hem server start local` reuses its saved settings and starts empty again;
+`loom-control server start local` reuses its saved settings and starts empty again;
 it does not reload old instances. A verified healthy live server is reused.
 A live unhealthy server or uncertain ownership blocks duplicate launch. To
 change launch settings, create another server name and choose an unused port.
@@ -140,7 +144,7 @@ With neither, exactly one configured server must exist. A URL does not grant
 ownership of its process or transfer model files. Registration requires the
 local matching build and asset context; remote provisioning is not provided.
 Keep lifecycle writers coordinated: avoid concurrent direct curl changes while
-Hem is changing registrations.
+Loom Control is changing registrations.
 
 ## Configure an instance
 
@@ -172,26 +176,26 @@ For an optional 27B profile, create a flat JSON file:
 cat > qwen27.json <<'JSON'
 {"rows":4,"context_capacity":8192,"pool_capacity":32768,"prefill_capacity":128,"mtp":true,"mtp_depth":3}
 JSON
-loom-hem model download qwen38-27b-q5-k-xl --id qwen27
-loom-hem instance start qwen27 --name chat-large --server local \
+loom-control model download qwen38-27b-q5-k-xl --id qwen27
+loom-control instance start qwen27 --name chat-large --server local \
   --config qwen27.json --context-capacity 16384
 ```
 
 Here only context capacity changes to 16384. Stop the smaller instance first if
-needed; Hem reports native resource accounting but cannot promise both fit.
+needed; Loom Control reports native resource accounting but cannot promise both fit.
 To disable MTP in this profile, remove `mtp_depth` before passing `--no-mtp`.
 
 ## Inspect and stop
 
 ```bash
-loom-hem server list --json
-loom-hem server show local
-loom-hem server status local
-loom-hem server logs local
-loom-hem instance list --server local --json
-loom-hem instance show chat-small --server local
-loom-hem instance status chat-small --server local
-loom-hem instance logs chat-small --server local --follow
+loom-control server list --json
+loom-control server show local
+loom-control server status local
+loom-control server logs local
+loom-control instance list --server local --json
+loom-control instance show chat-small --server local
+loom-control instance status chat-small --server local
+loom-control instance logs chat-small --server local --follow
 ```
 
 Server `show` displays saved launch settings. Server `status` and `list` report
@@ -204,8 +208,8 @@ following without stopping the server or instance. Server logs also support
 `--follow`.
 
 ```bash
-loom-hem instance stop chat-small --server local
-loom-hem server shutdown local
+loom-control instance stop chat-small --server local
+loom-control server shutdown local
 ```
 
 Stop gracefully unregisters and waits for that incarnation to retire, releasing
@@ -218,7 +222,7 @@ pending marker, possibly with some instances already retired. Inspect and
 repeat shutdown to continue, or explicitly escalate:
 
 ```bash
-loom-hem server shutdown local --abort
+loom-control server shutdown local --abort
 ```
 
 Lifecycle commands default to one 10-second budget, including coordination,
@@ -245,9 +249,9 @@ Pass `--json` explicitly to retain the existing result structures and values.
 It works before the resource, between resource/action, or after the action:
 
 ```bash
-loom-hem --json model list
-loom-hem model --json list
-loom-hem model list --json
+loom-control --json model list
+loom-control model --json list
+loom-control model list --json
 ```
 
 `--json` produces one JSON action result on stdout. Help always remains text,
@@ -259,7 +263,7 @@ pending timeout. Never blindly replay an uncertain registration or undrain.
 
 ## State and recovery
 
-By default Hem uses `~/.loom/control.sqlite3`. Set an absolute `LOOM_SERVE_DIR`
+By default Loom Control uses `~/.loom/control.sqlite3`. Set an absolute `LOOM_SERVE_DIR`
 before the first command to put the database, models, locks, retained runtime
 artifacts and logs in another state namespace. Use the same environment for
 all commands in a lifecycle. This does not change HOME/XDG, HF credentials/cache
@@ -273,16 +277,16 @@ local filesystem supporting SQLite and file locking; do not manually edit its
 rows or remove files while instances may still depend on them.
 
 Process identity includes boot/start identity and retained build information,
-not just a PID. Hem verifies owned processes and their listener association
+not just a PID. Loom Control verifies owned processes and their listener association
 before lifecycle changes; stale PIDs or an endpoint answering HTTP do not grant
 ownership. A new matching process is never silently adopted. Multiple saved
 servers can run on distinct loopback ports. There is no background management
 daemon or automatic restart/reload.
 
 ```bash
-loom-hem server reconcile local --json
-loom-hem server status local --json
-loom-hem instance list --server local --json
+loom-control server reconcile local --json
+loom-control server status local --json
+loom-control instance list --server local --json
 ```
 
 Reconciliation updates local evidence after observation. It never relaunches,
@@ -294,7 +298,7 @@ live serving build refuses new managed registration.
 
 ## Native equivalents and export
 
-Hem prints resolved native, HF and curl equivalents to stderr before operations,
+Loom Control prints resolved native, HF and curl equivalents to stderr before operations,
 including inspectable request-body paths and resolved endpoints. Local validation
 and bookkeeping are identified separately. These displays are explanations,
 not permission prompts or a dry run. A verified process-handle signal cannot be
@@ -310,7 +314,7 @@ with `SERVER:PORT`, which must be replaced with a compatible server endpoint.
 For a deliberate curl workflow, export a drained registration document:
 
 ```bash
-loom-hem instance export qwen08 --name chat-small --output chat-small.json
+loom-control instance export qwen08 --name chat-small --output chat-small.json
 curl --fail-with-body -sS http://127.0.0.1:8080/v1/models/register \
   -H 'Content-Type: application/json' --data-binary @chat-small.json
 curl -fsS http://127.0.0.1:8080/v1/status
@@ -335,7 +339,7 @@ weights, tokenizer and pipeline sources for the entire native registration
 lifetime, and use a compatible server. Export reserves nothing and records no
 history. Paths are server-local; posting JSON does not transfer files. Package
 upgrades or external file changes can invalidate paths: revalidate/regenerate
-before use. Direct curl does not run Hem's Python compatibility validation.
+before use. Direct curl does not run Loom Control's Python compatibility validation.
 
 ## Check an installed wheel locally
 
@@ -350,7 +354,7 @@ bash build_tools/model-smoke.sh /path/to/hrx_solutions.whl /path/to/new-run \
 The optional last argument must contain the exact
 `Qwen3.5-0.8B-UD-Q5_K_XL.gguf` and adjacent `tokenizer.json`; those files are
 immutable inputs. Without it, the helper acquires the pinned
-`qwen35-08b-q5-k-xl` recipe through Hem, preserving normal HF credentials/cache.
+`qwen35-08b-q5-k-xl` recipe through Loom Control, preserving normal HF credentials/cache.
 Python 3 with venv, Linux shell tools and the supported GPU/driver are required.
 The run directory must be new or empty. Serialize overlapping real-model checks
 with a shared GPU lock chosen by the caller.
@@ -368,18 +372,18 @@ GPUs or replace the resource-qualified 27B/concurrent-isolation gates.
 
 ## Migrating from the setup helpers
 
-`loom-serve-setup` and `loom-serve-start` entry points are removed. Use Hem's
+`loom-serve-setup` and `loom-serve-start` entry points are removed. Use Loom Control's
 four resource types for acquisition and lifecycle; direct `loom-serve` remains.
 Old state files and external checkpoints remain untouched and are not adopted
 or replayed. Prefer a fresh state namespace (for example, set
-`LOOM_SERVE_DIR="$HOME/.loom-hem"` before running Hem), or choose fresh model IDs
+`LOOM_SERVE_DIR="$HOME/.loom-hem"` before running Loom Control), or choose fresh model IDs
 whose directories do not already exist. An untracked populated model directory
 is refused rather than overwritten. Explicitly import each checkpoint/tokenizer
 pair, inspect it, create a new empty server and start its instances. Arrange for
 old services to be stopped through their original tooling before uninstalling
-that tooling, or use an unused port for Hem. Hem does not manage legacy or
+that tooling, or use an unused port for Loom Control. Loom Control does not manage legacy or
 arbitrary external processes merely because their endpoint responds.
 
-Remote setup/tunnels and application configuration are outside Hem's four-type
+Remote setup/tunnels and application configuration are outside Loom Control's four-type
 interface. Configure clients yourself against the streaming chat endpoint;
 there is no Pi configuration, remote provisioning or automatic migration command.

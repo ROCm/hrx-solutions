@@ -42,9 +42,9 @@ OBSOLETE_MODULES = (
     "setup_cli", "serve_start", "connection_manager", "server_manager",
     "remote_registry", "state_store",
 )
-OBSOLETE_ENTRY_POINTS = {"loom-serve-setup", "loom-serve-start"}
+OBSOLETE_ENTRY_POINTS = {"loom-hem", "loom-serve-setup", "loom-serve-start"}
 REQUIRED_ENTRY_POINTS = {
-    "loom-hem": "hrx_solutions.hem_cli:main",
+    "loom-control": "hrx_solutions.hem_cli:main",
     "loom-serve": "hrx_solutions.loom_serve:main",
 }
 

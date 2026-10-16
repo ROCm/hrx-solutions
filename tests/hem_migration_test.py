@@ -60,5 +60,5 @@ class MigrationBoundaryTest(unittest.TestCase):
             self.assertEqual(files.gguf_paths, (alias,))
 
     def test_unknown_recipe_points_to_current_tool(self):
-        with self.assertRaisesRegex(model_store.ModelImportError, 'loom-hem model available'):
+        with self.assertRaisesRegex(model_store.ModelImportError, 'loom-control model available'):
             model_download.recipe_by_id('missing')

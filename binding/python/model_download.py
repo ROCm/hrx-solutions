@@ -42,7 +42,7 @@ def recipe_by_id(identifier: str) -> dict:
     for recipe in recipes():
         if recipe["id"] == identifier:
             return recipe
-    raise model_store.ModelImportError(f"Unknown download recipe {identifier!r}; run 'loom-hem model available'")
+    raise model_store.ModelImportError(f"Unknown download recipe {identifier!r}; run 'loom-control model available'")
 
 
 def cache_root() -> Path:

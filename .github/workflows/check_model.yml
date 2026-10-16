@@ -1,7 +1,7 @@
 # Copyright 2026 The HRX Authors
 # Licensed under the MIT License.
 # SPDX-License-Identifier: MIT
-name: Check Hem dynamic model lifecycle
+name: Check Loom Control dynamic model lifecycle
 
 on:
   workflow_call:
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   model:
-    name: Test Hem 0.8B lifecycle (gfx1151)
+    name: Test Loom Control 0.8B lifecycle (gfx1151)
     runs-on: linux-gfx1151-gpu-rocm
     timeout-minutes: 20
     # Matches the successful gfx1151 configuration in ROCm/hrx-system ci_iree.yml.
@@ -48,7 +48,7 @@ jobs:
         with:
           name: hrx-solutions-wheel-linux-x86_64
           path: ${{ runner.temp }}/model-wheel
-      - name: Qualify exact pinned 0.8B with Hem
+      - name: Qualify exact pinned 0.8B with Loom Control
         env:
           HF_HUB_CACHE: ${{ runner.temp }}/huggingface/hub
         run: |

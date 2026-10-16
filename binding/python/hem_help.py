@@ -31,7 +31,7 @@ ACTIONS = {
         'show': ('Inspect exact defaults, limits, capabilities and compatibility rules; no GPU or local model required.', 'pipeline show qwen-08b'),
     },
     'server': {
-        'start': ('Start a new named server, or reuse saved settings. New processes start empty; prior instances are not reloaded.', 'server start --name local --device amdgpu --listen 127.0.0.1:8080\nloom-hem server start local'),
+        'start': ('Start a new named server, or reuse saved settings. New processes start empty; prior instances are not reloaded.', 'server start --name local --device amdgpu --listen 127.0.0.1:8080\nloom-control server start local'),
         'list': ('Observe saved servers, including stopped and unhealthy processes.', 'server list'),
         'show': ('Inspect saved device/listener settings; this is not a live health assertion.', 'server show local'),
         'status': ('Observe process ownership and HTTP health separately.', 'server status local'),
@@ -50,18 +50,18 @@ ACTIONS = {
     },
 }
 ROOT_EXAMPLES = """Get started:
-  loom-hem model available
-  loom-hem model download qwen35-08b-q5-k-xl --id qwen08
-  loom-hem server start --name local --device amdgpu --listen 127.0.0.1:8080
-  loom-hem instance start qwen08 --name chat-small --server local
-  loom-hem instance status chat-small --server local
+  loom-control model available
+  loom-control model download qwen35-08b-q5-k-xl --id qwen08
+  loom-control server start --name local --device amdgpu --listen 127.0.0.1:8080
+  loom-control instance start qwen08 --name chat-small --server local
+  loom-control instance status chat-small --server local
 
 This sequence requires an installed wheel, a supported AMD device and the
 external download CLI required by the recipe. Downloads acquire external
-checkpoint files. For existing assets: loom-hem model import --help
+checkpoint files. For existing assets: loom-control model import --help
 Chat requests use the server's HTTP endpoint.
 
-Use loom-hem RESOURCE --help or loom-hem RESOURCE ACTION --help for details.
+Use loom-control RESOURCE --help or loom-control RESOURCE ACTION --help for details.
 Bare root/resource commands show text guidance, even with --json.
 """
 
@@ -76,7 +76,7 @@ def configuration_reference():
     lines.extend([
         '  mtp: boolean; default is pipeline-dependent and requires MTP support.',
         '  Example file: {"rows": 4, "context_capacity": 8192}',
-        '  Exact defaults/capabilities: loom-hem pipeline show PIPELINE',
+        '  Exact defaults/capabilities: loom-control pipeline show PIPELINE',
         '  prefill_capacity must be <= context_capacity and >= mtp_depth + 1',
         '  (at least 1 when MTP is disabled). Explicit mtp_depth conflicts with',
         '  disabled MTP. Unsupported pipelines reject enabling MTP.',
@@ -88,13 +88,13 @@ def configuration_reference():
 
 def describe(root, domains):
     """Attach contextual prose and examples to the configured parser tree."""
-    root.description = 'Set up and control Loom Serve: loom-hem RESOURCE ACTION [options].'
+    root.description = 'Set up and control Loom Serve: loom-control RESOURCE ACTION [options].'
     root.epilog = ROOT_EXAMPLES
     for resource, domain in domains.items():
         domain.description = RESOURCES[resource]
         examples = list(ACTIONS[resource].values())[:2]
-        domain.epilog = ('Examples:\n  loom-hem ' + '\n  loom-hem '.join(value[1] for value in examples).replace('\nloom-hem', '\n  loom-hem')
-                         + f'\n\nUse loom-hem {resource} ACTION --help for arguments and examples.')
+        domain.epilog = ('Examples:\n  loom-control ' + '\n  loom-control '.join(value[1] for value in examples).replace('\nloom-control', '\n  loom-control')
+                         + f'\n\nUse loom-control {resource} ACTION --help for arguments and examples.')
         commands = next(a for a in domain._actions if isinstance(a, argparse._SubParsersAction))
         commands.required = False
         commands.metavar = 'ACTION'
@@ -103,7 +103,7 @@ def describe(root, domains):
         for command, child in commands.choices.items():
             description, example = ACTIONS[resource][command]
             child.description = textwrap.fill(description, width=78)
-            child.epilog = 'Examples:\n  loom-hem ' + example.replace('\n', '\n  ')
+            child.epilog = 'Examples:\n  loom-control ' + example.replace('\n', '\n  ')
             child.set_defaults(_help_parser=child)
             if resource == 'instance' and command in ('start', 'export'):
                 child.epilog += '\n\n' + configuration_reference()
@@ -124,7 +124,7 @@ def _arguments(parser, resource, command):
         'pipeline': ('Packaged pipeline ID to inspect (see pipeline list).' if resource == 'pipeline' else
                      "Packaged pipeline ID; omitted uses the recipe's declared pipeline (see model available)." if resource == 'model' and command == 'download' else
                      'Packaged pipeline ID; omitted selects the unique compatible pipeline (see pipeline list).'),
-        'recipe': 'Download recipe ID from loom-hem model available.',
+        'recipe': 'Download recipe ID from loom-control model available.',
         'id': 'Required local model ID for this download; distinct from the recipe ID.',
         'offline': 'Use only files already present in the download CLI cache; missing cached assets fail.',
         'dry_run': 'Preview acquisition commands; acquire no files and create no model record.',

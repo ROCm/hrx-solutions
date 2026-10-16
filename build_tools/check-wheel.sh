@@ -28,4 +28,4 @@ TMPDIR="$venv/cpu-fixtures" LOOM_SERVE_DIR="$venv/installed-cpu-state" "$venv/bi
 clean_env=(env -u HSA_OVERRIDE_GFX_VERSION -u IREE_HAL_AMDGPU_LIBHSA_PATH \
   -u IREE_HAL_AMDGPU_LIBAQLPROFILE_PATH -u LD_LIBRARY_PATH)
 "${clean_env[@]}" "$venv/bin/loom-serve" --help
-"${clean_env[@]}" "$venv/bin/loom-hem" --help
+"${clean_env[@]}" "$venv/bin/loom-control" --help

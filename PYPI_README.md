@@ -20,8 +20,8 @@ Use `loom-serve` directly to start an empty foreground server, register a
 handwritten deployment document over HTTP, activate the model, and open admission
 after readiness checks. Configure Pi manually against the known endpoint.
 
-`loom-hem` also provides model acquisition and managed server/instance lifecycle
-commands; see the [Hem companion guide](https://github.com/ROCm/hrx-solutions/blob/main/docs/solutions/loom-hem.md).
+`loom-control` also provides model acquisition and managed server/instance lifecycle
+commands; see the [Loom Control companion guide](https://github.com/ROCm/hrx-solutions/blob/main/docs/solutions/loom-control.md).
 Results are readable text by default. Scripts that previously parsed default JSON
 should add `--json`; equivalent native/HF/curl commands remain visible on stderr.
 Bare commands display guidance, and action `--help` explains configuration choices.

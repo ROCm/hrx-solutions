@@ -25,7 +25,7 @@ classifiers = [
 ]
 
 [project.scripts]
-loom-hem = "hrx_solutions.hem_cli:main"
+loom-control = "hrx_solutions.hem_cli:main"
 loom-serve = "hrx_solutions.loom_serve:main"
 
 [project.urls]

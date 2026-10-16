@@ -37,6 +37,8 @@ class HelpTest(unittest.TestCase):
                         expected = self.invoke(argv + ['--help'])
                         self.assertEqual(expected[0], 0)
                         self.assertEqual(expected[2], '')
+                        self.assertIn('usage: loom-control', expected[1])
+                        self.assertNotIn('loom-hem', expected[1])
                         for invocation in (argv, ['--json'] + argv, argv + ['--json']):
                             self.assertEqual(self.invoke(invocation), expected)
                     for module in hem_cli.DOMAINS.values():
@@ -58,13 +60,15 @@ class HelpTest(unittest.TestCase):
                         self.assertNotEqual(action.help, argparse.SUPPRESS)
                     for example in hem_help.ACTIONS[resource][command][1].splitlines():
                         words = shlex.split(example)
-                        if words[0] == 'loom-hem':
+                        if words[0] == 'loom-control':
                             words = words[1:]
                         args = hem_cli.parse_args(words)
                         self.assertEqual((args.resource, args.command), (resource, command))
                     code, output, errors = self.invoke([resource, command, '--help'])
                     self.assertEqual(code, 0)
                     self.assertIn('Examples:', output)
+                    self.assertIn(f'usage: loom-control {resource} {command}', output)
+                    self.assertNotIn('loom-hem', output)
                     self.assertEqual(errors, '')
         self.assertEqual(count, 22)
 
@@ -88,10 +92,10 @@ class HelpTest(unittest.TestCase):
                 self.assertIn(description, normalized)
 
     def test_contextual_errors_and_unchanged_json_error_contract(self):
-        for argv, context in ((['model', 'import'], 'loom-hem model import'),
-                              (['server', 'start'], 'loom-hem server start'),
-                              (['instance', 'list', '--server', 'a', '--url', 'http://localhost:8080'], 'loom-hem instance list'),
-                              (['pipeline', 'unknown'], 'loom-hem pipeline')):
+        for argv, context in ((['model', 'import'], 'loom-control model import'),
+                              (['server', 'start'], 'loom-control server start'),
+                              (['instance', 'list', '--server', 'a', '--url', 'http://localhost:8080'], 'loom-control instance list'),
+                              (['pipeline', 'unknown'], 'loom-control pipeline')):
             with self.subTest(argv=argv):
                 code, output, errors = self.invoke(argv)
                 self.assertEqual(code, 2)
