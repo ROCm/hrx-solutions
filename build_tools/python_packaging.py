@@ -185,8 +185,16 @@ def build_native_executables(bazel: Path, rocm_root: Path) -> dict[str, Path]:
         f"--repo_env=IREE_ROCM_PATH={rocm_root}",
     )
     environment = bazel_environment()
+    metrics_options = []
+    if metrics_dir := os.environ.get("HRX_BAZEL_METRICS_DIR"):
+        metrics_path = Path(metrics_dir)
+        metrics_path.mkdir(parents=True, exist_ok=True)
+        metrics_options = [
+            f"--profile={metrics_path / 'native-build.profile.gz'}",
+            f"--build_event_json_file={metrics_path / 'native-build.events.json'}",
+        ]
     subprocess.run(
-        [str(bazel), "build", *build_options, *BAZEL_TARGETS.values()],
+        [str(bazel), "build", *build_options, *metrics_options, *BAZEL_TARGETS.values()],
         cwd=REPO_ROOT,
         check=True,
         env=environment,

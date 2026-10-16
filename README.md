@@ -162,6 +162,23 @@ venv, without the build container's toolchain or environment. The build checkout
 must have no conflicting local Bazel configuration; for a host-native build,
 use the setup below.
 
+To reuse native compilation between local container builds, select a dedicated
+absolute directory outside this checkout:
+
+```bash
+HRX_BAZEL_CACHE_DIR=/path/to/wheel-cache bash build_tools/build-wheel.sh
+```
+
+The first run creates an empty cache. Later builds reuse matching Bazel actions,
+including snapshots from older source revisions, while still building and
+validating the current wheel. Unusable cache storage or unsupported snapshot
+metadata disables caching for that invocation. Omit the variable, or set
+`HRX_BAZEL_CACHE_ENABLED=0`, to bypass caching. The snapshot contains only
+`bazel-actions/` and provenance in `manifest.json`; it does not contain the SDK,
+wheel, or Bazel server state. Publication admission requires a completed build,
+stable contents, and apparent and allocated sizes of at most 3 GiB. An oversized
+snapshot is not uploaded; local compilation can continue using it.
+
 From a checkout, with a Python virtual environment activated, install
 Bazelisk 1.29.0 on `PATH` and select a ROCm SDK containing the compiler, headers,
 and runtime libraries:

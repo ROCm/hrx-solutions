@@ -1,6 +1,7 @@
 """Model validation assets and removal of the obsolete native checker."""
 
 from pathlib import Path
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -28,6 +29,13 @@ class PackagingTest(unittest.TestCase):
         self.assertEqual(query.call_count,1)
         self.assertEqual(run.call_args.args[0][-1],packaging.BAZEL_TARGETS['loom-serve'])
         self.assertNotIn('epoch_check',' '.join(run.call_args.args[0]))
+
+    def test_metrics_only_apply_to_native_build(self):
+        with patch.dict(os.environ, {"HRX_BAZEL_METRICS_DIR": str(self.root / "metrics")}), patch.object(packaging, "_query_bazel_output", return_value=self.root / "server") as query, patch.object(packaging.subprocess, "run") as run:
+            packaging.build_native_executables(self.root / "bazel", self.root / "rocm")
+        self.assertTrue(any(arg.startswith("--profile=") for arg in run.call_args.args[0]))
+        self.assertTrue(any(arg.startswith("--build_event_json_file=") for arg in run.call_args.args[0]))
+        self.assertFalse(any(arg.startswith("--profile=") or arg.startswith("--build_event_json_file=") for arg in query.call_args.args[2]))
 
     def test_staging_removes_stale_binary_and_preserves_runtime(self):
         rocm=self.root/'rocm'
