@@ -81,8 +81,6 @@ class NativeClient:
         # A bounded standalone observation still has one total I/O budget.
         budget = self.deadline or Deadline.after()
         budget.remaining()
-        equivalent = hem_display.http(method, self.endpoint + path,
-                                      body_path=body_path, body=body, secrets=self.secrets)
         request_headers = dict(headers or {})
         # Only native log selectors are exposed; no hidden authorization headers
         # or transport headers may make the printed curl differ from the request.
@@ -91,10 +89,9 @@ class NativeClient:
         if any(not isinstance(value, str) or any(c in value for c in "\r\n")
                for value in request_headers.values()):
             raise InvalidInput("invalid native request header value")
-        if request_headers:
-            equivalent += " " + hem_display.command(
-                [part for key, value in request_headers.items() for part in ("--header", f"{key}: {value}")],
-                secrets=self.secrets)
+        equivalent = hem_display.http(method, self.endpoint + path,
+                                      body_path=body_path, body=body, secrets=self.secrets,
+                                      headers=request_headers)
         if display:
             self.emit(equivalent)
         connection = http.client.HTTPConnection(self.host, self.port, timeout=budget.remaining())

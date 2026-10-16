@@ -19,6 +19,40 @@ _SENSITIVE = re.compile(
 _REDACTED = "<redacted>"
 
 
+class Equivalent(str):
+    """Keep the existing one-line JSON value, with a readable stderr display."""
+
+    def __new__(cls, value, display):
+        instance = super().__new__(cls, value)
+        instance.display = display
+        return instance
+
+
+def _multiline(argv):
+    # Group option/value pairs, preserving each complete shell-quoted argument.
+    groups, index = [], 0
+    while index < len(argv):
+        group = [argv[index]]
+        if argv[index] in ('--request', '--header', '-H', '--data-binary', '--device',
+                           '--listen', '--tokenizer', '--revision', '--cache-dir', '-c') and index + 1 < len(argv):
+            index += 1
+            group.append(argv[index])
+        groups.append(shlex.join(group))
+        index += 1
+    lines, line = [], ''
+    for group in groups:
+        force_break = bool(line) and (group.startswith(('--request ', '--header ', '--data-binary '))
+                                     or group.startswith(('http://', 'https://', "'http://", "'https://")))
+        if line and (force_break or len(line) + len(group) + 1 > 78):
+            lines.append(line)
+            line = group
+        else:
+            line = (line + ' ' + group).lstrip()
+    if line:
+        lines.append(line)
+    return ' \\\n  '.join(lines)
+
+
 def _url(value: str) -> str:
     if not value.startswith(("http://", "https://")):
         return value
@@ -77,14 +111,18 @@ def command(argv: Sequence[str], *, environment: Mapping[str, str] | None = None
             if secret:
                 value = value.replace(secret, _REDACTED)
         assignments.append(f"{key}={value}")
-    rendered = shlex.join((["env", *assignments] if assignments else []) + values)
+    argv = (["env", *assignments] if assignments else []) + values
+    rendered = shlex.join(argv)
+    display = '# Equivalent command\n' + _multiline(argv)
     if _REDACTED in rendered or "%3Credacted%3E" in rendered:
         rendered += "  # credentials redacted; replay needs existing credentials"
-    return rendered
+        display = '# Credentials redacted; supply credentials to replay.\n' + display
+    return Equivalent(rendered, display)
 
 
 def http(method: str, url: str, *, body_path: Path | None = None,
-         body: bytes | None = None, secrets: Sequence[str] = ()) -> str:
+         body: bytes | None = None, secrets: Sequence[str] = (),
+         headers: Mapping[str, str] | None = None) -> str:
     """Show the actual published body path, verifying its transport bytes.
 
     The adapter must send these same bytes and keep the file inspectable. This
@@ -101,8 +139,12 @@ def http(method: str, url: str, *, body_path: Path | None = None,
         if actual != body:
             raise InvalidInput("HTTP body file differs from submitted bytes")
         argv += ["--header", "Content-Type: application/json", "--data-binary", "@" + str(body_path)]
-    return command(argv, secrets=secrets)
+    argv += [part for key, value in (headers or {}).items()
+             for part in ('--header', f'{key}: {value}')]
+    rendered = command(argv, secrets=secrets)
+    return Equivalent(rendered, rendered.display.replace('# Equivalent command', '# Native HTTP request', 1))
 
 
 def emit(equivalent: str, *, stream: TextIO | None = None) -> None:
-    print(equivalent, file=sys.stderr if stream is None else stream, flush=True)
+    print(getattr(equivalent, 'display', equivalent),
+          file=sys.stderr if stream is None else stream, flush=True)

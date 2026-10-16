@@ -7,13 +7,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 import threading
 import time
 
-from . import model_store, pipeline_validation
+from . import hem_display, model_store, pipeline_validation
 from .qwen_validation import load_profile
 
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -99,7 +98,8 @@ def _redact(value: str) -> str:
 
 def _run_hf(command: list[str]) -> str:
     """Stream both CLI channels to stderr and retain bounded stdout metadata."""
-    _progress("Running: " + _redact(shlex.join(command)))
+    hem_display.emit(hem_display.command(command, secrets=[
+        argument for argument in command if _redact(argument) != argument]))
     environment = os.environ.copy()
     environment["HF_HUB_DISABLE_TELEMETRY"] = "1"
     environment["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"

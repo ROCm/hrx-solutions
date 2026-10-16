@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 
-from . import hem_arguments, hem_help, hem_instance_cli, hem_model_cli, hem_pipeline_cli, hem_server_cli
+from . import hem_arguments, hem_help, hem_instance_cli, hem_model_cli, hem_pipeline_cli, hem_server_cli, hem_render
 from .hem_common import Deadline, HemError, InvalidInput, result
 
 
@@ -80,6 +81,15 @@ def main(argv=None):
         if error.accepted is not None or error.exit_code == 4:
             acceptance = 'unknown' if error.accepted is None else str(error.accepted).lower()
             print(f"accepted: {acceptance}", file=sys.stderr)
+        if not json_output and args is not None and (error.accepted is True or error.exit_code in (3, 4)):
+            if args.resource == 'instance':
+                identifier = getattr(args, 'instance', None) or getattr(args, 'name', None) or getattr(args, 'model', None)
+                if identifier:
+                    print('Inspect before retrying: ' + hem_render.target(args, 'status', identifier), file=sys.stderr)
+            elif args.resource == 'server':
+                identifier = getattr(args, 'server', None) or getattr(args, 'name', None)
+                if identifier:
+                    print('Inspect before retrying: ' + shlex.join(['loom-hem', 'server', 'status', identifier]), file=sys.stderr)
         if json_output:
             identifiers = {}
             if args is not None:
@@ -100,7 +110,11 @@ def main(argv=None):
     if json_output:
         print(json.dumps(response))
     else:
-        print(json.dumps(response, indent=2))
+        rendered = hem_render.render(args, response)
+        if rendered:
+            sys.stdout.write(rendered)
+            if args.command != 'logs' and not rendered.endswith('\n'):
+                sys.stdout.write('\n')
     return getattr(response, 'exit_code', 0)
 
 

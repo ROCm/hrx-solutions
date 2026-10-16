@@ -129,7 +129,14 @@ def _observation(registry, manager, server_id, deadline):
                       error=str(error), **base)
 
 
-def _logs(registry, manager, record, follow):
+def _log_delta(snapshot, current):
+    overlap = min(len(snapshot), len(current))
+    while overlap and snapshot[-overlap:] != current[:overlap]:
+        overlap -= 1
+    return current[overlap:]
+
+
+def _logs(registry, manager, record, follow, *, json_output=False):
     paths = _log_paths(record)
     if paths:
         hem_display.emit(hem_display.command(['tail', '-c', '65536', *(['-F'] if follow else []), *paths]))
@@ -152,15 +159,18 @@ def _logs(registry, manager, record, follow):
                 if current != snapshot:
                     # Preserve append/rotation continuity within the bounded
                     # combined tail. If no overlap survives, emit the new tail.
-                    overlap = min(len(snapshot), len(current))
-                    while overlap and snapshot[-overlap:] != current[:overlap]:
-                        overlap -= 1
-                    sys.stderr.write(current[overlap:].decode('utf-8', errors='replace'))
+                    sys.stderr.write(_log_delta(snapshot, current).decode('utf-8', errors='replace'))
                     sys.stderr.flush()
                     snapshot = current
         except KeyboardInterrupt:
             pass
-        snapshot = read_logs(record)
+        final = read_logs(record)
+        if not json_output:
+            # Human mode has no duplicate final stdout snapshot: retain bytes
+            # appended between the final observation and process exit/Ctrl-C.
+            sys.stderr.write(_log_delta(snapshot, final).decode('utf-8', errors='replace'))
+            sys.stderr.flush()
+        snapshot = final
     return result('logs', completed=True, server=record['id'], paths=paths,
                   logs=snapshot.decode('utf-8', errors='replace'), followed=follow)
 
@@ -200,5 +210,6 @@ def run(args, deadline):
     if args.command in ('status', 'reconcile'):
         return _observation(registry, manager, args.server, budget)
     if args.command == 'logs':
-        return _logs(registry, manager, registry.get_server(args.server), args.follow)
+        return _logs(registry, manager, registry.get_server(args.server), args.follow,
+                     json_output=getattr(args, 'json', False))
     raise InvalidInput('unknown server command')

@@ -180,6 +180,7 @@ def run(args, deadline):
             hem_display.emit('Local packaged pipeline validation (no native equivalent)')
             answer = hem_config.export_deployment(files, args.output, args.name or args.model,
                         overrides=_overrides(args), config_path=args.config, pipeline=args.pipeline)
+        hem_display.emit('# Registration example: replace SERVER:PORT with your compatible server endpoint.')
         hem_display.emit(hem_display.http('POST', 'http://SERVER:PORT/v1/models/register',
                             body_path=Path(answer['output']), body=Path(answer['output']).read_bytes()))
         return dict(answer, model=args.model)
