@@ -8,15 +8,15 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from build_tools import python_packaging as packaging
-from build_tools import loom_catalog
-from build_tools.validate_wheel import HEM_MODULES, OBSOLETE_MODULES, OBSOLETE_ENTRY_POINTS, REQUIRED_ENTRY_POINTS, PI_ASSETS, validate_wheel
+from build_tools.wheel_tools import python_packaging as packaging
+from build_tools.model_tools import loom_catalog
+from build_tools.wheel_tools.validate_wheel import HEM_MODULES, OBSOLETE_MODULES, OBSOLETE_ENTRY_POINTS, REQUIRED_ENTRY_POINTS, PI_ASSETS, validate_wheel
 from binding.python import hem_pi_assets, hem_pi_contracts
 import hashlib
 import json
 import io
 import tarfile
-from build_tools.validate_wheel import validate_pi_sdist
+from build_tools.wheel_tools.validate_wheel import validate_pi_sdist
 from build_tools.versioning import read_package_version
 
 

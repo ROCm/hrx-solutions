@@ -6,9 +6,9 @@ import unittest
 from unittest.mock import patch
 import subprocess
 
-from build_tools import loom_catalog as catalog
+from build_tools.model_tools import loom_catalog as catalog
 
-REPOSITORY = Path(__file__).resolve().parents[1]
+REPOSITORY = Path(__file__).resolve().parents[2]
 
 
 class CatalogTest(unittest.TestCase):

@@ -13,8 +13,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-import local_ci
-import local_ci_source as source
+from build_tools.ci_tools import local_ci as local_ci
+from build_tools.ci_tools import local_ci_source as source
 
 
 class SnapshotTest(unittest.TestCase):
@@ -396,7 +396,7 @@ class RunnerTest(unittest.TestCase):
                    'private_path(Path(os.environ["LOOM_SERVE_DIR"]),create=True); '
                    'private_path(Path(os.environ["TMPDIR"])); '
                    'print("private runtime accepted with offline caller and group writable reports")')
-        runner.command([local_ci.sys.executable, '-c', program], cwd=Path(__file__).resolve().parents[1])
+        runner.command([local_ci.sys.executable, '-c', program], cwd=Path(__file__).resolve().parents[2])
         with mock.patch.object(runner, 'command') as command:
             runner.wheel = self.base / 'candidate.whl'
             runner.installed_cpu()

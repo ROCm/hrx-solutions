@@ -2,7 +2,7 @@ load("@hrx_system//build_tools/bazel:python.bzl", "iree_py_binary")
 
 iree_py_binary(
     name = "loom_catalog",
-    srcs = ["loom_catalog.py"],
-    main = "loom_catalog.py",
+    srcs = ["model_tools/__init__.py", "model_tools/loom_catalog.py"],
+    main = "model_tools/loom_catalog.py",
     visibility = ["//loom-pipeline:__pkg__"],
 )

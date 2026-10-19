@@ -7,9 +7,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from build_tools import wheel_cache as cache
+from build_tools.ci_tools import wheel_cache as cache
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 
 
 class WheelCacheTest(unittest.TestCase):

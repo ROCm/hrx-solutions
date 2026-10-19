@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from build_tools import bazel_compiler_inputs as compiler
+from build_tools.wheel_tools import bazel_compiler_inputs as compiler
 
 
 class CompilerInputsTest(unittest.TestCase):

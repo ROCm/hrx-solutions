@@ -110,7 +110,7 @@ class DeliveryWiringTest(unittest.TestCase):
         self.assertIn("clients.extend(['--' + name + '-runtime'",shell)
         self.assertIn("else ['--profile', 'ci08', *clients]", shell)
         self.assertIn('*model, *qualification], helper=True)',shell)
-        self.assertIn("'hem_omp_installer_test'",(root/'build_tools/check_installed_cpu.py').read_text())
+        self.assertIn("'hem_omp_installer_test'",(root/'build_tools/wheel_tools/check_installed_cpu.py').read_text())
 
 
 if __name__ == '__main__': unittest.main()

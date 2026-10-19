@@ -173,7 +173,7 @@ class Gate:
         # Reuse the installed contract authority: catalog-build metadata maps
         # authored source inputs to packaged bytecode instead of source files.
         import hrx_solutions
-        from check_installed_cpu import source_parity, verify_wheel_payload
+        from build_tools.wheel_tools.check_installed_cpu import source_parity, verify_wheel_payload
         package = Path(hrx_solutions.__file__).resolve().parent
         package.relative_to(Path(sys.prefix).resolve())
         verify_wheel_payload(self.args.wheel, package)

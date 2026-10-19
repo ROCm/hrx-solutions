@@ -14,7 +14,7 @@ import unittest
 from contextlib import redirect_stderr
 import io
 
-from build_tools import check_installed_wheel_test as checker_fixtures
+from build_tools.wheel_tools import check_installed_wheel_test as checker_fixtures
 from binding.python import hem_process, hem_display
 from binding.python.hem_common import Deadline
 from binding.python.hem_shutdown import ShutdownManager
@@ -22,7 +22,7 @@ from binding.python.hem_state import Registry
 from unittest import mock
 
 import hem_model_smoke
-import check_installed_cpu
+from build_tools.wheel_tools import check_installed_cpu
 import types
 
 

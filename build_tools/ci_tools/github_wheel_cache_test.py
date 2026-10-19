@@ -4,7 +4,7 @@
 import unittest
 from unittest.mock import patch
 
-import github_wheel_cache as cache
+from build_tools.ci_tools import github_wheel_cache as cache
 
 
 def entry(identifier, key=None, **changes):

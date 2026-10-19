@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-import check_installed_cpu as gate
+from build_tools.wheel_tools import check_installed_cpu as gate
 
 
 class InstalledPayloadTest(unittest.TestCase):
@@ -78,9 +78,9 @@ class InstalledPayloadTest(unittest.TestCase):
                 gate.source_parity(self.root / 'source', self.package)
 
     def test_generated_catalog_parity_rejects_stale_sources_or_modified_bytecode(self):
-        from build_tools import loom_catalog
+        from build_tools.model_tools import loom_catalog
         from binding.python.pipeline_validation import catalog_modules
-        repository = Path(__file__).resolve().parents[1]
+        repository = Path(__file__).resolve().parents[2]
         source_root = self.root / 'catalog-source'
         shutil.copytree(repository / 'loom-pipeline', source_root / 'loom-pipeline', symlinks=True)
         inventory = source_root / 'loom-pipeline/catalog_sources.bzl'

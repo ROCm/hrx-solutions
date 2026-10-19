@@ -33,7 +33,7 @@ class CheckerCleanupTest(unittest.TestCase):
         self.calls = []
         self.start_error = None
         self.owned = None
-        root = Path(__file__).resolve().parents[1]
+        root = Path(__file__).resolve().parents[2]
         self.cli = self.case.root / 'checker-cli'
         self.cli.write_text(
             '#!' + sys.executable + '\n'
@@ -47,7 +47,7 @@ class CheckerCleanupTest(unittest.TestCase):
             ' args += ["--timeout","0.15"]\n'
             'raise SystemExit(hem_cli.main(args))\n')
         self.cli.chmod(0o700)
-        checker = root / 'build_tools/check_installed_wheel.py'
+        checker = root / 'build_tools/wheel_tools/check_installed_wheel.py'
         tree = ast.parse(checker.read_text())
         functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
                      and node.name in ('invoke', 'check_native_lifecycle')]

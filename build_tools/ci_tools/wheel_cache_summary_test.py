@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from wheel_cache_summary import collect
+from build_tools.ci_tools.wheel_cache_summary import collect
 
 
 class SummaryTest(unittest.TestCase):
