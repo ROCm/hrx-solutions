@@ -64,8 +64,9 @@ class NativeClient:
         self.ownership_after = ownership_after
         self.emit, self.secrets = emit, secrets
 
-    def get(self, path, *, display=True, headers=None):
-        return self._request("GET", path, display=display, headers=headers)
+    def get(self, path, *, display=True, headers=None, max_response_bytes=None):
+        return self._request("GET", path, display=display, headers=headers,
+                             max_response_bytes=max_response_bytes)
 
     def post(self, path, body_path):
         path_obj = Path(body_path).absolute()
@@ -75,9 +76,13 @@ class NativeClient:
             raise InvalidInput(f"cannot read native request document: {error}") from error
         return self._request("POST", path, body=body, body_path=path_obj)
 
-    def _request(self, method, path, *, body=None, body_path=None, display=True, headers=None):
+    def _request(self, method, path, *, body=None, body_path=None, display=True,
+                 headers=None, max_response_bytes=None):
         if not path.startswith("/") or path.startswith("//") or any(c in path for c in "\r\n?#"):
             raise InvalidInput("native request path must be an absolute path without query or fragment")
+        if (max_response_bytes is not None and
+                (type(max_response_bytes) is not int or max_response_bytes <= 0)):
+            raise InvalidInput("native response byte limit must be a positive integer")
         # A bounded standalone observation still has one total I/O budget.
         budget = self.deadline or Deadline.after()
         budget.remaining()
@@ -120,10 +125,15 @@ class NativeClient:
             connection.request(method, path, body=body, headers=request_headers)
             response = connection.getresponse()
             status = response.status
-            payload = response.read()
+            payload = response.read(None if max_response_bytes is None
+                                    else max_response_bytes + 1)
             if self.ownership_after is not None:
                 self.ownership_after(budget)
             budget.remaining()
+            if max_response_bytes is not None and len(payload) > max_response_bytes:
+                raise HemError(
+                    f"native HTTP response exceeds {max_response_bytes} bytes",
+                    accepted=(200 <= status < 300) if method == "POST" else None)
             if 200 <= status < 300:
                 return NativeResponse(status, payload, True if method == "POST" else None)
             diagnostic = payload.decode('utf-8', errors='replace')
@@ -160,8 +170,9 @@ class NativeClient:
                 timer.cancel()
             connection.close()
 
-    def status(self, *, display=True):
-        document = self.get("/v1/status", display=display).json()
+    def status(self, *, display=True, max_response_bytes=None):
+        document = self.get("/v1/status", display=display,
+                            max_response_bytes=max_response_bytes).json()
         _inventory(document, require_incarnation=True)
         return document
 

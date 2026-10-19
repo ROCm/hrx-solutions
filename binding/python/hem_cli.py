@@ -51,6 +51,9 @@ def parser():
     root = Parser(prog="loom-control", description="Thin setup and control for Loom Serve")
     hem_arguments.output(root)
     types = root.add_subparsers(dest="resource", title="Resources", metavar="RESOURCE")
+    tui = types.add_parser("tui", help=hem_help.RESOURCES["tui"],
+                           description=hem_help.RESOURCES["tui"])
+    tui.set_defaults(command="run", _help_parser=tui)
     domains = {}
     for name, module in DOMAINS.items():
         domain = types.add_parser(name, help=hem_help.RESOURCES[name])
@@ -84,6 +87,9 @@ def main(argv=None):
             return 0
         # Downloads and follow streams intentionally have no lifecycle budget.
         deadline = Deadline.after(args.timeout) if hasattr(args, "timeout") else None
+        if args.resource == "tui":
+            from . import hem_tui
+            return hem_tui.run(args, deadline)
         response = DOMAINS[args.resource].run(args, deadline)
     except HemError as error:
         message = hem_openwebui_cli.safe_error(error) if 'openwebui' in argv else str(error)

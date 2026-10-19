@@ -241,6 +241,60 @@ class TransportTest(unittest.TestCase):
                 NativeClient(endpoint, Deadline.after(0.05), emit=lambda _: None).get("/v1/status")
             self.assertLess(time.monotonic() - start, 0.18)
 
+    def test_status_response_limit_stops_oversized_and_streaming_bodies(self):
+        def oversized(handler, _records):
+            body = b"x" * 65
+            handler.send_response(200)
+            handler.send_header("Content-Length", str(len(body)))
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            handler.wfile.write(body)
+
+        with fixture(oversized) as (endpoint, _):
+            with self.assertRaisesRegex(HemError, "exceeds 64 bytes"):
+                NativeClient(endpoint, Deadline.after(), emit=lambda _: None).status(
+                    max_response_bytes=64)
+
+        closed = threading.Event()
+        def streaming(handler, _records):
+            handler.send_response(200)
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            try:
+                for _ in range(20):
+                    handler.wfile.write(b"abcdefgh")
+                    handler.wfile.flush()
+                    time.sleep(0.005)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                closed.set()
+
+        with fixture(streaming) as (endpoint, _):
+            start = time.monotonic()
+            with self.assertRaisesRegex(HemError, "exceeds 32 bytes"):
+                NativeClient(endpoint, Deadline.after(1), emit=lambda _: None).status(
+                    max_response_bytes=32)
+            self.assertLess(time.monotonic() - start, 0.3)
+        self.assertTrue(closed.wait(1))
+
+    def test_status_without_explicit_limit_retains_existing_behavior(self):
+        document = inventory(model())
+        document["ignored-padding"] = "x" * (1024 * 1024 + 1)
+        with fixture(lambda handler, _records: reply(handler, document)) as (endpoint, _):
+            observed = NativeClient(
+                endpoint, Deadline.after(2), emit=lambda _: None).status()
+        self.assertEqual(observed["data"][0]["id"], "chat")
+        self.assertGreater(len(observed["ignored-padding"]), 1024 * 1024)
+
+    def test_response_limit_must_be_a_positive_integer(self):
+        with fixture() as (endpoint, requests):
+            for value in (0, -1, 1.5, True):
+                with self.subTest(value=value), self.assertRaises(InvalidInput):
+                    NativeClient(endpoint, emit=lambda _: None).status(
+                        max_response_bytes=value)
+            self.assertEqual(requests, [])
+
     def test_name_resolution_is_bounded_before_any_mutation(self):
         original = socket.getaddrinfo
         def delayed(*args, **kwargs):

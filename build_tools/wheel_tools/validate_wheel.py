@@ -12,6 +12,7 @@ import tarfile
 import zipfile
 from collections import defaultdict
 from pathlib import Path
+from packaging.requirements import Requirement
 
 
 try:
@@ -37,7 +38,7 @@ STABLE_RUNTIME_NAMES = {
 }
 ROCM_LIBRARY_PREFIXES = ("libamd", "libhsa", "libroc")
 HEM_MODULES = (
-    "hem_arguments", "hem_bootstrap", "hem_cli", "hem_common", "hem_config",
+    "hem_arguments", "hem_bootstrap", "hem_cli", "hem_common", "hem_config", "hem_tui",
     "hem_display", "hem_help", "hem_http", "hem_instance_cli", "hem_instances", "hem_render",
     "hem_model_cli", "hem_models", "hem_pipeline_cli", "hem_process",
     "hem_server_cli", "hem_shutdown", "hem_state", "hem_pi_assets",
@@ -96,6 +97,13 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         expected_description = README_PATH.read_text(encoding="utf-8")
         if metadata.get_payload() != expected_description:
             raise RuntimeError("wheel long description does not match PYPI_README.md")
+        if metadata.get("Requires-Python") != ">=3.9":
+            raise RuntimeError("wheel must preserve the Python >=3.9 support floor")
+        requirements = [Requirement(value) for value in metadata.get_all("Requires-Dist", [])]
+        textual = [requirement for requirement in requirements
+                   if requirement.name.lower() == "textual"]
+        if len(textual) != 1 or str(textual[0].specifier) != "<2,>=0.47":
+            raise RuntimeError("wheel must require Textual >=0.47,<2")
 
         missing = sorted(REQUIRED_RUNTIME_LIBRARIES - names)
         if missing:

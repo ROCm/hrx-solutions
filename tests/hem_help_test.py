@@ -54,6 +54,8 @@ class HelpTest(unittest.TestCase):
         domains = next(a for a in root._actions if isinstance(a, argparse._SubParsersAction)).choices
         count = 0
         for resource, domain in domains.items():
+            if resource == 'tui':
+                continue
             commands = next(a for a in domain._actions if isinstance(a, argparse._SubParsersAction)).choices
             for command, child in commands.items():
                 count += 1
@@ -85,6 +87,11 @@ class HelpTest(unittest.TestCase):
         for resource, description in hem_help.RESOURCES.items():
             self.assertIn(resource, output)
             self.assertIn(description, ' '.join(output.split()))
+            if resource == 'tui':
+                _, guidance, _ = self.invoke([resource, '--help'])
+                self.assertIn('usage: loom-control tui', guidance)
+                self.assertIn('Interactive', guidance)
+                continue
             _, guidance, _ = self.invoke([resource])
             self.assertIn('Actions:', guidance)
             self.assertIn('ACTION ...', guidance)

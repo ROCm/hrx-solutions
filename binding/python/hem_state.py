@@ -34,26 +34,34 @@ _SCHEMA = (
 _PI_SCHEMA = "CREATE TABLE pi_target (singleton INTEGER PRIMARY KEY CHECK(singleton=1), target TEXT NOT NULL, integration_id TEXT NOT NULL)"
 
 
-def _validate_schema(connection, version):
+def _validate_schema(connection, version, *, deadline=None):
     """Validate before migration; unknown tables and weakened constraints refuse."""
+    check = deadline.remaining if deadline is not None else lambda: None
+    check()
     if version not in (1, 2):
         raise HemError(f"unsupported state schema {version}; inventory was not reset")
     actual = dict(connection.execute("SELECT name,sql FROM sqlite_master WHERE type='table'"))
+    check()
     statements = _SCHEMA + ((_PI_SCHEMA,) if version == 2 else ())
     expected = {statement.split()[2]: statement for statement in statements}
     if actual != expected:
         raise HemError("state schema constraints do not match; inventory was not reset")
     if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
         raise HemError("corrupt state database; inventory was not reset")
+    check()
     if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
         raise HemError("state database has broken references; inventory was not reset")
+    check()
     for table in ("models", "servers", "instances"):
         columns = "server_id,launch_token,name" if table == "instances" else "id"
         for key in connection.execute(f"SELECT {columns} FROM {table}").fetchall():
+            check()
             Registry._read(connection, table, tuple(key))
+    check()
     if version == 2:
         from .hem_pi_state import _read_target
         _read_target(connection)
+        check()
 
 
 def _migrate(connection):

@@ -15,6 +15,7 @@ RESOURCES = {
     'openwebui': 'Owned Open WebUI connections for local managed servers.',
     'omp': 'Owned Oh My Pi configuration for local managed servers.',
     'opencode': 'Owned OpenCode 2 configuration for local managed servers.',
+    'tui': 'Interactive, read-only terminal dashboard for Loom Serve.',
     'pi': 'Owned Pi coding-agent configuration for local managed servers.',
     'model': 'Checkpoint files acquired or imported locally, with structural validation.',
     'pipeline': 'Packaged model implementation, compatibility rules and serving defaults.',
@@ -25,6 +26,7 @@ ACTIONS = {
     'openwebui': {'configure': ('Configure Open WebUI connections, inspect them, or remove unchanged owned entries.', 'openwebui configure --url http://127.0.0.1:3000\nloom-control openwebui configure --url http://127.0.0.1:3000 --check')},
     'omp': {'configure': ('Configure Oh My Pi, inspect configuration, or remove unchanged owned entries.', 'omp configure\nloom-control omp configure --check')},
     'opencode': {'configure': ('Configure OpenCode 2, inspect configuration, or remove unchanged owned files.', 'opencode configure\nloom-control opencode configure --check')},
+    'tui': {},
     'pi': {'configure': ('Configure Pi, inspect configuration, or remove unchanged owned files.', 'pi configure\nloom-control pi configure --check')},
     'model': {
         'available': ('Discover downloadable recipes (not local inventory).', 'model available'),
