@@ -139,7 +139,8 @@ class DeliveryWiringTest(unittest.TestCase):
         shell = (source / 'build_tools/model-smoke.sh').read_text()
         self.assertIn("for name in ('pi', 'opencode', 'omp'):", shell)
         self.assertIn("clients.extend(['--' + name + '-runtime'", shell)
-        self.assertIn('*model, *clients], helper=True)', shell)
+        self.assertIn("else ['--profile', 'ci08', *clients]", shell)
+        self.assertIn('*model, *qualification], helper=True)', shell)
 
 
 if __name__ == '__main__':

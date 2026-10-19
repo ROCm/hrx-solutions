@@ -162,8 +162,9 @@ class RunnerTest(unittest.TestCase):
                     method = stage.replace('-', '_')
                     setattr(runner, method, lambda name=stage: observed.append(name))
                 self.assertEqual(runner.execute(), 0)
-                self.assertEqual(observed, list(local_ci.STAGES[:-1] if cpu_only else local_ci.STAGES))
-                self.assertEqual(runner.summary['stages']['gpu']['status'], 'skipped' if cpu_only else 'passed')
+                self.assertEqual(observed, list(local_ci.STAGES[:-2] if cpu_only else local_ci.STAGES))
+                for name in ('gpu', 'openwebui'):
+                    self.assertEqual(runner.summary['stages'][name]['status'], 'skipped' if cpu_only else 'passed')
                 self.assertEqual(json.loads((runner.run / 'summary.json').read_text())['status'], 'passed')
 
     def test_gpu_preflight_failure_stops_before_capture(self):
@@ -200,6 +201,28 @@ class RunnerTest(unittest.TestCase):
         with mock.patch.object(runner, 'command'):
             with self.assertRaisesRegex(local_ci.Failure, 'exactly one'):
                 runner.build()
+
+    def test_openwebui_uses_same_wheel_private_stage_and_explicit_fixture(self):
+        runner = self.runner('--model08', str(self.base / 'model'))
+        runner.args.model08.mkdir()
+        for name in (local_ci.MODEL_NAME, 'tokenizer.json'):
+            (runner.args.model08 / name).touch()
+        runner.wheel = self.base / 'newly-repaired.whl'
+        runner.workspace = self.base / 'workspace'
+        with mock.patch.object(runner, 'command') as command:
+            runner.openwebui()
+        argv = command.call_args.args[0]
+        self.assertEqual(argv, ['bash', runner.snapshot / 'build_tools/model-smoke.sh',
+                               '--openwebui', runner.wheel, runner.run / 'openwebui', runner.args.model08])
+        env = command.call_args.kwargs['env']
+        self.assertEqual(env['HRX_LOCAL_CI_RUNTIME_ROOT'], str(runner.runtime / 'openwebui'))
+        self.assertEqual(env['HRX_LOCAL_CI_CLEANUP_FILE'], str(runner.run / 'openwebui-cleanup.json'))
+        self.assertTrue(command.call_args.kwargs['cooperative'])
+        (runner.args.model08 / 'tokenizer.json').unlink()
+        with mock.patch.object(runner, 'command') as command:
+            with self.assertRaisesRegex(local_ci.Failure, 'Missing immutable WebUI gate fixture'):
+                runner.openwebui()
+        command.assert_not_called()
 
     def test_clients_stage_before_python_tests_and_pass_qualified_runtime_paths(self):
         runner = self.runner()

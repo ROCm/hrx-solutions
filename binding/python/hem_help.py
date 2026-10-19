@@ -12,6 +12,7 @@ from .hem_config import SETTINGS, EXPORT_RESPONSIBILITY
 from .hem_common import DEFAULT_TIMEOUT
 
 RESOURCES = {
+    'openwebui': 'Owned Open WebUI connections for local managed servers.',
     'omp': 'Owned Oh My Pi configuration for local managed servers.',
     'opencode': 'Owned OpenCode 2 configuration for local managed servers.',
     'pi': 'Owned Pi coding-agent configuration for local managed servers.',
@@ -21,6 +22,7 @@ RESOURCES = {
     'instance': 'A model loaded on a server, with its submitted serving configuration.',
 }
 ACTIONS = {
+    'openwebui': {'configure': ('Configure Open WebUI connections, inspect them, or remove unchanged owned entries.', 'openwebui configure --url http://127.0.0.1:3000\nloom-control openwebui configure --url http://127.0.0.1:3000 --check')},
     'omp': {'configure': ('Configure Oh My Pi, inspect configuration, or remove unchanged owned entries.', 'omp configure\nloom-control omp configure --check')},
     'opencode': {'configure': ('Configure OpenCode 2, inspect configuration, or remove unchanged owned files.', 'opencode configure\nloom-control opencode configure --check')},
     'pi': {'configure': ('Configure Pi, inspect configuration, or remove unchanged owned files.', 'pi configure\nloom-control pi configure --check')},
@@ -167,6 +169,11 @@ def _arguments(parser, resource, command):
         helps.update(check='Inspect configuration and binary compatibility separately; no writes or client execution.',
                      disable='Remove unchanged owned files without requiring OpenCode; preserve edited files.',
                      opencode_dir='Explicit OpenCode configuration directory; overrides OPENCODE_CONFIG_DIR. Launch with the printed environment setting.')
+    if resource == 'openwebui':
+        helps.update(check='Inspect version and connection configuration without writes or probing model availability.',
+                     disable='Remove unchanged owned connections; requires reachable WebUI and administrator authentication. Preserve edits.',
+                     url='WebUI management HTTP origin with numeric loopback address and explicit port; overrides OPENWEBUI_URL. OPENWEBUI_TOKEN supplies the administrator credential.',
+                     timeout=f'Finite positive total management budget in seconds (default: {DEFAULT_TIMEOUT:g}); inspect with --check before retrying an uncertain update.')
     groups = {name: parser.add_argument_group(name) for name in
               ('Targeting', 'Serving configuration', 'Lifecycle', 'Output')}
     for action in list(parser._actions):

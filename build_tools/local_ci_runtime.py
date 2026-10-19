@@ -10,7 +10,7 @@ import sys
 import tempfile
 import uuid
 
-STAGES = ('source', 'tmp', 'installed', 'model')
+STAGES = ('source', 'tmp', 'installed', 'model', 'openwebui')
 MARKER = 'owner.json'
 
 

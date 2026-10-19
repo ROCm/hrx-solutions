@@ -329,7 +329,14 @@ def omp(args, data, width):
             details([(key.replace('_', ' ').capitalize(), issue(value)) for key,value in data.items() if key != 'state'])]
 
 
-RENDERERS = {'omp': omp, 'opencode': opencode, 'model': model, 'pipeline': pipeline, 'server': server, 'instance': instance, 'pi': pi}
+def openwebui(args, data, width):
+    return ['Open WebUI integration: ' + text(data.get('state')) + '.',
+            details([(key.replace('_', ' ').capitalize(), issue(value))
+                     for key, value in data.items() if key not in ('state', 'guidance')]),
+            data.get('guidance')]
+
+
+RENDERERS = {'openwebui': openwebui, 'omp': omp, 'opencode': opencode, 'model': model, 'pipeline': pipeline, 'server': server, 'instance': instance, 'pi': pi}
 
 
 def render(args, data, *, width=None):

@@ -2,11 +2,20 @@
 # Copyright 2026 The HRX Authors
 # Licensed under the MIT License.
 # SPDX-License-Identifier: MIT
-# Usage: bash build_tools/model-smoke.sh WHEEL NEW_RUN_DIRECTORY [MODEL08_DIRECTORY]
+# Usage: bash build_tools/model-smoke.sh [--openwebui] WHEEL NEW_RUN_DIRECTORY [MODEL08_DIRECTORY]
 # Without local fixtures, acquires the exact pinned 0.8B recipe. Requires gfx1151.
 # HOME, HF credentials/cache, and unrelated services are preserved.
 set -euo pipefail
 umask 077
+profile=ci08
+if [[ ${1:-} == --openwebui ]]; then
+  profile=openwebui
+  shift
+  if [[ $# != 3 ]]; then
+    echo "Open WebUI qualification requires an explicit immutable MODEL08_DIRECTORY" >&2
+    exit 2
+  fi
+fi
 if [[ $# -lt 2 || $# -gt 3 || ! -f $1 || $1 != *.whl ]]; then
   echo "Usage: $0 WHEEL NEW_RUN_DIRECTORY [MODEL08_DIRECTORY]" >&2
   exit 2
@@ -34,7 +43,7 @@ export PYTHONNOUSERSITE=1
 export LOOM_SERVE_DIR="$run/bootstrap-state"
 # Replace the shell with a signal-aware supervisor so cancellation reaches a
 # synchronous setup child or the helper's launch-token-aware finally path.
-exec python3 - "$wheel" "$run" "$scripts" "$source_dir" "${model_args[@]}" <<'PYTHON'
+exec python3 - "$wheel" "$run" "$scripts" "$source_dir" "$profile" "${model_args[@]}" <<'PYTHON'
 import json
 import os
 from pathlib import Path
@@ -43,7 +52,7 @@ import subprocess
 import sys
 import time
 
-wheel, run, scripts, source, *model = sys.argv[1:]
+wheel, run, scripts, source, profile, *model = sys.argv[1:]
 run = Path(run)
 child = None
 cancelled = None
@@ -122,6 +131,18 @@ try:
     if code == 0:
         with (run / 'install.log').open('w') as log:
             code = invoke([str(run / 'venv/bin/python'), '-m', 'pip', 'install', '--disable-pip-version-check', wheel], stdout=log, stderr=subprocess.STDOUT)
+    if code == 0 and profile == 'openwebui':
+        sys.path.insert(0, scripts)
+        from local_ci_runtime import create
+        from openwebui_configuration_smoke import IMAGE
+        if not os.environ.get('HRX_LOCAL_CI_RUNTIME_ROOT'):
+            owner = create(run)
+            (run / 'runtime-owner.json').write_text(json.dumps(owner) + '\n')
+            os.environ['HRX_LOCAL_CI_RUNTIME_ROOT'] = str(Path(owner['root']) / 'openwebui')
+        with (run / 'webui-image.log').open('w') as log:
+            code = invoke(['docker', 'image', 'inspect', IMAGE], stdout=log, stderr=subprocess.STDOUT)
+            if code and not cancelled:
+                code = invoke(['docker', 'pull', IMAGE], stdout=log, stderr=subprocess.STDOUT)
     if code == 0:
         os.chdir(run)
         import hashlib
@@ -131,9 +152,11 @@ try:
             value = os.environ.get('LOOM_' + name.upper() + '_RUNTIME')
             if value:
                 clients.extend(['--' + name + '-runtime', str(Path(value).resolve())])
-        code = invoke([str(run / 'venv/bin/python'), str(Path(scripts) / 'hem_model_smoke.py'),
+        helper = 'openwebui_configuration_smoke.py' if profile == 'openwebui' else 'hem_model_smoke.py'
+        qualification = [] if profile == 'openwebui' else ['--profile', 'ci08', *clients]
+        code = invoke([str(run / 'venv/bin/python'), str(Path(scripts) / helper),
                        '--run', str(run / 'lifecycle'), '--wheel', wheel, '--wheel-sha256', sha,
-                       '--source', source, '--profile', 'ci08', *model, *clients], helper=True)
+                       '--source', source, *model, *qualification], helper=True)
 finally:
     if unresolved:
         publish('unresolved', error=unresolved, child_pid=child.pid if child else None)
@@ -141,6 +164,6 @@ finally:
         publish('complete', detail='setup children reaped; no native launch attempted')
     # The helper publishes only after checking native/logger identities and port.
 if code == 0:
-    print('0.8B empty-server, registration, query, retirement and shutdown passed: ' + str(run))
+    print(profile + ' real-model configuration/lifecycle qualification passed: ' + str(run))
 sys.exit(128 + cancelled if cancelled else code)
 PYTHON

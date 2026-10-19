@@ -21,7 +21,7 @@ import local_ci_source as source
 import local_ci_runtime as runtime
 
 STAGES = ('preflight', 'capture', 'clients-source', 'source-tests', 'pi-source', 'build',
-          'installed-cpu', 'installed-pi', 'installed-clients', 'gpu')
+          'installed-cpu', 'installed-pi', 'installed-clients', 'gpu', 'openwebui')
 NATIVE_OVERRIDES = ('HSA_OVERRIDE_GFX_VERSION', 'IREE_HAL_AMDGPU_LIBHSA_PATH',
                     'IREE_HAL_AMDGPU_LIBAQLPROFILE_PATH', 'LD_LIBRARY_PATH', 'LD_PRELOAD',
                     'LD_AUDIT', 'IREE_ROCM_PATH', 'CC', 'CXX', 'CMAKE_PREFIX_PATH')
@@ -107,7 +107,8 @@ class Runner:
                                   'cache_root': cache_root(self.env)},
                         'stages': {name: {'status': 'not-run'} for name in STAGES}}
         if args.cpu_only:
-            self.summary['stages']['gpu'] = {'status': 'skipped', 'reason': 'explicit --cpu-only'}
+            for name in ('gpu', 'openwebui'):
+                self.summary['stages'][name] = {'status': 'skipped', 'reason': 'explicit --cpu-only'}
         self.child = None
         self.interrupted = None
         self.current = None
@@ -133,7 +134,7 @@ class Runner:
             self.summary['stages'][self.current]['cleanup'] = cleanup
         if self.child and self.child.poll() is None:
             # Shared build/model wrappers reconcile their own native/container work.
-            if self.current in ('build', 'gpu'):
+            if self.current in ('build', 'gpu', 'openwebui'):
                 self.child.send_signal(number)
             else:
                 os.killpg(self.child.pid, number)
@@ -332,6 +333,12 @@ class Runner:
                           self.run / f'{client}-runtime', result.read_text()], cwd=self.run)
 
     def gpu(self):
+        self.locked_model_gate(False)
+
+    def openwebui(self):
+        self.locked_model_gate(True)
+
+    def locked_model_gate(self, webui):
         lock = self.workspace / 'gates/qwen08-gpu.lock'
         lock.parent.mkdir(parents=True, exist_ok=True)
         with lock.open('a') as stream:
@@ -345,14 +352,23 @@ class Runner:
                 except BlockingIOError:
                     time.sleep(0.2)
             command = ['bash', self.snapshot / 'build_tools/model-smoke.sh', self.wheel, self.run / 'model']
-            if self.args.model08:
+            stage = 'openwebui' if webui else 'gpu'
+            if webui:
+                command = ['bash', self.snapshot / 'build_tools/model-smoke.sh', '--openwebui',
+                           self.wheel, self.run / 'openwebui']
+                fixture = self.args.model08 or (Path.home() / 'Downloads/gguf/models/multimodal/qwen/qwen3.5-0.8b')
+                for name in (MODEL_NAME, 'tokenizer.json'):
+                    if not (fixture / name).is_file():
+                        raise Failure(f'Missing immutable WebUI gate fixture: {fixture / name}; use --model08 DIRECTORY')
+                command.append(fixture)
+            elif self.args.model08:
                 command.append(self.args.model08)
             self.command(command, cwd=self.run, env={
                 'LOOM_PI_RUNTIME': str(self.run / 'pi-runtime'),
                 'LOOM_OPENCODE_RUNTIME': str(self.run / 'opencode-runtime'),
                 'LOOM_OMP_RUNTIME': str(self.run / 'omp-runtime'),
-                'HRX_LOCAL_CI_RUNTIME_ROOT': str(self.runtime / 'model'),
-                'HRX_LOCAL_CI_CLEANUP_FILE': str(self.run / 'gpu-cleanup.json')}, cooperative=True)
+                'HRX_LOCAL_CI_RUNTIME_ROOT': str(self.runtime / ('openwebui' if webui else 'model')),
+                'HRX_LOCAL_CI_CLEANUP_FILE': str(self.run / f'{stage}-cleanup.json')}, cooperative=True)
 
     def execute(self):
         old_handlers = {number: signal.signal(number, self.on_signal)
@@ -360,9 +376,9 @@ class Runner:
         exit_code = 0
         try:
             actions = (self.preflight, self.capture, self.clients_source, self.source_tests, self.pi_source,
-                       self.build, self.installed_cpu, self.installed_pi, self.installed_clients, self.gpu)
+                       self.build, self.installed_cpu, self.installed_pi, self.installed_clients, self.gpu, self.openwebui)
             for name, action in zip(STAGES, actions):
-                if name == 'gpu' and self.args.cpu_only:
+                if name in ('gpu', 'openwebui') and self.args.cpu_only:
                     continue
                 self.stage(name, action)
             if self.summary['cleanup']['status'] != 'complete':

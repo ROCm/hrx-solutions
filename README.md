@@ -83,6 +83,8 @@ For automatically maintained local Pi configuration, see
 [Connect Pi once](docs/solutions/loom-control.md#connect-pi-once) or
 [connect OpenCode 2 once](docs/solutions/loom-control.md#connect-opencode-2-once).
 For Oh My Pi, see [connect OMP](docs/solutions/loom-control.md#connect-oh-my-pi).
+For an existing local Open WebUI service, see
+[connect Open WebUI](docs/solutions/loom-control.md#connect-open-webui).
 Native/HF/curl equivalents remain visible on stderr. Run `loom-control` or a bare
 resource such as `loom-control instance` for guidance and configuration help.
 
@@ -265,3 +267,25 @@ source, wheels and venvs stay in the selected run directory. Both directories
 remain for inspection, including when interrupted tests report unresolved fixture
 ownership. Remove them only after owned cleanup is complete. Hugging Face caches
 and credentials keep their normal locations.
+
+The default full local run also qualifies generated Open WebUI connections with
+Open WebUI 0.12.3 pinned by image digest, using an owned Linux host-network
+container and the same newly repaired wheel. The existing gfx1151 lifecycle,
+Pi, OMP and OpenCode checks still run first. Docker must support host networking
+and the gate's temporary passive network observer; no user WebUI is contacted.
+This gate needs the immutable local 0.8B GGUF/tokenizer pair from `--model08` or
+the default `~/Downloads/gguf/models/multimodal/qwen/qwen3.5-0.8b` fixture directory.
+Missing files fail the gate rather than downloading a replacement. The pinned
+WebUI image is pulled only when absent. `--cpu-only` explicitly skips both real
+model stages, including Open WebUI; its bounded source tests still run.
+
+The reusable gfx1151 workflow retains its existing containerized lifecycle/client
+job and then runs WebUI qualification in a dependent host job, where host loopback
+is shared with the isolated WebUI container. Provision Python venv support, Docker,
+GPU access and the same immutable fixture on that runner; the optional repository
+variable `LOOM_MODEL08_DIRECTORY` selects its asset directory. Both jobs consume
+`hrx-solutions-wheel-linux-x86_64` from the same workflow run. Normal dispatch
+continues to include these jobs through the existing default `test_model: true`;
+explicitly disabling model tests or the existing cache-pilot exception skips both.
+Only bounded sanitized summaries are uploaded, not WebUI data, admin credentials
+or whole provider configurations. Owned cleanup evidence remains mandatory.

@@ -34,7 +34,8 @@ class HelpTest(unittest.TestCase):
                      patch.multiple(hem_cli.hem_instance_cli, run=unittest.mock.DEFAULT), \
                      patch.multiple(hem_cli.hem_pi_cli, run=unittest.mock.DEFAULT), \
                      patch.multiple(hem_cli.hem_opencode_cli, run=unittest.mock.DEFAULT), \
-                     patch.multiple(hem_cli.hem_omp_cli, run=unittest.mock.DEFAULT):
+                     patch.multiple(hem_cli.hem_omp_cli, run=unittest.mock.DEFAULT), \
+                     patch.multiple(hem_cli.hem_openwebui_cli, run=unittest.mock.DEFAULT):
                     for resource in (None, *hem_cli.DOMAINS):
                         argv = [resource] if resource else []
                         expected = self.invoke(argv + ['--help'])
@@ -73,7 +74,7 @@ class HelpTest(unittest.TestCase):
                     self.assertIn(f'usage: loom-control {resource} {command}', output)
                     self.assertNotIn('loom-hem', output)
                     self.assertEqual(errors, '')
-        self.assertEqual(count, 25)
+        self.assertEqual(count, 26)
 
     def test_resource_and_action_lists_have_no_redundant_choice_heading(self):
         _, output, _ = self.invoke([])

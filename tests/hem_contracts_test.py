@@ -24,6 +24,8 @@ class GrammarTest(unittest.TestCase):
 
     def test_complete_type_inventory(self):
         examples = {
+            'openwebui': ['configure', 'configure --check', 'configure --disable',
+                          'configure --url http://127.0.0.1:3000'],
             'omp': ['configure', 'configure --check', 'configure --disable',
                     'configure --omp-dir /alternate/omp'],
             'opencode': ['configure', 'configure --check', 'configure --disable',

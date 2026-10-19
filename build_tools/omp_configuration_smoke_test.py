@@ -108,7 +108,8 @@ class DeliveryWiringTest(unittest.TestCase):
         shell=(root/'build_tools/model-smoke.sh').read_text()
         self.assertIn("for name in ('pi', 'opencode', 'omp'):",shell)
         self.assertIn("clients.extend(['--' + name + '-runtime'",shell)
-        self.assertIn('*model, *clients], helper=True)',shell)
+        self.assertIn("else ['--profile', 'ci08', *clients]", shell)
+        self.assertIn('*model, *qualification], helper=True)',shell)
         self.assertIn("'hem_omp_installer_test'",(root/'build_tools/check_installed_cpu.py').read_text())
 
 

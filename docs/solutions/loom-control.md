@@ -19,6 +19,7 @@ launch settings, and an **instance** is a model registration on a server.
 | `pi` | `configure` (including `--check` and `--disable`) |
 | `opencode` | `configure` (including `--check` and `--disable`) |
 | `omp` | `configure` (including `--check` and `--disable`) |
+| `openwebui` | `configure` (including `--check` and `--disable`) |
 
 Run `loom-control` for a getting-started sequence. Bare resource commands such as
 `loom-control model` list their actions and examples. These show the same guidance
@@ -313,6 +314,11 @@ argument boundaries so paths with spaces remain copyable. Credentials are
 redacted and must be supplied again for replay; printing an equivalent does
 not establish that the operation succeeded. Export prints a registration example
 with `SERVER:PORT`, which must be replaced with a compatible server endpoint.
+
+Open WebUI management writes are an exception to replayable body displays:
+their curl templates are explicitly **redacted and non-replayable**. Preserved
+provider credentials are omitted, and the displayed owned-connection intent is
+only a fragment. Never submit that fragment as a whole WebUI configuration.
 
 For a deliberate curl workflow, export a drained registration document:
 
@@ -735,3 +741,144 @@ named 0.8B routes and a newly added server, with short genuine client requests,
 metadata, model refresh, restart, preservation, passive check and absent-client
 disable. These validate generated wiring, not agent tool quality, vendor session
 restoration, compaction or a full context window. Defaults remain unchanged.
+
+## Connect Open WebUI
+
+`loom-control openwebui configure` connects an **existing, running Open WebUI
+0.12.3** service to saved local Loom servers using WebUI's built-in server-side
+OpenAI-compatible connections. There is no plugin or inference API key, and Pi
+need not be installed. Loom Control does not install WebUI, sign in with a
+password, manage its container, or start/restart either service.
+
+Qualified deployments are a **native Linux WebUI process** and **Linux Docker
+host networking**, with WebUI and Loom listening on numeric loopback addresses
+on the same host. Native qualification used Python 3.11.17;
+install WebUI with its own supported runtime separately from the Loom wheel.
+Keep their ports separate: for example, WebUI at `http://127.0.0.1:3000` and
+Loom at port 18080.
+WebUI's usual port 8080 can collide with Loom's default. Ordinary Docker bridge
+networking cannot reach a host-loopback-only Loom listener simply by using
+`host.docker.internal`. Remote services, Docker Desktop networking, browser
+Direct Connections, reverse proxies and TLS targets are outside this integration.
+Do not expose Loom on `0.0.0.0` to work around a connection failure.
+
+Before configuring, the WebUI administrator must verify:
+
+- Persistent configuration is enabled (`ENABLE_PERSISTENT_CONFIG=True`) and
+  startup does not reset it (`RESET_CONFIG_ON_START` disabled).
+- Global user-info forwarding is disabled
+  (`ENABLE_FORWARD_USER_INFO_HEADERS=False`). Connection-level `auth_type: none`
+  alone does not suppress that global forwarding behavior.
+- OpenAI-compatible connections are enabled in WebUI. Loom Control refuses a
+  globally disabled configuration rather than enabling other providers.
+- An administrator bearer session token, or enabled administrator API key,
+  permits access to the connection-management routes. API-key route restrictions
+  can still deny access; Loom Control never changes authentication policy.
+
+Successful configure or check cannot verify the persistence and forwarding
+prerequisites; results label them operator-required/unverified. Export or back up
+existing WebUI configuration yourself before making changes. Exports and
+credentials are your responsibility; no automatic secret-bearing backup is made.
+
+After importing `qwen08` as described above, start a server and instance:
+
+```sh
+loom-control server start --name webui-local --device amdgpu --listen 127.0.0.1:18080
+loom-control instance start qwen08 --name webui-small --server webui-local --pipeline qwen-08b
+export OPENWEBUI_URL=http://127.0.0.1:3000
+# Supply OPENWEBUI_TOKEN securely in this shell's environment; never put its value in a command.
+loom-control openwebui configure
+```
+
+The URL selects the **WebUI management service**, not Loom's `/v1` inference
+endpoint. Every invocation requires `--url` or `OPENWEBUI_URL`, with the explicit
+flag taking precedence. It must be an HTTP numeric-loopback origin with an
+explicit nonzero port, without credentials, query, fragment or application
+subpath. A local `open-webui` executable is unnecessary. The administrator token
+is read only from `OPENWEBUI_TOKEN`; there is no token flag, automatic login or
+saved credential. It authenticates WebUI management and is never sent to Loom.
+Our inference connections use an empty API key and `auth_type: none`.
+
+In WebUI, open **Admin Settings → Connections → Refresh model list**, then select
+`loom-hem-d2VidWktbG9jYWw.webui-small` in the ordinary model picker and send a short
+text prompt. The prefix is the stable `loom-hem-` provider ID for `webui-local`;
+the suffix is the exact instance name. Prefixes distinguish servers that expose
+the same native model ID and are removed before inference. Configure adds one
+connection per saved server, including stopped servers, with an empty static
+model list so WebUI discovers models from native `/v1/models`.
+
+Configure once for existing servers. After starting or stopping their models,
+**refresh WebUI's model list**; no reconfigure is needed. Adding a new saved
+server requires rerunning configure, then refresh. Connections persist through
+WebUI restarts and host boots under the persistence prerequisite. This does not
+start Loom or reload models: restart saved servers and start instances explicitly
+with Loom Control. There is no polling process or lifecycle-triggered WebUI write.
+
+The picker is a cached native inventory, not a readiness guarantee. Explicit
+refresh clears old models even when the refreshed inventory is empty; ordinary
+unrefreshed reads may retain cached models. A stale request may fail at Loom.
+WebUI does not join `/v1/status` or apply Pi's readiness/incarnation checks, and
+it never starts a model or silently reroutes a failed request.
+
+Initial support is **ordinary bounded text chat**. Native context/output metadata
+is not automatically translated into WebUI request budgets. Unsupported image,
+tool, reasoning or terminal controls may still be offered by WebUI; their
+presence does not establish support. Keep prompts/history and any explicit output
+cap within the instance's actual allocation. Loom Control leaves WebUI defaults,
+model profiles and prompts unchanged. The example retains the serving defaults
+of **8192 context / 32768 shared pool**; this integration does not qualify a full
+context window, compaction, coding-agent quality or other vendor features.
+
+### Check, disable and recover WebUI configuration
+
+```sh
+loom-control openwebui configure --check
+loom-control openwebui configure --url http://127.0.0.1:3000 --json
+loom-control openwebui configure --disable
+```
+
+All modes accept `--json` and `--timeout SECONDS`, using one **10-second** default
+budget for locks and management calls. `--check` and `--disable` are mutually
+exclusive. Check passively reads local state and authenticated version/connection
+configuration; it does not repair, enumerate models, run inference or start
+processes. It reports configuration, API reachability and version compatibility
+separately. `model_availability` is always `unprobed`; a successful check does not
+prove that a model is available. Only WebUI 0.12.3 is qualified for mutations;
+unknown versions can be inspected but configure/disable refuse changes.
+
+Exit 0 means complete configuration/no-op or confirmed disable. Exit 1 covers
+incomplete setup, offline/unauthorized service, unsupported-version check and
+partial cleanup; input, ownership, schema or mutation-version conflicts use 2.
+A known deadline expiry before submission uses 3; an unresolved submitted update
+or local finalization uses 4. JSON stays one result on stdout, with progress and
+management equivalents on stderr. Whole-configuration write displays are
+**redacted, non-replayable templates**; their owned intent is not a complete
+request body and must never be replayed as one.
+
+WebUI replaces its entire connection list on update and provides no atomic
+compare-and-swap. Loom Control preserves unrelated connections, credentials and
+ordering, rechecks before submitting, and verifies readback. **Do not edit WebUI
+connections elsewhere while configure or disable runs.** Our lock coordinates
+Loom Control calls only; an administrator edit after the final check can still
+race the update. Existing unrelated settings/defaults/profiles are preserved.
+
+The selected `LOOM_SERVE_DIR` retains minimal current, nonsecret ownership and
+pending intent in `clients/openwebui/`, with a filename derived from the canonical
+WebUI URL. It adds no SQL history, model roster or credential store. Use the same
+Loom root and target each time; keep this evidence rather than deleting it to
+force a retry. A nonempty WebUI deployment identity is checked, but an empty or
+reused ID cannot reliably distinguish a replacement service at the same URL.
+
+Configure refuses edited owned entries or conflicting foreign entries rather
+than overwriting or adopting them. Disable removes only proven-owned, unchanged
+connections; edited entries remain with a partial-cleanup result. Preserve/export
+your changes and resolve the reported conflict explicitly. Losing ownership
+state does not authorize taking over an existing matching connection.
+
+Disable requires **reachable WebUI and an authorized administrator token**.
+Offline/unauthorized cleanup remains incomplete, with evidence retained; deleting
+local files or uninstalling the wheel does not remove WebUI's saved connections.
+Run disable before uninstalling if you want those connections removed.
+For an interrupted or uncertain write, first run `--check`, then rerun configure
+to reconcile current remote truth and pending intent. Never blindly replay a
+whole configuration snapshot: a timed-out request may already have succeeded.
