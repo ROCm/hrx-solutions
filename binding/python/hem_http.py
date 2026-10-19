@@ -181,14 +181,15 @@ class NativeClient:
         _inventory(document, require_incarnation=False)
         return document
 
-    def logs(self, *, model=None, cursor=None):
+    def logs(self, *, model=None, cursor=None, max_response_bytes=None):
         """Bounded native NDJSON snapshot; follow streaming belongs to log CLI."""
         headers = {}
         if model is not None:
             headers["X-Loom-Model"] = model
         if cursor is not None:
             headers["X-Loom-Cursor"] = cursor
-        return self.get("/logz", headers=headers)
+        return self.get("/logz", headers=headers,
+                        max_response_bytes=max_response_bytes)
 
     def wait(self, predicate, *, accepted=True, interval=0.05):
         """Poll native status only; never replay a mutation or infer acceptance.

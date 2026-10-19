@@ -213,6 +213,7 @@ class LocalServiceProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual((rows[0].name, rows[0].state, rows[0].endpoint),
                          ("local", "unknown", ""))
+        self.assertFalse(rows[0].identity_verified)
 
     def test_replaced_instance_incarnation_is_not_joined(self):
         registry = Registry(self.root)
@@ -230,6 +231,7 @@ class LocalServiceProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(row.kind, row.name, row.state) for row in rows],
                          [("server", "local", "running"),
                           ("model", "chat", "unknown")])
+        self.assertFalse(rows[1].identity_verified)
 
     def test_repeated_failed_http_observation_releases_process_pins(self):
         active = 0

@@ -169,6 +169,7 @@ def _changed_server(server_id):
         summary="State changed during refresh",
         kind="server", server=server_id, recorded_state="unknown",
         process_state="unknown", http_state="unknown",
+        identity_verified=False,
     )
 
 
@@ -180,6 +181,7 @@ def _unknown_model(row):
         kind="model", server=row["server_id"],
         launch_token=row["launch_token"], incarnation=row["incarnation"],
         recorded_state="unknown", process_state="unknown", http_state="unknown",
+        identity_verified=False,
     )
 
 
