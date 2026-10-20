@@ -45,9 +45,9 @@ class WorkflowPolicyTest(unittest.TestCase):
                 self.assertEqual(evaluate(writer, values), expected)
                 self.assertEqual(evaluate(cleanup, values), expected)
 
-    def test_webui_follows_model_job_for_normal_dispatch_and_push(self):
-        # The reusable workflow owns both GPU jobs. Preserve the default dispatch
-        # selection that previously regressed by silently skipping gfx1151.
+    def test_model_job_runs_for_normal_dispatch_and_push(self):
+        # Preserve the default dispatch selection that previously regressed by
+        # silently skipping gfx1151.
         ci = (ROOT / '.github/workflows/ci_python_wheel.yml').read_text()
         dispatch = ci.split('      test_model:', 1)[1].split('      release_type:', 1)[0]
         self.assertIn('default: true', dispatch)
@@ -60,15 +60,11 @@ class WorkflowPolicyTest(unittest.TestCase):
             'github.event_name': 'workflow_dispatch', 'inputs.test_model': False}))
         self.assertIn('uses: ./.github/workflows/check_model.yml', ci.split('  model:', 1)[1])
         workflow = (ROOT / '.github/workflows/check_model.yml').read_text()
-        host = workflow.split('  openwebui:', 1)[1]
-        self.assertIn('needs: model', host)
-        self.assertIn('runs-on: linux-gfx1151-gpu-rocm', host)
-        self.assertNotIn('    container:', host)
-        self.assertNotIn('    if:', host.split('    steps:', 1)[0])
-        self.assertEqual(workflow.count('name: hrx-solutions-wheel-linux-x86_64'), 2)
-        self.assertIn('model-smoke.sh --openwebui', host)
-        self.assertIn('LOOM_MODEL08_DIRECTORY', host)
-        self.assertNotIn('/var/run/docker.sock', workflow)
+        self.assertIn('  model:', workflow)
+        self.assertIn('runs-on: linux-gfx1151-gpu-rocm', workflow)
+        self.assertEqual(workflow.count('name: hrx-solutions-wheel-linux-x86_64'), 1)
+        self.assertNotIn('  openwebui:', workflow)
+        self.assertNotIn('model-smoke.sh --openwebui', workflow)
 
     def test_pilot_model_is_skipped_even_when_explicitly_requested(self):
         model = condition("ci_python_wheel.yml", "  model:")

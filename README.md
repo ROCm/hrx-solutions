@@ -278,14 +278,3 @@ the default `~/Downloads/gguf/models/multimodal/qwen/qwen3.5-0.8b` fixture direc
 Missing files fail the gate rather than downloading a replacement. The pinned
 WebUI image is pulled only when absent. `--cpu-only` explicitly skips both real
 model stages, including Open WebUI; its bounded source tests still run.
-
-The reusable gfx1151 workflow retains its existing containerized lifecycle/client
-job and then runs WebUI qualification in a dependent host job, where host loopback
-is shared with the isolated WebUI container. Provision Python venv support, Docker,
-GPU access and the same immutable fixture on that runner; the optional repository
-variable `LOOM_MODEL08_DIRECTORY` selects its asset directory. Both jobs consume
-`hrx-solutions-wheel-linux-x86_64` from the same workflow run. Normal dispatch
-continues to include these jobs through the existing default `test_model: true`;
-explicitly disabling model tests or the existing cache-pilot exception skips both.
-Only bounded sanitized summaries are uploaded, not WebUI data, admin credentials
-or whole provider configurations. Owned cleanup evidence remains mandatory.
