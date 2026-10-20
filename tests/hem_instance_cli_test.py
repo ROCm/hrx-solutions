@@ -18,7 +18,7 @@ import unittest
 from binding.python import hem_config, hem_process, hem_state
 from binding.python.hem_common import Deadline
 from binding.python.hem_http import NativeClient
-from tests.gguf_fixtures import write_matching_gguf, profile
+from tests.gguf_fixtures import install_lifecycle_profile, lifecycle_profile, write_matching_gguf
 from tests.hem_http_test import fixture, inventory, model, reply
 from tests.hem_instances_test import NATIVE
 from tests.hem_process_test import port, wait_exit
@@ -68,8 +68,9 @@ class InstanceCliTest(unittest.TestCase):
         (self.package / '_native/lib/libhsa-runtime64.so.1').write_bytes(b'CPU fixture only')
         catalog = Path(hem_config.pipeline_info('qwen-08b')['catalog'])
         shutil.copytree(catalog.parents[2], self.package / 'loom-pipeline')
+        install_lifecycle_profile(self.package / 'loom-pipeline')
         self.weights = self.root / 'weights.gguf'
-        write_matching_gguf(self.weights, contract=profile('qwen_08b'))
+        write_matching_gguf(self.weights, contract=lifecycle_profile())
         self.tokenizer = self.root / 'tokenizer.json'
         self.tokenizer.write_text('{"model":{"fixture":true}}')
         digest = hashlib.sha256(json.dumps({'model':{'fixture':True}}, sort_keys=True,
@@ -79,12 +80,10 @@ class InstanceCliTest(unittest.TestCase):
             'import functools,sys; '
             f'from {package} import hem_cli,hem_config,hem_instance_cli,hem_server_cli; '
             'from pathlib import Path; '
+            'original_resolve=hem_config.resolve_catalog; '
+            'hem_config.resolve_catalog=lambda identifier:Path(sys.argv[1])/"loom-pipeline"/Path(original_resolve(identifier)).relative_to(Path(original_resolve(identifier)).parents[2]); '
             'original=hem_config.load_profile; '
             f'hem_config.load_profile=lambda catalog:dict(original(catalog), tokenizer_canonical_sha256={digest!r}); '
-            'original_info=hem_config.pipeline_info; '
-            'hem_config.pipeline_info=lambda identifier:dict(original_info(identifier), '
-            'catalog=str(Path(sys.argv[1])/"loom-pipeline"/Path(original_info(identifier)["catalog"]).relative_to('
-            'Path(original_info(identifier)["catalog"]).parents[2]))); '
             'hem_instance_cli.ProcessManager=functools.partial(hem_instance_cli.ProcessManager,package_root=sys.argv[1]); '
             'hem_server_cli.ProcessManager=functools.partial(hem_server_cli.ProcessManager,package_root=sys.argv[1]); '
             'raise SystemExit(hem_cli.main(sys.argv[2:]))')

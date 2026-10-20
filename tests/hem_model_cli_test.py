@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 from binding.python import hem_cli, hem_models
-from tests.gguf_fixtures import write_matching_gguf, profile
+from tests.gguf_fixtures import lifecycle_profile, write_matching_gguf
 
 
 class ModelCliTest(unittest.TestCase):
@@ -23,7 +23,9 @@ class ModelCliTest(unittest.TestCase):
         self.tokenizer = self.root / 'tokenizer.json'
         self.tokenizer.write_text('{"model":{"fixture":true}}')
         self.weights = self.root / 'weights.gguf'
-        write_matching_gguf(self.weights, contract=profile('qwen_08b'))
+        write_matching_gguf(self.weights, contract=lifecycle_profile())
+        self.compatibility = self.root / 'compatibility.json'
+        self.compatibility.write_text(json.dumps(lifecycle_profile()))
 
     def invoke(self, *args, fixture=False, expected=0):
         package = hem_cli.__package__
@@ -34,8 +36,10 @@ class ModelCliTest(unittest.TestCase):
                 sort_keys=True, separators=(',', ':')).encode()).hexdigest()
             script = (
                 f'from {package} import hem_cli, hem_config; '
+                'import json; from pathlib import Path; '
                 'original = hem_config.load_profile; '
-                f'hem_config.load_profile = lambda catalog: dict(original(catalog), tokenizer_canonical_sha256={digest!r}); '
+                f'test_profile=json.loads(Path({str(self.compatibility)!r}).read_text()); '
+                f'hem_config.load_profile = lambda catalog: dict(test_profile if Path(catalog).name == "qwen_08b" else original(catalog), tokenizer_canonical_sha256={digest!r}); '
                 'raise SystemExit(hem_cli.main())')
             command = [sys.executable, '-c', script]
         else:
@@ -143,7 +147,7 @@ class ModelCliTest(unittest.TestCase):
             destination.parent.mkdir(parents=True, exist_ok=True)
             if source['role'] == 'gguf':
                 # Sparse descriptor fixture; no weight contents or inference.
-                write_matching_gguf(destination, contract=profile('qwen_08b'))
+                write_matching_gguf(destination, contract=lifecycle_profile())
             else:
                 destination.write_text(self.tokenizer.read_text())
         for _ in range(2):

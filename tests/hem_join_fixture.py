@@ -17,7 +17,7 @@ import time
 
 from binding.python import hem_process, hem_state
 from binding.python.hem_common import Deadline, UncertainOutcome
-from tests.gguf_fixtures import profile, write_matching_gguf
+from tests.gguf_fixtures import install_lifecycle_profile, lifecycle_profile, write_matching_gguf
 from tests.hem_instances_test import NATIVE
 from tests.hem_process_test import port, wait_exit
 
@@ -61,6 +61,7 @@ class JoinFixture:
         for source in (checkout / 'binding/python').glob('*.py'):
             shutil.copy2(source, self.package / source.name)
         shutil.copytree(checkout / 'loom-pipeline', self.package / 'loom-pipeline')
+        install_lifecycle_profile(self.package / 'loom-pipeline')
         (self.package / '_native/bin').mkdir(parents=True)
         (self.package / '_native/lib').mkdir()
         shutil.copy2(binary, self.package / '_native/bin/loom-serve')
@@ -118,7 +119,7 @@ class JoinFixture:
 
     def acquire(self):
         weights, tokenizer = self.root / 'weights.gguf', self.root / 'tokenizer.json'
-        write_matching_gguf(weights, contract=profile('qwen_08b'))
+        write_matching_gguf(weights, contract=lifecycle_profile())
         tokenizer.write_text('{"model":{"fixture":true}}')
         return self.cli('model', 'import', 'tiny', '--gguf', str(weights), '--tokenizer', str(tokenizer),
                         '--alias', '--pipeline', 'qwen-08b')

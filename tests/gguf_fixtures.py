@@ -13,6 +13,28 @@ def profile(architecture='qwen_27b'):
     return json.loads((PROFILE_PATH.parent.parent / architecture / 'compatibility.json').read_text())
 
 
+def lifecycle_profile():
+    """One-layer profile for tests that observe assets but never run inference."""
+    contract = profile('qwen_08b')
+    contract['base_layer_count'] = 1
+    contract['mtp_layer'] = None
+    contract['tensors']['mtp'] = {}
+    contract['tensors']['layer_overrides'] = {}
+    contract['metadata']['qwen35.block_count'] = 1
+    for entry in contract['metadata_arrays'].values():
+        entry['count'] = 2
+    for family in ('global', 'gdn', 'attention'):
+        for spec in contract['tensors'][family].values():
+            spec['shape'] = [256] if spec['type'].startswith('Q') else [1]
+    return contract
+
+
+def install_lifecycle_profile(catalog_root):
+    """Replace qwen-08b geometry only inside a test-owned catalog copy."""
+    path = Path(catalog_root) / 'llm/qwen/qwen_08b/compatibility.json'
+    path.write_text(json.dumps(lifecycle_profile(), sort_keys=True))
+
+
 def expected_tensors(contract=None):
     contract = contract or profile()
     result = dict(contract['tensors']['global'])

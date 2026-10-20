@@ -12,7 +12,7 @@ from unittest.mock import patch
 from binding.python import hem_config as config, hem_cli
 from binding.python.hem_common import InvalidInput
 from binding.python.model_store import ModelFiles
-from tests.gguf_fixtures import expected_tensors, profile, write_matching_gguf
+from tests.gguf_fixtures import expected_tensors, lifecycle_profile, profile, write_matching_gguf
 
 
 class HemConfigTest(unittest.TestCase):
@@ -27,7 +27,8 @@ class HemConfigTest(unittest.TestCase):
                                                ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
         for identifier, catalog in (('qwen', 'qwen_27b'), ('qwen-08b', 'qwen_08b')):
             weights = cls.root / f'{identifier}.gguf'
-            write_matching_gguf(weights, contract=profile(catalog))
+            contract = lifecycle_profile() if identifier == 'qwen-08b' else profile(catalog)
+            write_matching_gguf(weights, contract=contract)
             cls.models[identifier] = ModelFiles(weights, cls.tokenizer)
 
     @classmethod
@@ -37,7 +38,7 @@ class HemConfigTest(unittest.TestCase):
     def setUp(self):
         self.load_profile = config.load_profile
         def fixture_profile(catalog):
-            contract = self.load_profile(catalog)
+            contract = lifecycle_profile() if Path(catalog).name == 'qwen_08b' else self.load_profile(catalog)
             contract['tokenizer_canonical_sha256'] = self.digest
             return contract
         self.profile_patch = patch.object(config, 'load_profile', side_effect=fixture_profile)
@@ -75,7 +76,7 @@ class HemConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(InvalidInput, 'Tokenizer configuration differs'):
             config.select_pipeline(replace(self.models['qwen-08b'], tokenizer=changed))
         weights = self.root / 'wrong-tensor.gguf'
-        write_matching_gguf(weights, contract=profile('qwen_08b'), missing=('blk.0.ssm_a',))
+        write_matching_gguf(weights, contract=lifecycle_profile(), missing=('blk.0.ssm_a',))
         with self.assertRaisesRegex(InvalidInput, 'missing required tensor'):
             config.select_pipeline(ModelFiles(weights, self.tokenizer), 'qwen-08b')
 
@@ -141,7 +142,7 @@ class HemConfigTest(unittest.TestCase):
 
     def test_fragmented_index_is_validated_and_retained(self):
         # Two actual sparse GGUF members, with disjoint tensor descriptors.
-        contract = profile('qwen_08b')
+        contract = lifecycle_profile()
         names = tuple(expected_tensors(contract))
         first, second = self.root / 'part-one.gguf', self.root / 'part-two.gguf'
         write_matching_gguf(first, contract=contract, missing=names[::2])
