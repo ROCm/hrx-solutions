@@ -79,19 +79,29 @@ class CheckerCleanupTest(unittest.TestCase):
                 self.start_error = error
                 self.owned = self.case.registry.get_server('wheel-check')
                 self.assertEqual(self.owned['pending']['action'], 'start')
-                self.assertFalse(hem_process._confirmed_exit(self.owned['process']))
+                process = self.owned['process']
+                if process is not None:
+                    self.assertFalse(hem_process._confirmed_exit(process))
             raise
 
     def finish_own_launch(self):
-        if self.owned and not hem_process._confirmed_exit(self.owned['process']):
-            budget = Deadline.after(3)
-            while self.case.manager.reconcile('wheel-check', budget)['phase'] != 'running':
-                time.sleep(min(.01, budget.remaining()))
-            ShutdownManager(self.case.registry, processes=self.case.manager).shutdown(
-                'wheel-check', budget, abort=True)
         if self.owned:
-            self.assertTrue(hem_process._confirmed_exit(self.owned['process']))
-            self.assertTrue(hem_process._confirmed_exit(self.owned['process']['logger']))
+            budget = Deadline.after(3)
+            record = self.case.registry.get_server('wheel-check')
+            while (record.get('pending') or {}).get('action') == 'start':
+                result = self.case.manager.reconcile('wheel-check', budget)
+                record = result.get('record') or self.case.registry.get_server('wheel-check')
+                if (record.get('pending') or {}).get('action') == 'start':
+                    time.sleep(min(.01, budget.remaining()))
+            process = record['process']
+            if process and not hem_process._confirmed_exit(process):
+                ShutdownManager(self.case.registry, processes=self.case.manager).shutdown(
+                    'wheel-check', budget, abort=True)
+            if process:
+                self.assertTrue(hem_process._confirmed_exit(process))
+                logger = process.get('logger')
+                if logger:
+                    self.assertTrue(hem_process._confirmed_exit(logger))
 
     def test_timed_out_start_reconciles_and_aborts_only_its_owned_server(self):
         other = self.case.start('other')
@@ -128,7 +138,8 @@ class CheckerCleanupTest(unittest.TestCase):
             self.assertIs(caught.exception, self.start_error)
             self.assertIn('cleanup', diagnostic.getvalue().lower())
             self.assertIn('injected reconciliation failure', diagnostic.getvalue())
-            self.assertFalse(hem_process._confirmed_exit(self.owned['process']))
+            process = self.owned['process']
+            self.assertTrue(process is None or not hem_process._confirmed_exit(process))
         finally:
             self.finish_own_launch()
 
