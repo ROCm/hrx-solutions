@@ -138,8 +138,23 @@ class JoinFixture:
         (self.control(name) / ('hold-' + stage)).touch()
         (self.control(name) / ('seen-' + stage)).unlink(missing_ok=True)
 
-    def wait_barrier(self, name, stage):
-        self.until(lambda: (self.control(name) / ('seen-' + stage)).exists())
+    def wait_barrier(self, name, stage, child, seconds=15):
+        marker = self.control(name) / ('seen-' + stage)
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if marker.exists():
+                return
+            if child.poll() is not None:
+                try:
+                    stdout, stderr = child.communicate(timeout=1)
+                except subprocess.TimeoutExpired as error:
+                    stdout, stderr = error.output, error.stderr
+                raise AssertionError(
+                    f'{stage} barrier was not reached; child exited {child.returncode}; '
+                    f'stdout={stdout!r}; stderr={stderr!r}'
+                )
+            time.sleep(.01)
+        raise AssertionError(f'{stage} barrier was not reached within {seconds}s')
 
     def release(self, name, stage):
         (self.control(name) / ('hold-' + stage)).unlink(missing_ok=True)
