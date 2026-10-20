@@ -110,6 +110,15 @@ subprocess.run(
 
 # Exercise the public installed CLI without downloads or GPU initialization.
 cli = str(Path(sys.prefix) / "bin/loom-control")
+root_help = subprocess.run(
+    [cli, "--help"], capture_output=True, text=True, timeout=15, check=False)
+assert root_help.returncode == 0, root_help.stdout + root_help.stderr
+assert ("tui" in root_help.stdout
+        and "Interactive, read-only terminal dashboard" in root_help.stdout)
+tui_help = subprocess.run(
+    [cli, "tui", "--help"], capture_output=True, text=True, timeout=15, check=False)
+assert tui_help.returncode == 0, tui_help.stdout + tui_help.stderr
+assert "usage: loom-control tui" in tui_help.stdout
 def invoke(*arguments, expected=0, timeout=15):
     process = subprocess.run([cli, *arguments, "--json"], capture_output=True,
                              text=True, timeout=timeout, check=False)

@@ -12,6 +12,7 @@ launch settings, and an **instance** is a model registration on a server.
 
 | Type | Commands |
 | --- | --- |
+| `tui` | Launch the interactive, read-only terminal dashboard. |
 | `model` | `available`, `download`, `import`, `validate`, `list`, `show` |
 | `pipeline` | `list`, `show` |
 | `server` | `start`, `list`, `show`, `status`, `logs`, `reconcile`, `shutdown` |
@@ -30,6 +31,17 @@ The native
 `loom-serve` command remains available for direct foreground execution.
 For implementation and extension points, see the
 [LLM pipeline guidebook](../../loom-pipeline/llm/README.md).
+
+For a live view of the locally managed servers and model instances, run:
+
+```bash
+loom-control tui
+```
+
+The TUI shows overview, detail, and bounded live-log views. It is read-only;
+use the commands in this guide for lifecycle actions and recovery. See the
+[Loom Control TUI guide](loom-control-tui.md) for keyboard controls, refresh
+behavior, compact layout, visible failure states, and current limitations.
 
 The management command is now `loom-control`; update scripts that invoke
 `loom-hem`. No compatibility alias is installed. Existing state and configuration

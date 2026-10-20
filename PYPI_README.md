@@ -25,6 +25,9 @@ commands; see the [Loom Control companion guide](https://github.com/ROCm/hrx-sol
 Results are readable text by default. Scripts that previously parsed default JSON
 should add `--json`; equivalent native/HF/curl commands remain visible on stderr.
 Bare commands display guidance, and action `--help` explains configuration choices.
+Run `loom-control tui` for an interactive, read-only view of managed services
+and live logs. The [Loom Control TUI guide](https://github.com/ROCm/hrx-solutions/blob/main/docs/solutions/loom-control-tui.md)
+documents its views, keyboard controls, and current limitations.
 
 ## Install
 

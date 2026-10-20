@@ -79,6 +79,10 @@ configure Pi. For a wheel obtained before PyPI publication, begin with the
 To manage model assets and server lifecycles with `loom-control`, use the
 [Loom Control companion guide](docs/solutions/loom-control.md). Loom Control
 prints readable results by default; scripts that previously parsed default JSON should add `--json`.
+For an interactive, read-only view of managed servers, model instances, and
+live logs, run `loom-control tui`; see the
+[Loom Control TUI guide](docs/solutions/loom-control-tui.md) for its views and
+keyboard controls.
 For automatically maintained local Pi configuration, see
 [Connect Pi once](docs/solutions/loom-control.md#connect-pi-once) or
 [connect OpenCode 2 once](docs/solutions/loom-control.md#connect-opencode-2-once).
