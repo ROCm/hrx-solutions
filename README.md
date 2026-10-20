@@ -235,15 +235,16 @@ files are authoritative; see the [pipeline notices](loom-pipeline/llm/README.md#
 
 ### Run CI locally
 
-Run the complete ordinary wheel checks, including real 0.8B serving and Pi, OMP and OpenCode 2
-requests, with one command on a Linux x86-64 AMD GPU host with Docker:
+Run the complete ordinary wheel checks, including real 0.8B backend serving and
+the grouped Pi, OMP and OpenCode 2 wheel integrations, with one command on a
+Linux x86-64 AMD GPU host with Docker:
 
 ```bash
 bash build_tools/local-ci.sh
 ```
 
-Use `--cpu-only` for source tests, source client checks, the manylinux build and
-installed wheel/client checks without GPU inference. `--model08 DIRECTORY` uses an
+Use `--cpu-only` for source tests, source UI integration checks, the manylinux
+build and installed wheel integration checks without GPU inference. `--model08 DIRECTORY` uses an
 existing `Qwen3.5-0.8B-UD-Q5_K_XL.gguf` and adjacent `tokenizer.json` instead of
 Hugging Face acquisition. Otherwise the existing Hugging Face cache and login
 are reused; only missing pinned model files download. `HF_HUB_OFFLINE=1` rejects

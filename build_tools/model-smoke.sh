@@ -147,13 +147,8 @@ try:
         os.chdir(run)
         import hashlib
         sha = hashlib.sha256(Path(wheel).read_bytes()).hexdigest()
-        clients = []
-        for name in ('pi', 'opencode', 'omp'):
-            value = os.environ.get('LOOM_' + name.upper() + '_RUNTIME')
-            if value:
-                clients.extend(['--' + name + '-runtime', str(Path(value).resolve())])
         helper = 'openwebui_configuration_smoke.py' if profile == 'openwebui' else 'hem_model_smoke.py'
-        qualification = [] if profile == 'openwebui' else ['--profile', 'ci08', *clients]
+        qualification = [] if profile == 'openwebui' else ['--profile', 'ci08']
         code = invoke([str(run / 'venv/bin/python'), str(Path(scripts) / helper),
                        '--run', str(run / 'lifecycle'), '--wheel', wheel, '--wheel-sha256', sha,
                        '--source', source, *model, *qualification], helper=True)

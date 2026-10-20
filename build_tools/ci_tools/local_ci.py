@@ -20,8 +20,8 @@ import uuid
 from build_tools.ci_tools import local_ci_source as source
 from build_tools.ci_tools import local_ci_runtime as runtime
 
-STAGES = ('preflight', 'capture', 'clients-source', 'source-tests', 'pi-source', 'build',
-          'installed-cpu', 'installed-pi', 'installed-clients', 'gpu', 'openwebui')
+STAGES = ('preflight', 'capture', 'ui-source', 'source-tests', 'build',
+          'installed-cpu', 'ui-integrations', 'gpu', 'openwebui')
 NATIVE_OVERRIDES = ('HSA_OVERRIDE_GFX_VERSION', 'IREE_HAL_AMDGPU_LIBHSA_PATH',
                     'IREE_HAL_AMDGPU_LIBAQLPROFILE_PATH', 'LD_LIBRARY_PATH', 'LD_PRELOAD',
                     'LD_AUDIT', 'IREE_ROCM_PATH', 'CC', 'CXX', 'CMAKE_PREFIX_PATH')
@@ -243,7 +243,7 @@ class Runner:
             for name in (MODEL_NAME, 'tokenizer.json'):
                 if not (self.args.model08 / name).is_file():
                     raise Failure(f'Missing explicit model input: {self.args.model08 / name}')
-        print('Build, Python and Pi dependency acquisition may require network access.', flush=True)
+        print('Build, Python and UI dependency acquisition may require network access.', flush=True)
 
     def capture(self):
         captured = source.capture(self.root, self.snapshot)
@@ -252,14 +252,18 @@ class Runner:
         self.summary['source'] = captured
         self.summary['source']['manifest'] = str(self.run / 'source-inputs.json')
 
-    def clients_source(self):
-        # Stage immutable, client-specific public runtimes before Python tests,
-        # so optional genuine loader tests are exercised rather than skipped.
-        for client, assets in (('opencode', 'opencode_plugin'), ('omp', 'omp_extension')):
+    def ui_source(self):
+        # Stage the immutable public runtimes together so source tests exercise
+        # the genuine loaders and report one UI integration result.
+        self.command(['bash', 'build_tools/stage-pi-runtime.sh', self.run / 'pi-runtime'])
+        for client in ('opencode', 'omp'):
             self.command(['bash', f'build_tools/stage-{client}-runtime.sh',
                           self.run / f'{client}-runtime'])
             if client == 'opencode':
                 self.env['PATH'] = str(self.run / 'opencode-runtime/node-v24.10.0-linux-x64/bin') + os.pathsep + self.env.get('PATH', '')
+        self.command(['bash', 'build_tools/check-pi-assets.sh', self.run / 'pi-runtime',
+                      self.snapshot / 'binding/python/pi_extension'])
+        for client, assets in (('opencode', 'opencode_plugin'), ('omp', 'omp_extension')):
             self.command(['bash', f'build_tools/check-{client}-assets.sh',
                           self.run / f'{client}-runtime', self.snapshot / 'binding/python' / assets])
         node_bin = self.run / 'opencode-runtime/node-v24.10.0-linux-x64/bin'
@@ -286,11 +290,6 @@ class Runner:
         for directory in ('build_tools', 'tests'):
             self.command([python, '-m', 'unittest', 'discover', '-s', directory, '-p', '*_test.py', '-v'])
 
-    def pi_source(self):
-        self.command(['bash', 'build_tools/stage-pi-runtime.sh', self.run / 'pi-runtime'])
-        self.command(['bash', 'build_tools/check-pi-assets.sh', self.run / 'pi-runtime',
-                      self.snapshot / 'binding/python/pi_extension'])
-
     def build(self):
         self.command(['bash', 'build_tools/build-wheel.sh'], env={
             'GITHUB_RUN_ID': self.summary['invocation']['github_run_id'],
@@ -309,30 +308,10 @@ class Runner:
                       self.run / 'installed-venv'], cwd=self.run,
                      env={'HRX_LOCAL_CI_RUNTIME_ROOT': str(self.runtime / 'installed')})
 
-    def installed_pi(self):
-        python = self.run / 'installed-venv/bin/python'
-        # Resolve through that interpreter outside the checkout; then assert ownership.
-        code = ('import hrx_solutions,sys; from pathlib import Path; '
-                'p=Path(hrx_solutions.__file__).resolve(); '
-                'assert p.is_relative_to(Path(sys.prefix).resolve()); '
-                'print(p.parent / "pi_extension")')
-        result = self.run / 'installed-assets.txt'
-        self.command([python, '-c', code + f'; Path({str(result)!r}).write_text(str(p.parent / "pi_extension"))'],
-                     cwd=self.run)
-        self.command(['bash', self.snapshot / 'build_tools/check-pi-assets.sh', self.run / 'pi-runtime',
-                      result.read_text()], cwd=self.run)
-
-    def installed_clients(self):
-        python = self.run / 'installed-venv/bin/python'
-        for client, assets in (('opencode', 'opencode_plugin'), ('omp', 'omp_extension')):
-            result = self.run / f'installed-{client}-assets.txt'
-            code = ('import hrx_solutions,sys; from pathlib import Path; '
-                    'p=Path(hrx_solutions.__file__).resolve(); '
-                    'assert p.is_relative_to(Path(sys.prefix).resolve()); '
-                    f'Path({str(result)!r}).write_text(str(p.parent / {assets!r}))')
-            self.command([python, '-c', code], cwd=self.run)
-            self.command(['bash', self.snapshot / f'build_tools/check-{client}-assets.sh',
-                          self.run / f'{client}-runtime', result.read_text()], cwd=self.run)
+    def ui_integrations(self):
+        self.command(['bash', self.snapshot / 'build_tools/check-ui-integrations.sh',
+                      self.run / 'installed-venv', self.run / 'pi-runtime',
+                      self.run / 'opencode-runtime', self.run / 'omp-runtime'], cwd=self.run)
 
     def gpu(self):
         self.locked_model_gate(False)
@@ -366,9 +345,6 @@ class Runner:
             elif self.args.model08:
                 command.append(self.args.model08)
             self.command(command, cwd=self.run, env={
-                'LOOM_PI_RUNTIME': str(self.run / 'pi-runtime'),
-                'LOOM_OPENCODE_RUNTIME': str(self.run / 'opencode-runtime'),
-                'LOOM_OMP_RUNTIME': str(self.run / 'omp-runtime'),
                 'HRX_LOCAL_CI_RUNTIME_ROOT': str(self.runtime / ('openwebui' if webui else 'model')),
                 'HRX_LOCAL_CI_CLEANUP_FILE': str(self.run / f'{stage}-cleanup.json')}, cooperative=True)
 
@@ -377,8 +353,8 @@ class Runner:
                         for number in (signal.SIGINT, signal.SIGTERM)}
         exit_code = 0
         try:
-            actions = (self.preflight, self.capture, self.clients_source, self.source_tests, self.pi_source,
-                       self.build, self.installed_cpu, self.installed_pi, self.installed_clients, self.gpu, self.openwebui)
+            actions = (self.preflight, self.capture, self.ui_source, self.source_tests,
+                       self.build, self.installed_cpu, self.ui_integrations, self.gpu, self.openwebui)
             for name, action in zip(STAGES, actions):
                 if name in ('gpu', 'openwebui') and self.args.cpu_only:
                     continue

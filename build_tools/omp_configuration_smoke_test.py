@@ -91,24 +91,24 @@ class AcceptanceProofTest(unittest.TestCase):
 
 
 class DeliveryWiringTest(unittest.TestCase):
-    def test_real_gate_and_repaired_wheel_routes_preserve_other_clients(self):
+    def test_real_backend_gate_excludes_clients_and_wheel_groups_them(self):
         root=Path(__file__).resolve().parents[1]
         model=(root/'.github/workflows/check_model.yml').read_text()
         for required in ('runs-on: linux-gfx1151-gpu-rocm','name: hrx-solutions-wheel-linux-x86_64',
-                         'LOOM_PI_RUNTIME:','LOOM_OPENCODE_RUNTIME:','LOOM_OMP_RUNTIME:',
-                         'build_tools/stage-omp-runtime.sh','build_tools/model-smoke.sh'):
+                         'build_tools/model-smoke.sh'):
             self.assertIn(required,model)
+        for excluded in ('LOOM_PI_RUNTIME:','LOOM_OPENCODE_RUNTIME:','LOOM_OMP_RUNTIME:',
+                         'build_tools/stage-omp-runtime.sh'):
+            self.assertNotIn(excluded,model)
         wheel=(root/'.github/workflows/build_python_wheel.yml').read_text()
         for required in ('LOOM_OMP_TEST_BUN:','LOOM_OMP_TEST_PACKAGE:',
-                         'Check installed OMP assets from the repaired wheel',
-                         'Check installed OpenCode assets from the repaired wheel',
-                         'Check installed Pi assets from the repaired wheel'):
+                         'Check installed UI integrations from the repaired wheel',
+                         'build_tools/check-ui-integrations.sh'):
             self.assertIn(required,wheel)
-        self.assertIn('from omp_configuration_smoke import qualify',(root/'build_tools/hem_model_smoke.py').read_text())
+        self.assertNotIn('from omp_configuration_smoke import qualify',(root/'build_tools/hem_model_smoke.py').read_text())
         shell=(root/'build_tools/model-smoke.sh').read_text()
-        self.assertIn("for name in ('pi', 'opencode', 'omp'):",shell)
-        self.assertIn("clients.extend(['--' + name + '-runtime'",shell)
-        self.assertIn("else ['--profile', 'ci08', *clients]", shell)
+        self.assertNotIn("for name in ('pi', 'opencode', 'omp'):",shell)
+        self.assertIn("else ['--profile', 'ci08']", shell)
         self.assertIn('*model, *qualification], helper=True)',shell)
         self.assertIn("'hem_omp_installer_test'",(root/'build_tools/wheel_tools/check_installed_cpu.py').read_text())
 

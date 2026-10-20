@@ -48,17 +48,8 @@ jobs:
         with:
           name: hrx-solutions-wheel-linux-x86_64
           path: ${{ runner.temp }}/model-wheel
-      - name: Stage qualified Pi runtime for generated-configuration smoke
-        run: bash build_tools/stage-pi-runtime.sh "${RUNNER_TEMP}/pi-runtime"
-      - name: Stage qualified OpenCode 2 runtime for generated-configuration smoke
-        run: bash build_tools/stage-opencode-runtime.sh "${RUNNER_TEMP}/opencode-runtime"
-      - name: Stage qualified OMP runtime for generated-configuration smoke
-        run: bash build_tools/stage-omp-runtime.sh "${RUNNER_TEMP}/omp-runtime"
-      - name: Qualify pinned 0.8B with Loom Control and generated Pi/OMP/OpenCode configuration
+      - name: Qualify pinned 0.8B backend lifecycle with Loom Control
         env:
-          LOOM_PI_RUNTIME: ${{ runner.temp }}/pi-runtime
-          LOOM_OPENCODE_RUNTIME: ${{ runner.temp }}/opencode-runtime
-          LOOM_OMP_RUNTIME: ${{ runner.temp }}/omp-runtime
           HF_HUB_CACHE: ${{ runner.temp }}/huggingface/hub
         run: |
           shopt -s nullglob

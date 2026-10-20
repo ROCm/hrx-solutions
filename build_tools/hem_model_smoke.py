@@ -407,86 +407,8 @@ print(json.dumps(dict(record=record, exited=(not process or
         self.servers.pop(namespace, None)
         del self.attempts[namespace]
 
-    def pi_configuration(self):
-        """Exercise only our generated installation against two real model IDs.
-
-        Explicit previously qualified capacities make Pi's ordinary budgets fit;
-        they do not promote defaults or qualify a full-context request.
-        """
-        runtime = self.args.pi_runtime.resolve()
-        node_bin = runtime / 'node-v22.22.1-linux-x64/bin'
-        pi_bin = runtime / 'node_modules/.bin'
-        target = self.runtime_root / 'pi-agent'
-        project = self.runtime_root / 'pi-project'
-        target.mkdir(mode=0o700)
-        project.mkdir(mode=0o700)
-        original = '{"quietStartup":true}\n'
-        (target / 'settings.json').write_text(original)
-        environment = dict(os.environ, LOOM_SERVE_DIR=str(self.state_path('a')),
-                           PI_CODING_AGENT_DIR=str(target), PYTHONNOUSERSITE='1', PI_OFFLINE='1')
-        environment.pop('PYTHONPATH', None)
-        environment.pop('PYTHONHOME', None)
-        environment['PATH'] = os.pathsep.join((str(node_bin), str(pi_bin), str(self.states['a'].parent), environment.get('PATH', '')))
-        assert subprocess.check_output([str(node_bin / 'node'), '--version'], env=environment, text=True).strip() == 'v22.22.1'
-        assert digest(runtime / 'package-lock.json') == digest(self.args.source / 'build_tools/pi_runtime/package-lock.json')
-        metadata = json.loads((runtime / 'node_modules/@earendil-works/pi-coding-agent/package.json').read_text())
-        assert metadata['version'] == '1.3.0'
-        self.results['pi_runtime'] = dict(node='22.22.1', package=metadata['name'], version=metadata['version'],
-                                          lock_sha256=digest(runtime / 'package-lock.json'))
-        self.states['c'] = self.states['a']
-        self.namespace_roots['c'] = 'a'
-        self.start_server('c', 'server-pi-sibling')
-        for namespace, name in (('a', 'pi-qwen-a'), ('c', 'pi-qwen-b')):
-            answer = self.command(namespace, 'instance', 'start', 'small-a', '--name', name,
-                                  '--server', self.servers[namespace][0], '--pipeline', 'qwen-08b',
-                                  '--context-capacity', '262144', '--pool-capacity', '262144',
-                                  '--rows', '4', '--prefill-capacity', '128')
-            assert answer['completed'] and answer['accepted'], answer
-        configure_environment = {key: environment[key] for key in ('PATH', 'PI_CODING_AGENT_DIR', 'PI_OFFLINE')}
-        configured = self.command('a', 'pi', 'configure', '--pi-dir', str(target), env_overrides=configure_environment)
-        assert {item['id'] for item in configured['available']} == {'pi-qwen-a', 'pi-qwen-b'}, configured
-        import hrx_solutions
-        assets = Path(hrx_solutions.__file__).parent / 'pi_extension'
-        for source in assets.iterdir():
-            if source.is_file():
-                assert source.read_bytes() == (target / 'extensions/loom-hem' / source.name).read_bytes()
-        self.results['pi_responses'] = []
-        for item in configured['available']:
-            argv = [str(pi_bin / 'pi'), '--provider', item['provider'], '--model', item['id'],
-                    '--print', '--mode', 'json', '--no-session', '--no-tools', '--thinking', 'off',
-                    '--system-prompt', 'Reply briefly to the user.', 'Say hello in two words.']
-            started = time.monotonic()
-            response = run_child(argv, cwd=project, env=environment, capture_output=True, text=True, timeout=30)
-            prefix = 'pi-' + item['id']
-            (self.root / (prefix + '.stdout')).write_text(response.stdout)
-            (self.root / (prefix + '.stderr')).write_text(response.stderr)
-            evidence = dict(selected=item, exit=response.returncode, seconds=time.monotonic() - started)
-            self.results['pi_responses'].append(evidence)
-            self.save()
-            assert response.returncode == 0, prefix
-            events = [json.loads(line) for line in response.stdout.splitlines() if line.startswith('{')]
-            messages = [event['message'] for event in events if event.get('type') == 'message_end'
-                        and event.get('message', {}).get('role') == 'assistant']
-            assert messages, prefix
-            message = messages[-1]
-            assert message.get('stopReason') == 'stop', message
-            assert message.get('model') == item['id'] and message.get('provider') == item['provider'], message
-            assert any(part.get('type') == 'text' and part.get('text', '').strip() for part in message.get('content', [])), message
-            evidence['assistant'] = message
-            self.save()
-        repeated = self.command('a', 'pi', 'configure', '--pi-dir', str(target), env_overrides=configure_environment)
-        assert repeated['changed'] is False, repeated
-        assert (target / 'settings.json').read_text() == original
-        self.command('a', 'instance', 'stop', 'pi-qwen-a', '--server', self.servers['a'][0])
-        checked = self.command('a', 'pi', 'configure', '--check', '--pi-dir', str(target), env_overrides=configure_environment)
-        assert [item['id'] for item in checked['available']] == ['pi-qwen-b'], checked
-        self.command('c', 'instance', 'stop', 'pi-qwen-b', '--server', self.servers['c'][0])
-        self.shutdown('c')
-        self.results['pi_configuration'] = 'generated configuration passed two short real requests; full-context/default promotion not qualified'
-        self.save()
-
     def run_ci08(self):
-        """Required GPU CI profile; full two-model qualification remains explicit."""
+        """Required backend profile; full two-model qualification remains explicit."""
         self.start_server('a', 'server-a')
         if self.args.acquire08:
             answer = self.command('a', 'model', 'download', 'qwen35-08b-q5-k-xl',
@@ -499,14 +421,6 @@ print(json.dumps(dict(record=record, exited=(not process or
         self.query('a', 'small-a')
         self.command('a', 'instance', 'stop', 'small-a', '--server', 'server-a')
         assert self.command('a', 'instance', 'list', '--server', 'server-a')['items'] == []
-        if getattr(self.args, 'pi_runtime', None):
-            self.pi_configuration()
-        if getattr(self.args, 'opencode_runtime', None):
-            from opencode_configuration_smoke import qualify
-            qualify(self)
-        if getattr(self.args, 'omp_runtime', None):
-            from omp_configuration_smoke import qualify
-            qualify(self)
         self.shutdown('a')
         with sqlite3.connect(self.state_path('a') / 'control.sqlite3') as connection:
             assert connection.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
@@ -668,9 +582,6 @@ def main():
     parser.add_argument('--wheel-sha256', required=True)
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--profile', choices=('ci08', 'full'), default='full')
-    parser.add_argument('--opencode-runtime', type=Path, help='CI-only pinned OpenCode 2 runtime staged by stage-opencode-runtime.sh')
-    parser.add_argument('--omp-runtime', type=Path, help='CI-only qualified Bun/OMP runtime staged by stage-omp-runtime.sh')
-    parser.add_argument('--pi-runtime', type=Path, help='CI-only integrity-pinned runtime staged by stage-pi-runtime.sh')
     parser.add_argument('--model08', type=Path)
     parser.add_argument('--model27', type=Path)
     parser.add_argument('--acquire08', action='store_true', help='Acquire exact pinned 0.8B recipe with Loom Control (CI only)')

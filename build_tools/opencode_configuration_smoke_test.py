@@ -122,24 +122,24 @@ class AcceptanceProofTest(unittest.TestCase):
 
 
 class DeliveryWiringTest(unittest.TestCase):
-    def test_repaired_wheel_gpu_route_and_pi_checks_preserved(self):
+    def test_repaired_wheel_ui_checks_are_grouped_outside_backend_gate(self):
         source = Path(__file__).resolve().parents[1]
         workflow = (source / '.github/workflows/check_model.yml').read_text()
         for required in ('runs-on: linux-gfx1151-gpu-rocm', 'name: hrx-solutions-wheel-linux-x86_64',
-                         'LOOM_PI_RUNTIME:', 'LOOM_OPENCODE_RUNTIME:', 'build_tools/model-smoke.sh'):
+                         'build_tools/model-smoke.sh'):
             self.assertIn(required, workflow)
+        for excluded in ('LOOM_PI_RUNTIME:', 'LOOM_OPENCODE_RUNTIME:', 'stage-opencode-runtime.sh'):
+            self.assertNotIn(excluded, workflow)
         build = (source / '.github/workflows/build_python_wheel.yml').read_text()
         for required in ('LOOM_OPENCODE_TEST_NODE:', 'build_tools/stage-opencode-runtime.sh',
-                         'Check installed OpenCode assets from the repaired wheel',
-                         'Check installed Pi assets from the repaired wheel'):
+                         'Check installed UI integrations from the repaired wheel',
+                         'build_tools/check-ui-integrations.sh', "'textual>=0.47,<2'"):
             self.assertIn(required, build)
         helper = (source / 'build_tools/hem_model_smoke.py').read_text()
-        self.assertIn('from opencode_configuration_smoke import qualify', helper)
-        self.assertIn('qualify(self)', helper)
+        self.assertNotIn('from opencode_configuration_smoke import qualify', helper)
         shell = (source / 'build_tools/model-smoke.sh').read_text()
-        self.assertIn("for name in ('pi', 'opencode', 'omp'):", shell)
-        self.assertIn("clients.extend(['--' + name + '-runtime'", shell)
-        self.assertIn("else ['--profile', 'ci08', *clients]", shell)
+        self.assertNotIn("for name in ('pi', 'opencode', 'omp'):", shell)
+        self.assertIn("else ['--profile', 'ci08']", shell)
         self.assertIn('*model, *qualification], helper=True)', shell)
 
 

@@ -193,8 +193,7 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(calls[1].args[0][2], wheel)
         self.assertEqual(calls[2].args[0][2], wheel)
         for client in ('pi', 'opencode', 'omp'):
-            self.assertEqual(calls[2].kwargs['env']['LOOM_' + client.upper() + '_RUNTIME'],
-                             str(runner.run / f'{client}-runtime'))
+            self.assertNotIn('LOOM_' + client.upper() + '_RUNTIME', calls[2].kwargs['env'])
         self.assertEqual(calls[2].args[0][-1], self.base / 'model')
         self.assertEqual(runner.summary['wheel']['sha256'], local_ci.hashlib.sha256(wheel.read_bytes()).hexdigest())
         (wheelhouse / 'stale.whl').write_bytes(b'other')
@@ -224,18 +223,30 @@ class RunnerTest(unittest.TestCase):
                 runner.openwebui()
         command.assert_not_called()
 
-    def test_clients_stage_before_python_tests_and_pass_qualified_runtime_paths(self):
+    def test_ui_source_groups_runtimes_before_python_tests(self):
         runner = self.runner()
         with mock.patch.object(runner, 'command') as command:
-            runner.clients_source()
+            runner.ui_source()
         self.assertEqual([str(call.args[0][1]) for call in command.call_args_list], [
-            'build_tools/stage-opencode-runtime.sh', 'build_tools/check-opencode-assets.sh',
-            'build_tools/stage-omp-runtime.sh', 'build_tools/check-omp-assets.sh'])
+            'build_tools/stage-pi-runtime.sh', 'build_tools/stage-opencode-runtime.sh',
+            'build_tools/stage-omp-runtime.sh', 'build_tools/check-pi-assets.sh',
+            'build_tools/check-opencode-assets.sh', 'build_tools/check-omp-assets.sh'])
         self.assertEqual(runner.env['LOOM_OPENCODE_TEST_NODE'],
                          str(runner.run / 'opencode-runtime/node-v24.10.0-linux-x64/bin/node'))
         self.assertEqual(runner.env['LOOM_OMP_TEST_PACKAGE'],
                          str(runner.run / 'omp-runtime/client/node_modules/@oh-my-pi/pi-coding-agent'))
-        self.assertLess(local_ci.STAGES.index('clients-source'), local_ci.STAGES.index('source-tests'))
+        self.assertLess(local_ci.STAGES.index('ui-source'), local_ci.STAGES.index('source-tests'))
+
+    def test_installed_ui_integrations_are_one_isolated_wheel_stage(self):
+        runner = self.runner()
+        runner.wheel = self.base / 'candidate.whl'
+        with mock.patch.object(runner, 'command') as command:
+            runner.ui_integrations()
+        self.assertEqual(command.call_args.args[0], [
+            'bash', runner.snapshot / 'build_tools/check-ui-integrations.sh',
+            runner.run / 'installed-venv', runner.run / 'pi-runtime',
+            runner.run / 'opencode-runtime', runner.run / 'omp-runtime'])
+        self.assertEqual(command.call_args.kwargs['cwd'], runner.run)
 
     def test_source_tests_install_and_verify_tui_runtime_dependency(self):
         runner = self.runner()
@@ -250,11 +261,11 @@ class RunnerTest(unittest.TestCase):
         runner = self.runner('--cpu-only')
         runner.preflight = lambda: None
         runner.capture = lambda: None
-        runner.clients_source = lambda: None
+        runner.ui_source = lambda: None
         runner.source_tests = lambda: runner.command(['bash', '-c', 'echo failure; exit 37'], cwd=self.base)
         self.assertEqual(runner.execute(), 1)
         self.assertEqual(runner.summary['failure']['exit_code'], 37)
-        self.assertEqual(runner.summary['stages']['pi-source']['status'], 'not-run')
+        self.assertEqual(runner.summary['stages']['build']['status'], 'not-run')
         self.assertIn('failure', (runner.run / 'source-tests.log').read_text())
 
     def test_cache_precedence_and_environment(self):
@@ -287,9 +298,8 @@ class RunnerTest(unittest.TestCase):
         runner = self.runner()
         runner.preflight = lambda: None
         runner.capture = lambda: None
-        runner.clients_source = lambda: None
+        runner.ui_source = lambda: None
         runner.source_tests = lambda: None
-        runner.pi_source = lambda: None
         ready = runner.run / 'ready'
         cleanup = runner.run / 'build-cleanup.json'
         program = ("import signal,time,pathlib,json; "
@@ -337,7 +347,7 @@ class RunnerTest(unittest.TestCase):
         runner = self.runner('--cpu-only')
         runner.preflight = lambda: None
         runner.capture = lambda: None
-        runner.clients_source = lambda: None
+        runner.ui_source = lambda: None
         pid_file = runner.runtime / 'tmp/fixture.pid'
         token = 'local-ci-fixture-' + local_ci.uuid.uuid4().hex
         program = ("import subprocess,sys,time,pathlib; "
