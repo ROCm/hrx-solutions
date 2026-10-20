@@ -274,13 +274,15 @@ class Runner:
         self.command(['python3', '-m', 'venv', venv])
         python = venv / 'bin/python'
         self.command([python, '-m', 'pip', 'install', '--disable-pip-version-check',
-                      'setuptools>=77', 'wheel>=0.45', 'packaging>=24.2'])
-        self.command([python, '-c', 'import os,site,sys,setuptools,packaging; from pathlib import Path; '
+                      'setuptools>=77', 'wheel>=0.45', 'packaging>=24.2',
+                      'textual>=0.47,<2'])
+        self.command([python, '-c', 'import os,site,sys,setuptools,packaging,textual; from pathlib import Path; '
                       'assert sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE; '
                       'assert "include-system-site-packages = false" in (Path(sys.prefix)/"pyvenv.cfg").read_text(); '
                       'assert not os.environ.get("PYTHONPATH") and not os.environ.get("PYTHONHOME"); '
                       'assert all(Path(m.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()) '
-                      'for m in (setuptools,packaging)); print(sys.executable,setuptools.__file__,packaging.__file__)'])
+                      'for m in (setuptools,packaging,textual)); '
+                      'print(sys.executable,setuptools.__file__,packaging.__file__,textual.__file__)'])
         for directory in ('build_tools', 'tests'):
             self.command([python, '-m', 'unittest', 'discover', '-s', directory, '-p', '*_test.py', '-v'])
 

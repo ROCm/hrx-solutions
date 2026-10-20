@@ -237,6 +237,15 @@ class RunnerTest(unittest.TestCase):
                          str(runner.run / 'omp-runtime/client/node_modules/@oh-my-pi/pi-coding-agent'))
         self.assertLess(local_ci.STAGES.index('clients-source'), local_ci.STAGES.index('source-tests'))
 
+    def test_source_tests_install_and_verify_tui_runtime_dependency(self):
+        runner = self.runner()
+        with mock.patch.object(runner, 'command') as command:
+            runner.source_tests()
+        install = command.call_args_list[1].args[0]
+        verify = command.call_args_list[2].args[0]
+        self.assertIn('textual>=0.47,<2', install)
+        self.assertIn('textual.__file__', verify[-1])
+
     def test_failure_preserves_original_code_and_stops(self):
         runner = self.runner('--cpu-only')
         runner.preflight = lambda: None
