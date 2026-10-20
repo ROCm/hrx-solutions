@@ -16,7 +16,7 @@ if [[ -n "${HRX_BAZEL_CACHE_DIR:-}" && ${HRX_BAZEL_CACHE_ENABLED:-1} != 0 ]]; th
     echo "Optional Bazel cache unavailable; building without it: ${result:-probe failed}" >&2
   fi
 fi
-container=ghcr.io/rocm/therock_build_manylinux_x86_64@sha256:702a5133851e6d1daf1207d2c9fbb01c2667914a5b6dc5a01faeb3ce66ea6421
+container=quay.io/pypa/manylinux_2_28_x86_64@sha256:1e7b8460ad8fb3fb0fbe1cd818845159ac896b4fd17452d56e892c291f3b97a8
 
 # Python owns the Docker CLI and exact container identity across cancellation.
 exec python3 - "$container" --user "$(id -u):$(id -g)" \
