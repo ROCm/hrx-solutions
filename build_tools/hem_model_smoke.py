@@ -101,6 +101,14 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def source_commit(source):
+    commit = os.environ.get('GITHUB_SHA')
+    if commit:
+        return commit
+    return subprocess.check_output(
+        ['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+
+
 class Gate:
     def __init__(self, args):
         self.args, self.root = args, args.run.resolve()
@@ -206,7 +214,7 @@ class Gate:
                         assert (package / relative).read_bytes() == archive.read(name), name
                         installed[relative] = digest(package / relative)
             self.results[namespace] = dict(identity=identity, installed_parity=installed, native_sha256=digest(native))
-        self.results['source_commit'] = subprocess.check_output(['git', '-C', str(self.args.source), 'rev-parse', 'HEAD'], text=True).strip()
+        self.results['source_commit'] = source_commit(self.args.source)
         self.results['wheel_sha256'] = digest(self.args.wheel)
         self.results['native_provenance'] = self.args.native_provenance
         self.results['profile'] = self.args.profile

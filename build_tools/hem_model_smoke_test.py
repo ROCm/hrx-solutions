@@ -34,6 +34,19 @@ class SmokeFailureTest(unittest.TestCase):
         self.gate = hem_model_smoke.Gate(argparse.Namespace(run=self.root))
         self.gate.states['a'] = self.root / 'venv/bin/python'
 
+    def test_source_commit_uses_github_identity_without_inspecting_checkout(self):
+        with mock.patch.dict(os.environ, {'GITHUB_SHA': 'ci-commit'}, clear=True), \
+             mock.patch.object(subprocess, 'check_output',
+                               side_effect=AssertionError('Git must not inspect the CI checkout')):
+            self.assertEqual(hem_model_smoke.source_commit(self.root), 'ci-commit')
+
+    def test_source_commit_falls_back_to_checkout_identity_locally(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(subprocess, 'check_output', return_value='local-commit\n') as git:
+            self.assertEqual(hem_model_smoke.source_commit(self.root), 'local-commit')
+        git.assert_called_once_with(
+            ['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True)
+
     def test_internal_private_root_separates_state_from_report_and_venv_paths(self):
         from local_ci_runtime import create
         import shutil
