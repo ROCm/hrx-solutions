@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -21,62 +20,7 @@ from binding.python.hem_common import Deadline, DeadlineExpired, HemError, Inval
 from binding.python.hem_http import NativeClient
 from binding.python.hem_state import Registry
 
-# A real independently exec'd ELF is essential: a shebang fixture would retain
-# Python's /proc/exe and never prove the bootstrap-to-native identity transition.
-NATIVE = r'''
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
-int main(int argc, char **argv) {
- signal(SIGPIPE,SIG_IGN);
- int port=0, fd, client, yes=1; char request[2048];
- int unhealthy=0;
- for(int i=1;i<argc;i++) if(!strncmp(argv[i],"--listen=",9)) port=atoi(strrchr(argv[i], ':')+1);
- for(int i=1;i<argc;i++) { if(!strcmp(argv[i],"--device=slow")) usleep(500000); if(!strcmp(argv[i],"--device=unhealthy")) unhealthy=1; }
- if(!port) return 5;
- fd=socket(AF_INET,SOCK_STREAM,0); setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
- struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(port),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
- if(bind(fd,(void*)&a,sizeof(a)) || listen(fd,16)) return 6;
- fprintf(stderr,"fake-native ready %d\n",port); fflush(stderr);
- while((client=accept(fd,NULL,NULL))>=0) {
-   int count=read(client,request,sizeof(request)-1); if(count<0) count=0; request[count]=0;
-   const char *body="{\"object\":\"list\",\"data\":[],\"server\":{\"worker_count\":1}}";
-   if(strstr(request,"/noise")) { for(int i=0;i<100000;i++) fputs("bounded diagnostic output 1234567890\n",stderr); fflush(stderr); }
-   if(unhealthy || strstr(request,"/fail")) body="{}";
-   char reply[4096]; int n=snprintf(reply,sizeof(reply),"HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",strlen(body),body);
-   write(client,reply,n); close(client);
- }
- return 0;
-}
-'''
-
-
-def port():
-    with socket.socket() as sock:
-        sock.bind(('127.0.0.1', 0))
-        return sock.getsockname()[1]
-
-
-def wait_exit(process, seconds=3):
-    until = time.monotonic() + seconds
-    uncertain = None
-    while time.monotonic() < until:
-        try:
-            if hem_process._confirmed_exit(process):
-                return
-        except UncertainOutcome as error:
-            # Procfs executable data may disappear before pidfd reports exit.
-            # Retry the same owned record; uncertainty never counts as success.
-            uncertain = error
-        time.sleep(.01)
-    if uncertain is not None:
-        raise uncertain
-    raise AssertionError(f'owned process did not exit: {process}')
+from tests.hem_lifecycle_fixture import PROCESS_NATIVE as NATIVE, port, wait_exit
 
 
 class WaitExitTest(unittest.TestCase):

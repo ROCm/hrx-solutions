@@ -21,8 +21,8 @@ from unittest.mock import patch
 from binding.python import hem_config, hem_instances, hem_models, hem_process, hem_state
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.hem_http import NativeClient
-from tests.hem_http_test import fixture, inventory, model, reply
-from tests.hem_process_test import port, wait_exit
+from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
+from tests.hem_lifecycle_fixture import INSTANCES_NATIVE as NATIVE, port, wait_exit
 
 
 class Processes:
@@ -573,50 +573,6 @@ class LifecycleTest(unittest.TestCase):
             self.assertLess(time.monotonic() - began, .5)
             self.assertEqual(self.calls, [])
             self.assertIsNone(self.registry.deadline)
-
-
-
-# An independent ELF, rather than the Python HTTP fixture, proves real managed
-# pin/accepted-connection association through the complete registration sequence.
-NATIVE = r'''
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
-int main(int argc, char **argv) {
- signal(SIGPIPE,SIG_IGN);
- int port=0, fd, client, yes=1, registered=0, active=0, open=0;
- for(int i=1;i<argc;i++) if(!strncmp(argv[i],"--listen=",9)) port=atoi(strrchr(argv[i], ':')+1);
- if(!port) return 5;
- fd=socket(AF_INET,SOCK_STREAM,0); setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
- struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(port),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
- if(bind(fd,(void*)&a,sizeof(a)) || listen(fd,16)) return 6;
- while((client=accept(fd,NULL,NULL))>=0) {
-   char request[65536]={0}, body[8192], response[10000]; int count=0, n=0;
-   while(count < (int)sizeof(request)-1 && (n=read(client,request+count,sizeof(request)-count-1))>0) {
-     count+=n; request[count]=0; char *end=strstr(request,"\r\n\r\n");
-     if(end) { char *cl=strstr(request,"Content-Length:"); int length=cl ? atoi(cl+15) : 0;
-       if(count >= (int)(end-request)+4+length) break; }
-   }
-   int code=200;
-   if(strstr(request,"POST /v1/models/register ")) { registered=1; active=0; open=0; code=202; }
-   if(strstr(request,"POST /v1/models/activate ")) { active=1; code=202; }
-   if(strstr(request,"POST /v1/models/undrain ")) { if(!active) return 7; open=1; code=202; }
-   if(strstr(request,"POST /v1/models/unregister ")) { registered=0; code=202; }
-   if(!strncmp(request,"POST",4)) strcpy(body,"{\"accepted\":true}");
-   else if(registered && !active) strcpy(body,"{\"object\":\"list\",\"data\":[{\"id\":\"chat\",\"loom\":{\"incarnation\":17,\"registration\":\"registered\",\"parameter_operation\":\"idle\",\"status\":{\"admission\":\"drained\"}}}],\"server\":{\"worker_count\":1}}");
-   else if(registered) snprintf(body,sizeof(body),"{\"object\":\"list\",\"data\":[{\"id\":\"chat\",\"loom\":{\"incarnation\":17,\"registration\":\"ready\",\"parameter_operation\":\"idle\",\"parameters\":{\"active\":%s},\"status\":{\"admission\":\"%s\"}}}],\"server\":{\"worker_count\":1}}",active?"true":"false",open?"open":"drained");
-   else strcpy(body,"{\"object\":\"list\",\"data\":[],\"server\":{\"worker_count\":1}}");
-   n=snprintf(response,sizeof(response),"HTTP/1.1 %d OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",code,strlen(body),body);
-   write(client,response,n); close(client);
- }
- return 0;
-}
-'''
 
 
 class OwnedProcessLifecycleTest(unittest.TestCase):

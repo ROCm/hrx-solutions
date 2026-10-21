@@ -19,9 +19,9 @@ from binding.python import hem_config, hem_process, hem_state
 from binding.python.hem_common import Deadline
 from binding.python.hem_http import NativeClient
 from tests.gguf_fixtures import install_lifecycle_profile, lifecycle_profile, write_matching_gguf
-from tests.hem_http_test import fixture, inventory, model, reply
-from tests.hem_instances_test import NATIVE
-from tests.hem_process_test import port, wait_exit
+from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
+from tests.hem_lifecycle_fixture import INSTANCES_NATIVE as NATIVE
+from tests.hem_lifecycle_fixture import port, wait_exit
 
 # Keep the existing native-shaped metadata-only registration fixture, adding
 # diagnostics and controllable externally-created/replaced/error registrations.

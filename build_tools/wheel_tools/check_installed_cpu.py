@@ -22,7 +22,7 @@ import unittest
 import zipfile
 
 
-HELPERS = ('gguf_fixtures', 'hem_http_test', 'hem_process_test', 'hem_instances_test')
+HELPERS = ('gguf_fixtures', 'hem_lifecycle_fixture')
 # Installer concurrency fixtures import source-only test helpers in children.
 # Keep those in source CPU discovery; installed CLI cases still exercise the
 # real installed installer through its public entry point.

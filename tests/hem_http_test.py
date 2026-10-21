@@ -1,7 +1,5 @@
 """Real loopback HTTP protocol tests; no native payload or shared services."""
 
-from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import shlex
@@ -15,60 +13,7 @@ from unittest.mock import patch
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.hem_http import NativeClient, active_ready, registration, retired
 
-
-def inventory(*items):
-    return {"object": "list", "data": list(items), "server": {"worker_count": 1}}
-
-
-def model(incarnation=17, **overrides):
-    loom = dict(incarnation=incarnation, registration="ready", parameter_operation="idle",
-                parameters={"active": True}, status={"admission": "drained"})
-    loom.update(overrides)
-    return dict(id="chat", loom=loom)
-
-
-@contextmanager
-def fixture(respond=None):
-    records = []
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):
-            pass
-
-        def do_GET(self):
-            self.dispatch()
-
-        def do_POST(self):
-            self.dispatch()
-
-        def dispatch(self):
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            records.append((self.command, self.path, body, dict(self.headers)))
-            if respond is not None:
-                try:
-                    respond(self, records)
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
-            else:
-                reply(self, inventory(model()))
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    server.daemon_threads = True
-    worker = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.005), daemon=True)
-    worker.start()
-    try:
-        yield "http://127.0.0.1:" + str(server.server_port), records
-    finally:
-        server.shutdown()
-        server.server_close()
-        worker.join()
-
-
-def reply(handler, payload, status=200):
-    body = json.dumps(payload).encode()
-    handler.send_response(status)
-    handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Connection", "close")
-    handler.end_headers()
-    handler.wfile.write(body)
+from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
 
 
 class TransportTest(unittest.TestCase):

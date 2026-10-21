@@ -18,8 +18,8 @@ import time
 from binding.python import hem_process, hem_state
 from binding.python.hem_common import Deadline, UncertainOutcome
 from tests.gguf_fixtures import install_lifecycle_profile, lifecycle_profile, write_matching_gguf
-from tests.hem_instances_test import NATIVE
-from tests.hem_process_test import port, wait_exit
+from tests.hem_lifecycle_fixture import INSTANCES_NATIVE as NATIVE
+from tests.hem_lifecycle_fixture import port, wait_exit
 
 
 NATIVE_JOIN = NATIVE.replace('#include <unistd.h>', '''#include <unistd.h>

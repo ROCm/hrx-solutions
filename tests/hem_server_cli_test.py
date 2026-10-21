@@ -11,12 +11,13 @@ import os
 from pathlib import Path
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+
+from tests.hem_lifecycle_fixture import SERVER_CLI_NATIVE as NATIVE, port as available_port
 
 PACKAGE = os.environ.get('HEM_TEST_PACKAGE', 'binding.python')
 process_module = importlib.import_module(PACKAGE + '.hem_process')
@@ -25,39 +26,6 @@ Deadline = importlib.import_module(PACKAGE + '.hem_common').Deadline
 InvalidInput = importlib.import_module(PACKAGE + '.hem_common').InvalidInput
 resolve_server = importlib.import_module(PACKAGE + '.hem_server_cli').resolve_server
 NativeClient = importlib.import_module(PACKAGE + '.hem_http').NativeClient
-NATIVE = r'''
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
-int main(int argc,char **argv) {
- signal(SIGPIPE,SIG_IGN); int port=0,yes=1,unhealthy=0;
- for(int i=1;i<argc;i++) if(!strncmp(argv[i],"--listen=",9)) port=atoi(strrchr(argv[i],':')+1);
- int s=socket(AF_INET,SOCK_STREAM,0); setsockopt(s,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
- struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(port),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
- if(!port || bind(s,(void*)&a,sizeof(a)) || listen(s,16)) return 6;
- fprintf(stderr,"fake-native ready %d\n",port); fflush(stderr);
- int c; while((c=accept(s,NULL,NULL))>=0) {
-  char request[4096]; int n=read(c,request,sizeof(request)-1); if(n<0)n=0; request[n]=0;
-  fprintf(stderr,"%.*s\n",(int)strcspn(request,"\r\n"),request); fflush(stderr);
-  if(strstr(request,"/fail")) unhealthy=1;
-  if(strstr(request,"/noise")) {for(int i=0;i<100000;i++) fputs("bounded fixture log output abcdefghijklmnopqrstuvwxyz\n",stderr); fflush(stderr);}
-  const char *body=unhealthy?"{}":"{\"object\":\"list\",\"data\":[],\"server\":{\"worker_count\":1}}";
-  dprintf(c,"HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",strlen(body),body); close(c);
- }
- return 0;
-}
-'''
-
-
-def available_port():
-    with socket.socket() as sock:
-        sock.bind(('127.0.0.1', 0))
-        return sock.getsockname()[1]
 
 
 class ServerCliTest(unittest.TestCase):
