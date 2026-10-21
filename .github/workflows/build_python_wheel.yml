@@ -112,7 +112,7 @@ jobs:
           elif [[ -n "$MATCHED_KEY" ]]; then
             state=restored
           fi
-          "${RUNNER_TEMP}/hem-source-venv/bin/python" build_tools/wheel_cache.py prepare \
+          "${RUNNER_TEMP}/hem-source-venv/bin/python" -m build_tools.ci_tools.wheel_cache prepare \
             --directory "$HRX_BAZEL_CACHE_DIR" --restore-state "$state" | tee "${RUNNER_TEMP}/wheel-cache-diagnostics/prepare.json"
           echo "$(( $(date +%s) - $(cat "${RUNNER_TEMP}/wheel-cache-diagnostics/restore.started") ))" > "${RUNNER_TEMP}/wheel-cache-diagnostics/restore.seconds"
       - name: Build and repair wheel in manylinux container
@@ -159,7 +159,7 @@ jobs:
         continue-on-error: true
         run: |
           unset PYTHONPATH PYTHONHOME
-          "${RUNNER_TEMP}/hem-source-venv/bin/python" build_tools/wheel_cache.py admit \
+          "${RUNNER_TEMP}/hem-source-venv/bin/python" -m build_tools.ci_tools.wheel_cache admit \
             --directory "$HRX_BAZEL_CACHE_DIR" --max-bytes 3221225472 | tee "${RUNNER_TEMP}/wheel-cache-diagnostics/admit.json"
       - name: Record attempted cache publication
         id: cache_publication
@@ -190,6 +190,6 @@ jobs:
           SAVE_OUTCOME: ${{ steps.cache_save.outcome }}
         run: |
           unset PYTHONPATH PYTHONHOME
-          "${RUNNER_TEMP}/hem-source-venv/bin/python" build_tools/wheel_cache_summary.py \
+          "${RUNNER_TEMP}/hem-source-venv/bin/python" -m build_tools.ci_tools.wheel_cache_summary \
             --snapshot "${RUNNER_TEMP}/hrx-wheel-bazel-cache" \
             --diagnostics "${RUNNER_TEMP}/wheel-cache-diagnostics"

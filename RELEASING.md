@@ -65,7 +65,7 @@ existing releases:
 git switch main
 git pull --ff-only origin main
 git fetch origin --tags
-python build_tools/make_release.py --version 0.3.0 --bump-dev --dry-run
+python -m build_tools.release.make_release --version 0.3.0 --bump-dev --dry-run
 ```
 
 The helper requires only the Python standard library. Both dry runs and real
@@ -75,7 +75,7 @@ tag availability. A dry run changes no files, commits, or tags.
 After reviewing the dry run:
 
 ```bash
-python build_tools/make_release.py --version 0.3.0 --bump-dev
+python -m build_tools.release.make_release --version 0.3.0 --bump-dev
 git log -3 --oneline
 git show v0.3.0:version.json
 ```

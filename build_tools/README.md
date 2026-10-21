@@ -131,8 +131,8 @@ and WebUI qualification remain separate.
 
 Pi's gate runs `pi_extension_test.mjs`, `pi_discovery_test.mjs`, and
 `pi_budgets_test.mjs`. OpenCode runs `tests/opencode_adapter_test.mjs`; OMP
-runs `tests/omp_adapter_test.mjs` and `tests/omp_loader_test.mjs`. The top-level
-`pi_provider_test.mjs` has no checked-in gate caller found. OpenCode/OMP
+runs `tests/omp_adapter_test.mjs` and `tests/omp_loader_test.mjs`. The relocated
+`integrations/pi/pi_provider_test.mjs` has no checked-in gate caller found. OpenCode/OMP
 configuration modules contain `qualify()` functions with no production caller
 found, while their helpers are unit-tested. These are retirement-audit items;
 this guide does not add or remove qualification coverage.
@@ -158,12 +158,13 @@ preserving installed application import provenance.
 | Shared source tests | `python -m build_tools.ci_tools.source_tests {install,verify,build_tools,tests}` | Caller owns venv/environment/runtime fixtures; installs source requirements, verifies provenance, or runs unchanged full unittest discovery; console results |
 | Shared version rules | `versioning.py` | Reads `version.json`; release/tag validation; no independent CLI |
 
-Top-level Python forwarding files are compatibility routes into `ci_tools/`,
-`wheel_tools/`, `model_tools/`, and `release/`. They remain in use by packaging,
-container scripts, workflows, tests, and published documentation. In particular,
-the root README documents `python build_tools/setup_python.py`, and
-`RELEASING.md` documents `python build_tools/make_release.py`. They cannot be
-retired solely because the canonical modules exist.
+Top-level Python forwarding files remain compatibility routes into `ci_tools/`,
+`wheel_tools/`, `validation/`, `model_tools/`, and `release/` during migration.
+Checked-in consumers use canonical modules. The previously documented
+`python build_tools/setup_python.py` and `python build_tools/make_release.py`
+remain supported compatibility commands; new examples use their canonical
+module replacements above and below. Other wrappers await the final
+compatibility audit and replacement checks before retirement.
 
 `MANIFEST.in` includes build-tool Python, shell, and Bazel files. That rule does
 not include integration JavaScript, JSON manifests, or lockfiles. The release

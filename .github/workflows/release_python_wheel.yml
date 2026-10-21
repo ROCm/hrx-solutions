@@ -34,7 +34,7 @@ jobs:
       - name: Validate release version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: python3 build_tools/publish_release.py validate-tag --tag "$RELEASE_TAG"
+        run: python3 -m build_tools.release.publish_release validate-tag --tag "$RELEASE_TAG"
 
   build_python_wheel:
     name: Python / manylinux wheel
@@ -69,15 +69,15 @@ jobs:
         run: python3 -m pip install 'twine>=6.1' 'packaging>=24.2'
       - name: Validate release assets
         run: |
-          python3 build_tools/publish_release.py validate-wheel \
+          python3 -m build_tools.release.publish_release validate-wheel \
             --tag "$RELEASE_TAG" --wheel-dir release-assets
-          python3 build_tools/validate_wheel.py release-assets/*.whl
+          python3 -m build_tools.wheel_tools.validate_wheel release-assets/*.whl
           python3 -m twine check --strict release-assets/*.whl
       - name: Publish GitHub release and checksums
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python3 build_tools/publish_release.py github \
+          python3 -m build_tools.release.publish_release github \
             --tag "$RELEASE_TAG" --wheel-dir release-assets
 
   publish_pypi:
@@ -105,7 +105,7 @@ jobs:
         run: python3 -m pip install 'packaging>=24.2'
       - name: Check for an identical prior PyPI upload
         id: pypi
-        run: python3 build_tools/publish_release.py pypi-status --tag "$RELEASE_TAG"
+        run: python3 -m build_tools.release.publish_release pypi-status --tag "$RELEASE_TAG"
       - name: Publish wheel through trusted publishing
         if: steps.pypi.outputs.exists != 'true'
         uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0

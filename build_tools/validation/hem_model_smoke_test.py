@@ -48,7 +48,7 @@ class SmokeFailureTest(unittest.TestCase):
             ['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True)
 
     def test_internal_private_root_separates_state_from_report_and_venv_paths(self):
-        from local_ci_runtime import create
+        from build_tools.ci_tools.local_ci_runtime import create
         import shutil
         owner = create(self.root)
         runtime = Path(owner['root'])

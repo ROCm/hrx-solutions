@@ -74,7 +74,7 @@ def discover_bazel(explicit: Optional[str] = None) -> Path:
             return candidate.resolve()
 
     raise RuntimeError(
-        "Bazel was not found. Run `python build_tools/setup_python.py --help` "
+        "Bazel was not found. Run `python -m build_tools.wheel_tools.setup_python --help` "
         "for the pinned Bazelisk installation instructions."
     )
 
@@ -109,7 +109,7 @@ def discover_rocm_root() -> Path:
     if not configured:
         raise RuntimeError(
             "IREE_ROCM_PATH is not configured; run "
-            "`python build_tools/setup_python.py --rocm /path/to/rocm`."
+            "`python -m build_tools.wheel_tools.setup_python --rocm /path/to/rocm`."
         )
     root = Path(configured).expanduser().resolve()
     if not (root / "include").is_dir():

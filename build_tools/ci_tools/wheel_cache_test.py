@@ -90,7 +90,7 @@ class WheelCacheTest(unittest.TestCase):
     def test_failed_configuration_reports_failure_without_claiming_enabled(self):
         rc = Path(self.temp.name) / "rc-directory"
         rc.mkdir()
-        result = subprocess.run([os.sys.executable, str(REPO / "build_tools/wheel_cache.py"), "configure", "--bazelrc", str(rc)], check=True, capture_output=True, text=True)
+        result = subprocess.run([os.sys.executable, "-m", "build_tools.ci_tools.wheel_cache", "configure", "--bazelrc", str(rc)], cwd=REPO, check=True, capture_output=True, text=True)
         data = json.loads(result.stdout)
         self.assertFalse(data["enabled"])
         self.assertFalse(data.get("configured", False))
@@ -123,7 +123,7 @@ class WheelCacheTest(unittest.TestCase):
     def test_unwritable_and_malformed_cli_is_optional(self):
         self.complete()
         (self.root / "manifest.json").write_text("{partial")
-        result = subprocess.run([os.sys.executable, str(REPO / "build_tools/wheel_cache.py"), "prepare", "--directory", str(self.root)], check=True, capture_output=True, text=True)
+        result = subprocess.run([os.sys.executable, "-m", "build_tools.ci_tools.wheel_cache", "prepare", "--directory", str(self.root)], cwd=REPO, check=True, capture_output=True, text=True)
         self.assertFalse(json.loads(result.stdout)["enabled"])
         with mock.patch.object(cache.tempfile, "TemporaryFile", side_effect=PermissionError("read-only")):
             empty = Path(self.temp.name) / "unwritable"

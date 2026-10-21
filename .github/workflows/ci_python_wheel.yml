@@ -96,5 +96,5 @@ jobs:
           if [[ "$CACHE_PILOT" == 1 ]]; then
             scope_args+=(--pilot)
           fi
-          "${RUNNER_TEMP}/wheel-cache-maintenance-venv/bin/python" build_tools/github_wheel_cache.py \
+          "${RUNNER_TEMP}/wheel-cache-maintenance-venv/bin/python" -m build_tools.ci_tools.github_wheel_cache \
             --attempted-key "$ATTEMPTED_KEY" "${scope_args[@]}"

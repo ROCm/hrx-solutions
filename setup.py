@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from setuptools import setup
 
-from build_tools.python_packaging import (
+from build_tools.wheel_tools.python_packaging import (
     BazelBuildPy,
     BinaryDistribution,
     Py3PlatformWheel,

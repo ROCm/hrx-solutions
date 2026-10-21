@@ -199,7 +199,7 @@ and runtime libraries:
 
 ```bash
 python -m pip install build 'setuptools>=77' 'wheel>=0.45'
-python build_tools/setup_python.py --rocm=/path/to/rocm
+python -m build_tools.wheel_tools.setup_python --rocm=/path/to/rocm
 python -m build --wheel
 python -m pip install --force-reinstall dist/hrx_solutions-*.whl
 ```

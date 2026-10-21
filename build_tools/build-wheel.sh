@@ -9,7 +9,7 @@ repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 
 cache_args=(--env HRX_BAZEL_CACHE_ENABLED=0)
 if [[ -n "${HRX_BAZEL_CACHE_DIR:-}" && ${HRX_BAZEL_CACHE_ENABLED:-1} != 0 ]]; then
-  if result=$(python3 "$repo/build_tools/wheel_cache.py" prepare --directory "$HRX_BAZEL_CACHE_DIR") &&
+  if result=$(cd -- "$repo" && python3 -m build_tools.ci_tools.wheel_cache prepare --directory "$HRX_BAZEL_CACHE_DIR") &&
       [[ $result == *'"enabled": true'* ]]; then
     cache_args=(--volume "$HRX_BAZEL_CACHE_DIR:/ci-cache" --env HRX_BAZEL_CACHE_ENABLED=1)
   else

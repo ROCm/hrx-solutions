@@ -147,9 +147,10 @@ try:
         os.chdir(run)
         import hashlib
         sha = hashlib.sha256(Path(wheel).read_bytes()).hexdigest()
-        helper = 'integrations/openwebui/openwebui_configuration_smoke.py' if profile == 'openwebui' else 'validation/hem_model_smoke.py'
+        helper = 'build_tools.integrations.openwebui.openwebui_configuration_smoke' if profile == 'openwebui' else 'build_tools.validation.hem_model_smoke'
         qualification = [] if profile == 'openwebui' else ['--profile', 'ci08']
-        code = invoke([str(run / 'venv/bin/python'), str(Path(scripts) / helper),
+        code = invoke([str(run / 'venv/bin/python'), '-c',
+                       'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module(sys.argv.pop(1), run_name="__main__", alter_sys=True)', source, helper,
                        '--run', str(run / 'lifecycle'), '--wheel', wheel, '--wheel-sha256', sha,
                        '--source', source, *model, *qualification], helper=True)
 finally:

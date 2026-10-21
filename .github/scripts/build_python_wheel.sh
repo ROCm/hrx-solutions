@@ -22,7 +22,7 @@ curl -fL https://github.com/bazelbuild/bazelisk/releases/download/v1.29.0/bazeli
 echo "5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992  $BAZEL" | sha256sum --check
 chmod +x "$BAZEL"
 
-HRX_SOURCE_DIR=$("$HRX_BUILD_PYTHON" -c 'from build_tools.python_packaging import discover_bazel, discover_hrx_source; print(discover_hrx_source(discover_bazel()))')
+HRX_SOURCE_DIR=$("$HRX_BUILD_PYTHON" -c 'from build_tools.wheel_tools.python_packaging import discover_bazel, discover_hrx_source; print(discover_hrx_source(discover_bazel()))')
 export HRX_SOURCE_DIR
 source .github/scripts/fetch_rocm_toolchain.sh
 "$CC" --version
@@ -30,12 +30,12 @@ source .github/scripts/fetch_rocm_toolchain.sh
 : "${AUDITWHEEL_PLAT:?}"
 test -d "$HRX_ROCM_ROOT/include"
 test -f "$HRX_ROCM_ROOT/lib/libhsa-runtime64.so.1"
-"$HRX_BUILD_PYTHON" build_tools/setup_python.py --rocm="$HRX_ROCM_ROOT" --bazel="$BAZEL"
+"$HRX_BUILD_PYTHON" -m build_tools.wheel_tools.setup_python --rocm="$HRX_ROCM_ROOT" --bazel="$BAZEL"
 cache_enabled=()
 cache_recorded=0
 if [[ ${HRX_BAZEL_CACHE_ENABLED:-0} == 1 ]]; then
-  "$HRX_BUILD_PYTHON" build_tools/wheel_cache.py invalidate
-  if compiler_json=$("$HRX_BUILD_PYTHON" build_tools/bazel_compiler_inputs.py \
+  "$HRX_BUILD_PYTHON" -m build_tools.ci_tools.wheel_cache invalidate
+  if compiler_json=$("$HRX_BUILD_PYTHON" -m build_tools.wheel_tools.bazel_compiler_inputs \
       --rocm "$HRX_ROCM_ROOT" --container-identity "$HRX_WHEEL_CONTAINER" --bazelrc .bazelrc.configured) &&
       HRX_COMPILER_FINGERPRINT=$("$HRX_BUILD_PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])' <<<"$compiler_json"); then
     export HRX_COMPILER_FINGERPRINT
@@ -46,7 +46,7 @@ if [[ ${HRX_BAZEL_CACHE_ENABLED:-0} == 1 ]]; then
   fi
 fi
 # Remove our previous block even when caching is disabled on this invocation.
-if configuration=$("$HRX_BUILD_PYTHON" build_tools/wheel_cache.py configure "${cache_enabled[@]}") &&
+if configuration=$("$HRX_BUILD_PYTHON" -m build_tools.ci_tools.wheel_cache configure "${cache_enabled[@]}") &&
     [[ $configuration == *'"configured": true'* ]]; then
   :
 else
@@ -57,12 +57,12 @@ export HRX_BAZEL_CACHE_ENABLED
 export HRX_BAZEL_METRICS_DIR="$HRX_OUTPUT_DIR/metrics"
 mkdir -p "$HRX_BAZEL_METRICS_DIR"
 if [[ ${HRX_BAZEL_CACHE_ENABLED:-0} == 1 ]]; then
-  if metadata=$("$HRX_BUILD_PYTHON" build_tools/wheel_cache.py begin) && [[ $metadata == *'"recorded": true'* ]]; then
+  if metadata=$("$HRX_BUILD_PYTHON" -m build_tools.ci_tools.wheel_cache begin) && [[ $metadata == *'"recorded": true'* ]]; then
     cache_recorded=1
   fi
 fi
 "$HRX_BUILD_PYTHON" -m build --wheel --outdir "$HRX_OUTPUT_DIR/dist"
-"$HRX_BUILD_PYTHON" build_tools/validate_wheel.py "$HRX_OUTPUT_DIR/dist/"*.whl
+"$HRX_BUILD_PYTHON" -m build_tools.wheel_tools.validate_wheel "$HRX_OUTPUT_DIR/dist/"*.whl
 env LD_LIBRARY_PATH="$HRX_AUDITWHEEL_LD_LIBRARY_PATH" \
   /usr/local/bin/auditwheel show "$HRX_OUTPUT_DIR/dist/"*.whl
 env LD_LIBRARY_PATH="$HRX_AUDITWHEEL_LD_LIBRARY_PATH" \
@@ -72,11 +72,11 @@ shopt -s nullglob
 wheels=("$HRX_OUTPUT_DIR/wheelhouse/"*.whl)
 test "${#wheels[@]}" -eq 1
 [[ ${wheels[0]} == *manylinux* ]]
-"$HRX_BUILD_PYTHON" build_tools/validate_wheel.py "${wheels[0]}"
+"$HRX_BUILD_PYTHON" -m build_tools.wheel_tools.validate_wheel "${wheels[0]}"
 /usr/local/bin/auditwheel show "${wheels[0]}"
 
 # Synchronous disk-cache writes have finished when the native build returns.
 # The host admission check runs after this container has exited.
 if [[ $cache_recorded == 1 ]]; then
-  "$HRX_BUILD_PYTHON" build_tools/wheel_cache.py finish
+  "$HRX_BUILD_PYTHON" -m build_tools.ci_tools.wheel_cache finish
 fi

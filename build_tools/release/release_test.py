@@ -12,8 +12,8 @@ from unittest.mock import patch
 import urllib.error
 import zipfile
 
-from build_tools.make_release import git, prepare_release
-from build_tools.publish_release import (
+from build_tools.release.make_release import git, prepare_release
+from build_tools.release.publish_release import (
     github_release, publish_github, pypi_has_wheel, release_wheel, sha256,
 )
 from build_tools.versioning import (
@@ -166,8 +166,8 @@ class ArtifactTest(unittest.TestCase):
         return {'draft': False, 'prerelease': False, 'assets': [{'name': self.wheel.name}]}
 
     def test_github_creation_has_assets_and_no_clobber(self):
-        with patch('build_tools.publish_release.github_release', return_value=None), \
-             patch('build_tools.publish_release.gh') as command:
+        with patch('build_tools.release.publish_release.github_release', return_value=None), \
+             patch('build_tools.release.publish_release.gh') as command:
             publish_github(self.wheel, '0.3.0', 'ROCm/hrx-solutions', 'v0.3.0')
         args = command.call_args.args
         self.assertEqual(args[:3], ('release', 'create', 'v0.3.0'))
@@ -176,8 +176,8 @@ class ArtifactTest(unittest.TestCase):
         self.assertEqual((self.directory / 'SHA256SUMS').read_text(), f'{sha256(self.wheel)}  {self.wheel.name}\n')
 
     def test_github_prerelease_not_latest(self):
-        with patch('build_tools.publish_release.github_release', return_value=None), \
-             patch('build_tools.publish_release.gh') as command:
+        with patch('build_tools.release.publish_release.github_release', return_value=None), \
+             patch('build_tools.release.publish_release.gh') as command:
             publish_github(self.wheel, '0.3.0rc1', 'ROCm/hrx-solutions', 'v0.3.0rc1')
         self.assertIn('--prerelease', command.call_args.args)
         self.assertIn('--latest=false', command.call_args.args)
@@ -186,8 +186,8 @@ class ArtifactTest(unittest.TestCase):
         def download(*args):
             if args[1] == 'download':
                 (Path(args[args.index('--dir') + 1]) / self.wheel.name).write_bytes(self.wheel.read_bytes())
-        with patch('build_tools.publish_release.github_release', return_value=self.existing_release()), \
-             patch('build_tools.publish_release.gh', side_effect=download) as command:
+        with patch('build_tools.release.publish_release.github_release', return_value=self.existing_release()), \
+             patch('build_tools.release.publish_release.gh', side_effect=download) as command:
             publish_github(self.wheel, '0.3.0', 'ROCm/hrx-solutions', 'v0.3.0')
         uploads = [call.args for call in command.call_args_list if call.args[1] == 'upload']
         self.assertEqual(len(uploads), 1)
@@ -197,14 +197,14 @@ class ArtifactTest(unittest.TestCase):
     def test_conflicting_github_wheel_not_overwritten(self):
         def download(*args):
             (Path(args[args.index('--dir') + 1]) / self.wheel.name).write_bytes(b'different')
-        with patch('build_tools.publish_release.github_release', return_value=self.existing_release()), \
-             patch('build_tools.publish_release.gh', side_effect=download) as command:
+        with patch('build_tools.release.publish_release.github_release', return_value=self.existing_release()), \
+             patch('build_tools.release.publish_release.gh', side_effect=download) as command:
             with self.assertRaisesRegex(ValueError, 'differs'):
                 publish_github(self.wheel, '0.3.0', 'ROCm/hrx-solutions', 'v0.3.0')
         self.assertEqual(command.call_count, 1)
 
     def test_github_lookup_only_treats_404_as_absent(self):
-        with patch('build_tools.publish_release.subprocess.run') as run:
+        with patch('build_tools.release.publish_release.subprocess.run') as run:
             run.return_value = subprocess.CompletedProcess([], 1, '', 'gh: Not Found (HTTP 404)')
             self.assertIsNone(github_release('owner/repo', 'v0.3.0'))
             run.return_value = subprocess.CompletedProcess([], 1, '', 'HTTP 403')
@@ -213,7 +213,7 @@ class ArtifactTest(unittest.TestCase):
 
     def test_pypi_identical_conflicting_missing_and_yanked(self):
         entry = {'filename': self.wheel.name, 'digests': {'sha256': sha256(self.wheel)}}
-        with patch('build_tools.publish_release.urllib.request.urlopen') as open_url:
+        with patch('build_tools.release.publish_release.urllib.request.urlopen') as open_url:
             def response():
                 open_url.return_value = io.BytesIO(json.dumps({'urls': [entry]}).encode())
             response()
