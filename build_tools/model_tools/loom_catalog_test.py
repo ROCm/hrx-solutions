@@ -44,11 +44,68 @@ class CatalogTest(unittest.TestCase):
 
     def test_inventory_drift_and_duplicates_fail(self):
         original = self.inventory.read_text()
-        self.inventory.write_text(original.replace('"qwen/continue.loom",', ''))
-        with self.assertRaisesRegex(ValueError, "inventory/manifest drift"):
+        self.inventory.write_text(original.replace("'qwen/continue.loom',", '', 1))
+        with self.assertRaisesRegex(ValueError, "inventory/manifest/profile drift"):
             catalog.validate_catalog(self.inventory)
         self.inventory.write_text(original.replace('[', '["qwen/continue.loom",', 1))
         with self.assertRaisesRegex(ValueError, "Duplicate source identity"):
+            catalog.validate_catalog(self.inventory)
+
+    def test_inventory_accepts_only_one_literal_variant_assignment(self):
+        original = self.inventory.read_text()
+        invalid = [
+            "",
+            original + "\nEXTRA = []\n",
+            original + "\n" + original,
+            original.replace("CATALOG_VARIANTS =", "OTHER ="),
+            original.replace("CATALOG_VARIANTS =", "CATALOG_VARIANTS = OTHER ="),
+            original.replace("CATALOG_VARIANTS =", "CATALOG_VARIANTS: dict ="),
+            "CATALOG_VARIANTS = dict()",
+            "CATALOG_VARIANTS = {'qwen_08b': dict()}",
+            "CATALOG_VARIANTS = {'qwen_08b': {}, 'qwen_08b': {}}",
+            "CATALOG_VARIANTS = {[]: {}}",
+            "CATALOG_VARIANTS = []",
+            "CATALOG_VARIANTS = {'unsupported': {}}",
+            original.replace("'identifier':", "'identifier': 'hidden', 'identifier':", 1),
+        ]
+        for text in invalid:
+            with self.subTest(text=text[:100]):
+                self.inventory.write_text(text)
+                with self.assertRaises(ValueError):
+                    catalog.variants(self.inventory)
+
+    def test_variant_schema_and_source_paths_remain_strict(self):
+        original = catalog.variants(self.inventory)
+        invalid = []
+        for key, value in [('identifier', 1), ('identifier', ''),
+                           ('output', '../pipeline.loombc'), ('sources', 'module.loom'),
+                           ('sources', [1]), ('extra', [])]:
+            variant = dict(original['qwen_08b'], **{key: value})
+            invalid.append({'qwen_08b': variant})
+        invalid.extend([{'qwen_08b': []}, {'qwen_08b': {}}])
+        for source in ('../escape.loom', '/absolute.loom', 'a/../module.loom',
+                       'a\\module.loom', 'module.loombc'):
+            invalid.append({'qwen_08b': dict(original['qwen_08b'], sources=[source])})
+        for value in invalid:
+            with self.subTest(value=value):
+                self.inventory.write_text('CATALOG_VARIANTS = ' + repr(value))
+                with self.assertRaises(ValueError):
+                    catalog.catalog_sources(self.inventory)
+
+    def test_inventory_preserves_source_order_and_profile_contract(self):
+        value = catalog.variants(self.inventory)
+        sources = value['qwen_08b']['sources']
+        sources.reverse()
+        self.inventory.write_text('CATALOG_VARIANTS = ' + repr(value))
+        self.assertEqual(catalog.catalog_sources(self.inventory),
+                         tuple(dict.fromkeys(source for variant in value.values()
+                                             for source in variant["sources"])))
+        with self.assertRaisesRegex(ValueError, 'inventory/manifest/profile drift'):
+            catalog.validate_catalog(self.inventory)
+        sources.reverse()
+        value['qwen_08b']['identifier'] = 'other-profile'
+        self.inventory.write_text('CATALOG_VARIANTS = ' + repr(value))
+        with self.assertRaisesRegex(ValueError, 'inventory/manifest/profile drift'):
             catalog.validate_catalog(self.inventory)
 
     def test_source_archive_flattened_role_symlinks_preserve_complete_inventory(self):

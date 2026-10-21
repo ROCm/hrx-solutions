@@ -18,29 +18,53 @@ DECODER_TARGET = "@hrx_system//loom/src/loom/tools/loom-format"
 ROLES = ("prepare.loom", "control.loom", "weights.loom")
 
 
-def catalog_sources(inventory: Path) -> tuple[str, ...]:
-    """Read the same literal inventory Bazel loads, without executing Starlark."""
+def variants(inventory: Path) -> dict:
+    """Read the single explicit variant literal, without executing Starlark."""
     tree = ast.parse(inventory.read_text(encoding="utf-8"))
-    if len(tree.body) != 2:
-        raise ValueError("Catalog inventory must define CATALOG_SOURCES and CATALOG_VARIANTS")
-    declarations = {}
-    for statement in tree.body:
-        if (not isinstance(statement, ast.Assign) or len(statement.targets) != 1
-                or not isinstance(statement.targets[0], ast.Name)):
-            raise ValueError("Catalog inventory must contain literal declarations only")
-        declarations[statement.targets[0].id] = ast.literal_eval(statement.value)
-    if set(declarations) != {"CATALOG_SOURCES", "CATALOG_VARIANTS"}:
-        raise ValueError("Unexpected catalog inventory declaration")
-    paths = declarations["CATALOG_SOURCES"]
-    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
-        raise ValueError("Catalog inventory must be a list of source paths")
-    if len(paths) != len(set(paths)):
-        raise ValueError("Duplicate source identity in catalog inventory")
+    if len(tree.body) != 1:
+        raise ValueError("Catalog inventory must define only CATALOG_VARIANTS")
+    statement = tree.body[0]
+    if (not isinstance(statement, ast.Assign) or len(statement.targets) != 1
+            or not isinstance(statement.targets[0], ast.Name)
+            or statement.targets[0].id != "CATALOG_VARIANTS"):
+        raise ValueError("Catalog inventory must contain only the literal CATALOG_VARIANTS assignment")
+    # literal_eval silently overwrites duplicate dictionary keys. Reject them
+    # before evaluation so the checked contract has no hidden declarations.
+    try:
+        for node in ast.walk(statement.value):
+            if isinstance(node, ast.Dict):
+                keys = [ast.literal_eval(key) for key in node.keys]
+                if len(keys) != len(set(keys)):
+                    raise ValueError("Duplicate catalog inventory key")
+        value = ast.literal_eval(statement.value)
+    except TypeError as error:
+        raise ValueError("Malformed catalog inventory literal") from error
+    if not isinstance(value, dict) or set(value) != set(ARCHITECTURES):
+        raise ValueError("Catalog must declare exactly the supported variants")
+    paths = []
+    for architecture, variant in value.items():
+        if (not isinstance(variant, dict)
+                or set(variant) != {"identifier", "sources", "output"}
+                or not isinstance(variant["identifier"], str) or not variant["identifier"]
+                or variant["output"] != f"qwen/{architecture}/pipeline.loombc"):
+            raise ValueError(f"Invalid catalog variant contract: {architecture}")
+        sources = variant["sources"]
+        if not isinstance(sources, list) or not all(isinstance(p, str) for p in sources):
+            raise ValueError("Catalog inventory must be a list of source paths")
+        if len(sources) != len(set(sources)):
+            raise ValueError("Duplicate source identity in catalog inventory")
+        paths.extend(sources)
     for path in paths:
         if (posixpath.normpath(path) != path or path.startswith(("/", "../"))
                 or "\\" in path or not path.endswith(".loom")):
             raise ValueError(f"Invalid catalog source identity: {path}")
-    return tuple(paths)
+    return value
+
+
+def catalog_sources(inventory: Path) -> tuple[str, ...]:
+    """Derive aggregate inputs in variant declaration and source-list order."""
+    return tuple(dict.fromkeys(source for variant in variants(inventory).values()
+                               for source in variant["sources"]))
 
 
 def manifest_entries(manifest: Path, source_root: Path) -> tuple[str, ...]:
@@ -67,15 +91,6 @@ def manifest_entries(manifest: Path, source_root: Path) -> tuple[str, ...]:
         if [entry for entry in entries if Path(entry).name == role] != [role]:
             raise ValueError(f"Expected exactly one local {role} role: {manifest}")
     return entries
-
-
-def variants(inventory: Path) -> dict:
-    """Read the explicit two-variant contract used by Bazel and wheel validation."""
-    catalog_sources(inventory)
-    value = ast.literal_eval(ast.parse(inventory.read_text()).body[1].value)
-    if not isinstance(value, dict) or set(value) != set(ARCHITECTURES):
-        raise ValueError("Catalog must declare exactly the supported variants")
-    return value
 
 
 def validate_catalog(inventory: Path) -> tuple[str, ...]:
