@@ -5,7 +5,7 @@ import type { Discovery, DiscoveryHooks } from "./discovery.ts";
 import { validateBudgets } from "./budgets.ts";
 
 type TextModel = Model<"openai-completions">;
-const profile = "loom-text-serve-ed6b79c-v1";
+const profile = "loom-text-serve-61417137-v1";
 function unavailable(reason: string): never {
   throw new Error(`Loom Hem Pi: ${reason}. Refresh/reselect the model; run loom-control pi configure if the owned integration needs repair`);
 }

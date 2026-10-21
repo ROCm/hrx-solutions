@@ -47,6 +47,16 @@ function compatible(row: Record<string, any>): boolean {
     object(row.loom) && positive(row.loom.incarnation) && row.loom.kind === "text" &&
     row.loom.endpoint === "/v1/chat/completions" && row.loom.tokenize === true;
 }
+// Native residency is component-scoped; retain flat older external status.
+// Never use auxiliary image residency as proof the primary model is active.
+function primaryParameters(loom: Record<string, any>): Record<string, any> {
+  const parameters = loom.parameters;
+  if (!object(parameters)) return {};
+  if (Object.prototype.hasOwnProperty.call(parameters, "primary")) {
+    return object(parameters.primary) ? parameters.primary : {};
+  }
+  return parameters;
+}
 export function joinInventory(catalog: unknown, status: unknown, endpoint: Endpoint): Model[] {
   const models = rows(catalog), states = rows(status);
   if (models.size !== states.size || [...models.keys()].some(id => !states.has(id))) throw new SnapshotChanged("native inventory changed");
@@ -57,7 +67,7 @@ export function joinInventory(catalog: unknown, status: unknown, endpoint: Endpo
     if (!compatible(model) || !compatible(state)) continue;
     const loom = state.loom;
     if (model.loom.error || model.loom.status?.error || loom.registration !== "ready" ||
-        loom.parameter_operation !== "idle" || loom.parameters?.active !== true || loom.error || loom.status?.error ||
+        loom.parameter_operation !== "idle" || primaryParameters(loom).active !== true || loom.error || loom.status?.error ||
         loom.status?.admission !== "open" || !["idle", "execute"].includes(loom.status.phase)) continue;
     result.push({ id, modelID: id, providerID: endpoint.provider, name: id,
       // Conservative supported native profile: never infer tools/reasoning from names.

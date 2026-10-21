@@ -3,7 +3,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpat
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export const MAX_BYTES = 1024 * 1024;
-export const PROFILE = "loom-text-serve-ed6b79c-v1";
+export const PROFILE = "loom-text-serve-61417137-v1";
 export const ASSETS = ["index.ts", "discovery.ts", "installation.ts", "profile.json", "package.json"];
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export function fail(reason: string): never {
@@ -90,7 +90,7 @@ export function validateInstallation(entryPath: string): Installation {
           createHash("sha256").update(readBounded(join(directory, name))).digest("hex") !== manifest.artifacts[name]) fail("changed managed asset");
     }
     const profile = parseDocument(readBounded(join(directory, "profile.json")).toString("utf8"));
-    if (JSON.stringify(profile) !== JSON.stringify({ native_profile: PROFILE, native_commit: "ed6b79c757c738dea7eaecd6ca55a7df73cf6185", client_package: "@opencode/cli", client_versions: ["2.0.31"], capabilities: { tools: false, input: ["text"], output: ["text"] } })) fail("unsupported native/client capability profile");
+    if (JSON.stringify(profile) !== JSON.stringify({ native_profile: PROFILE, native_commit: "61417137f334cfa828b38d6e9b0f2d7190503f16", client_package: "@opencode/cli", client_versions: ["2.0.31"], capabilities: { tools: false, input: ["text"], output: ["text"] } })) fail("unsupported native/client capability profile");
     return config as Installation;
   } catch { fail("invalid, disabled, edited or incomplete managed installation"); }
 }

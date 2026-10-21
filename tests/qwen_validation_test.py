@@ -215,10 +215,18 @@ class QwenComparisonTest(unittest.TestCase):
 
 class QwenNativePolicyContractTest(unittest.TestCase):
     def test_manifests_supply_pinned_text_policy_abi(self):
-        # Public policy bindings required by ed6b79 service/text/chat.c.
+        # Public policy bindings required by HRX61417137 text control/chat and
+        # parameter preparation. This protects source/runtime ABI, not model data.
         # Keep this catalog packaging guard in sync when reviewing an HRX pin.
         expected = {
-            'encode_epoch': (('buffer',) * 3 + ('i32',) * 3 + ('buffer',) * 2, ('i32',)),
+            'encode_epoch': (('buffer',) * 4 + ('i32',) * 8 + ('buffer',) * 2, ('i32',)),
+            'publish_epoch': (('buffer',) * 2 + ('i32',) * 6 + ('buffer',) * 4, ()),
+            'step': (('buffer',) + ('i32',) * 3 + ('hal.buffer',) * 6, ('i64', 'i32')),
+            'epoch': (('buffer',) + ('i32',) * 10 + ('hal.buffer',) * 12, ('i64',)),
+            'chat_image_limits': ((), ('i64',) * 5),
+            'chat_message': (('buffer',) * 6 + ('i64',) * 4, ('buffer', 'i64', 'buffer')),
+            'prepare_input': (('buffer',) * 2 + ('i64', 'i32', 'i32', 'i64'), ('buffer', 'i64', 'buffer')),
+            'prepare_weight': (('buffer',), ('i64',)),
             'request_defaults': (('buffer',), ('buffer',)),
             'request_options': (('buffer', 'buffer', 'i64'), ('buffer',)),
             'bind_request': (('buffer', 'i32', 'buffer'), ()),
@@ -238,7 +246,7 @@ class QwenNativePolicyContractTest(unittest.TestCase):
                         r'func.def public @' + name + r'\(([^)]*)\)(?: -> \(([^)]*)\))? \{', sources)
                     self.assertEqual(len(signatures), 1, 'missing or duplicate native policy hook')
                     args, returns = signatures[0]
-                    self.assertEqual(tuple(re.findall(r': (\w+)', args)), arguments)
+                    self.assertEqual(tuple(re.findall(r': ([\w.]+)', args)), arguments)
                     self.assertEqual(tuple(part.strip() for part in returns.split(',') if part.strip()), results)
 
 

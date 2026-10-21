@@ -12,6 +12,7 @@ from unittest.mock import patch
 PACKAGE = os.environ.get('HEM_TEST_PACKAGE', 'binding.python')
 clients = importlib.import_module(PACKAGE + '.hem_clients_endpoints')
 common = importlib.import_module(PACKAGE + '.hem_common')
+contracts = importlib.import_module(PACKAGE + '.hem_pi_contracts')
 state = importlib.import_module(PACKAGE + '.hem_pi_state')
 Registry = importlib.import_module(PACKAGE + '.hem_state').Registry
 from tests import hem_server_cli_test as fixtures
@@ -54,6 +55,46 @@ class ProjectionTest(unittest.TestCase):
         with self.registry._transaction() as connection:
             self.assertEqual({r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")},
                              {'models', 'servers', 'instances', 'pi_target'})
+
+    def test_known_prior_owned_projection_is_passive_until_explicit_configure(self):
+        NATIVE_PROFILE, PREVIOUS_NATIVE_PROFILE = contracts.NATIVE_PROFILE, contracts.PREVIOUS_NATIVE_PROFILE
+        self.ensure()
+        prior = clients.read_endpoints(self.registry.root)
+        prior['servers'][0]['native_profile'] = PREVIOUS_NATIVE_PROFILE
+        data = clients._encoded(prior)
+        self.path.write_bytes(data)
+        stamp = self.path.stat().st_mtime_ns
+        self.assertEqual(clients.read_endpoints(self.registry.root), prior)
+        self.assertEqual(self.path.read_bytes(), data)
+        self.assertEqual(self.path.stat().st_mtime_ns, stamp)
+        with self.assertRaisesRegex(common.InvalidInput, 'explicit native-profile refresh'):
+            self.publish()
+        self.assertEqual(self.path.read_bytes(), data)
+        # An incidental publication failure reports repair without changing the
+        # completed native operation or its ownership/lifecycle result.
+        payload = dict(state='running', completed=True, accepted=True, instance='chat')
+        outcome = clients.update_result(self.registry, common.Deadline.after(), payload)
+        self.assertEqual((outcome['state'], outcome['completed'], outcome['accepted']), ('running', True, True))
+        self.assertEqual(outcome['clients_update'], 'failed')
+        self.assertIn('explicit native-profile refresh', outcome['clients_error'])
+        self.assertEqual(self.path.read_bytes(), data)
+        self.assertTrue(self.ensure()['changed'])
+        self.assertEqual(clients.read_endpoints(self.registry.root)['servers'][0]['native_profile'], NATIVE_PROFILE)
+
+    def test_prior_projection_still_rejects_unknown_or_mixed_profiles(self):
+        NATIVE_PROFILE, PREVIOUS_NATIVE_PROFILE = contracts.NATIVE_PROFILE, contracts.PREVIOUS_NATIVE_PROFILE
+        self.ensure()
+        prior = clients.read_endpoints(self.registry.root)
+        for profile in ('unknown', PREVIOUS_NATIVE_PROFILE):
+            invalid = json.loads(json.dumps(prior))
+            invalid['servers'][0]['native_profile'] = profile
+            if profile == PREVIOUS_NATIVE_PROFILE:
+                row = dict(invalid['servers'][0], server='z', provider=clients.provider_id('z'), native_profile=NATIVE_PROFILE)
+                invalid['servers'].append(row)
+            data = clients._encoded(invalid)
+            self.path.write_bytes(data)
+            with self.assertRaises(common.InvalidInput): self.ensure()
+            self.assertEqual(self.path.read_bytes(), data)
 
     def test_corrupt_foreign_and_unknown_never_adopted_even_configure(self):
         self.ensure()

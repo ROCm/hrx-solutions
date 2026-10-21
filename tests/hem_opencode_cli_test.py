@@ -40,6 +40,21 @@ class OpenCodeCliTest(unittest.TestCase):
     def contents(self):
         return {str(p): (p.lstat().st_mtime_ns, p.read_bytes() if p.is_file() else None) for p in self.base.rglob('*')}
 
+    def test_explicit_configure_refreshes_prior_owned_projection_after_passive_check(self):
+        from binding.python.hem_pi_contracts import NATIVE_PROFILE, PREVIOUS_NATIVE_PROFILE
+        from binding.python.hem_state import Registry
+        Registry(self.root).create_server('local', saved_settings=dict(device='task', listen='127.0.0.1:18080'))
+        self.invoke()
+        path = self.root / 'clients/endpoints.json'
+        prior = json.loads(path.read_bytes())
+        prior['servers'][0]['native_profile'] = PREVIOUS_NATIVE_PROFILE
+        path.write_text(json.dumps(prior))
+        before = self.contents()
+        self.invoke('--check', expected=1)
+        self.assertEqual(self.contents(), before)
+        self.invoke()
+        self.assertEqual(json.loads(path.read_bytes())['servers'][0]['native_profile'], NATIVE_PROFILE)
+
     def test_configure_repeat_disable_absent_client_and_no_daemon(self):
         response, stderr = self.invoke()
         self.assertEqual(response['state'], 'configured')

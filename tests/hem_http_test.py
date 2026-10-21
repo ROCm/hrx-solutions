@@ -304,6 +304,16 @@ class ObservationTest(unittest.TestCase):
         with self.assertRaises(HemError):
             active_ready(inventory(model(18)), "chat", 17)
 
+    def test_primary_component_controls_readiness_and_legacy_remains_supported(self):
+        self.assertTrue(active_ready(inventory(model(parameters={"primary": {"active": True},
+                                                                 "image": {"active": False}})), "chat", 17))
+        self.assertTrue(active_ready(inventory(model(parameters={"active": True})), "chat", 17))
+        for parameters in ({"primary": {"active": False}, "image": {"active": True}},
+                           {"primary": None, "active": True},
+                           {"image": {"active": True}}):
+            with self.subTest(parameters=parameters):
+                self.assertFalse(active_ready(inventory(model(parameters=parameters)), "chat", 17))
+
     def test_invalid_or_duplicate_status_cannot_prove_retirement(self):
         for document in ({}, inventory(model(), model()), inventory(dict(id="chat", loom={})),
                          inventory(model(True)), inventory(model(parameters=None))):

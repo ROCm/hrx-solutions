@@ -1,6 +1,6 @@
 """Native HTTP transport and observations, without a model lifecycle engine.
 
-Routes/shapes follow HRX ed6b79c router.c and http/logs.c. No retries,
+Routes/shapes follow HRX 61417137 router.c and http/logs.c. No retries,
 redirects, proxy routing, process adoption, or automatic lifecycle actions.
 """
 
@@ -300,6 +300,21 @@ def retired(document, name, incarnation):
     return registration(document, name, incarnation) is None
 
 
+def primary_parameters(loom):
+    """Read primary residency, retaining older external-server status support.
+
+    The pinned runtime reports primary and optional image components separately.
+    Auxiliary activation must never establish primary model readiness.
+    """
+    parameters = loom.get("parameters") or {}
+    if not isinstance(parameters, dict):
+        return {}
+    if "primary" in parameters:
+        primary = parameters["primary"]
+        return primary if isinstance(primary, dict) else {}
+    return parameters
+
+
 def active_ready(document, name, incarnation):
     """Native activation completion while admission remains closed."""
     item = registration(document, name, incarnation)
@@ -309,5 +324,5 @@ def active_ready(document, name, incarnation):
     if loom.get("error") is not None:
         raise HemError(f"native preparation failed: {loom['error']}", accepted=True)
     return (loom.get("registration") == "ready" and loom.get("parameter_operation") == "idle"
-            and loom.get("parameters", {}).get("active") is True
+            and primary_parameters(loom).get("active") is True
             and loom.get("status", {}).get("admission") == "drained")

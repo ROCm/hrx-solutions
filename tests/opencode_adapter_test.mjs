@@ -19,7 +19,7 @@ function writeManifest() {
   writeFileSync(join(directory,'manifest.json'),JSON.stringify(manifest));
 }
 function projection(servers=[]) {writeFileSync(config.endpoint_file,JSON.stringify({schema_version:1,owner:'loom-control-clients',hem_root:state,servers}));}
-function endpoint(server='local',port=18080) {return {server,provider:'loom-hem-'+Buffer.from(server).toString('base64url'),base_url:`http://127.0.0.1:${port}/v1`,native_profile:'loom-text-serve-ed6b79c-v1'};}
+function endpoint(server='local',port=18080) {return {server,provider:'loom-hem-'+Buffer.from(server).toString('base64url'),base_url:`http://127.0.0.1:${port}/v1`,native_profile:'loom-text-serve-61417137-v1'};}
 function row(id='qwen-a') {return {object:'model',id,context_length:32768,limits:{max_output_tokens:16384},input_modalities:['text'],output_modalities:['text'],loom:{incarnation:1,registration:'ready',kind:'text',endpoint:'/v1/chat/completions',tokenize:true,parameter_operation:'idle',parameters:{active:true},status:{admission:'open',phase:'idle'}}};}
 const list=(...data)=>({object:'list',data});
 let checks=0;
@@ -37,6 +37,18 @@ try {
   test('numeric exact loopback origins',()=>{for(const url of ['http://127.0.0.1:80/v1','http://[::1]:18080/v1','http://127.255.2.3:65535/v1'])assert.equal(validateBaseUrl(url),url);for(const url of ['http://localhost:80/v1','https://127.0.0.1:80/v1','http://127.0.0.1:0/v1','http://127.256.0.1:80/v1','http://127.0.0.1:65536/v1','http://127.0.0.1/v1','http://127.0.0.1:80/v1?x','http://user@127.0.0.1:80/v1','http://127.0.0.1:080/v1'])assert.throws(()=>validateBaseUrl(url));});
   test('projection ownership/ordering/profile and count',()=>{projection([endpoint()]);assert.equal(readEndpoints(config).length,1);for(const rows of [[endpoint(),endpoint()],[{...endpoint(),provider:'wrong'}],[{...endpoint(),native_profile:'unknown'}],Array.from({length:257},(_,i)=>endpoint('n'+i))]){projection(rows);assert.throws(()=>readEndpoints(config));}projection();const text=readFileSync(config.endpoint_file,'utf8');writeFileSync(config.endpoint_file,text.replace('loom-control-clients','foreign'));assert.throws(()=>readEndpoints(config));projection();});
   test('native exact IDs truthful output without Pi cap',()=>{const models=joinInventory(list(row()),list(row()),endpoint());assert.equal(models[0].id,'qwen-a');assert.deepEqual(models[0].capabilities,{tools:false,input:['text'],output:['text']});assert.deepEqual(models[0].limit,{context:32768,output:16384});const small=row();small.context_length=4096;assert.equal(joinInventory(list(small),list(small),endpoint())[0].limit.output,4096);});
+  test('primary residency with legacy flat compatibility and no auxiliary fallback',()=>{
+    for (const [parameters,count] of [
+      [{primary:{active:true},image:{active:false}},1],
+      [{active:true},1],
+      [{primary:{active:false},image:{active:true}},0],
+      [{primary:null,active:true},0],
+      [{image:{active:true}},0],
+    ]) {
+      const r=row();r.loom.parameters=parameters;
+      assert.equal(joinInventory(list(r),list(r),endpoint()).length,count);
+    }
+  });
   test('malformed duplicate identities and mismatched snapshots',()=>{assert.throws(()=>joinInventory(list(row(),row()),list(row()),endpoint()));assert.throws(()=>joinInventory(list(row()),list(),endpoint()));const changed=row();changed.loom.incarnation=2;assert.throws(()=>joinInventory(list(row()),list(changed),endpoint()));});
   test('unready incompatible and invalid required limits excluded',()=>{for(const modify of [r=>r.loom.registration='pending',r=>r.loom.parameters.active=false,r=>r.loom.status.admission='closed',r=>r.loom.status.phase='load',r=>r.loom.error='failure',r=>r.loom.parameter_operation='load',r=>r.context_length=0,r=>r.limits.max_output_tokens=NaN,r=>r.input_modalities=['image'],r=>r.loom.tokenize=false]){const r=row();modify(r);assert.deepEqual(joinInventory(list(r),list(r),endpoint()),[]);}});
   let mode='ready',requests=[];

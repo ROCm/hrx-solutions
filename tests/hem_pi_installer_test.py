@@ -1,6 +1,7 @@
 """Real filesystem/SQLite crash boundaries and process writer contention."""
 import hashlib
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -80,6 +81,55 @@ class InstallerTest(unittest.TestCase):
         self.assertFalse((self.target / MANIFEST_PATH).exists())
         self.assertEqual(settings.read_text(), '{"untouched":true}')
         self.assertEqual(self.run_pi(disable=True)["changed"], False)
+
+    def prior_owned_generation(self):
+        from binding.python.hem_pi_contracts import (NATIVE_PROFILE, NATIVE_COMMIT,
+            PREVIOUS_NATIVE_PROFILE, PREVIOUS_NATIVE_COMMIT)
+        self.run_pi()
+        path = self.target / MANIFEST_PATH
+        manifest = json.loads(path.read_bytes())
+        # Synthetic prior copied resources remain bound by their original digests.
+        for relative in self.assets:
+            asset = self.target / relative
+            data = asset.read_bytes().replace(NATIVE_PROFILE.encode(), PREVIOUS_NATIVE_PROFILE.encode()).replace(
+                NATIVE_COMMIT.encode(), PREVIOUS_NATIVE_COMMIT.encode())
+            asset.write_bytes(data)
+            manifest['artifacts'][relative] = hashlib.sha256(data).hexdigest()
+        manifest.update(native_profile=PREVIOUS_NATIVE_PROFILE, native_commit=PREVIOUS_NATIVE_COMMIT)
+        path.write_bytes(files.encoded(manifest))
+        return manifest
+
+    def test_prior_owned_check_is_passive_and_explicit_refresh_retains_identity(self):
+        from binding.python.hem_pi_contracts import NATIVE_PROFILE, NATIVE_COMMIT
+        prior = self.prior_owned_generation()
+        before = self.snapshot()
+        result = self.run_pi(check=True)
+        self.assertEqual(result['state'], 'changes_required')
+        self.assertFalse(result['configured'])
+        self.assertEqual(self.snapshot(), before)
+        self.assertTrue(self.run_pi()['changed'])
+        current = json.loads((self.target / MANIFEST_PATH).read_bytes())
+        self.assertEqual(current['integration_id'], prior['integration_id'])
+        self.assertEqual((current['native_profile'], current['native_commit']), (NATIVE_PROFILE, NATIVE_COMMIT))
+        self.assert_configured()
+
+    def test_prior_owned_generation_can_disable_without_replacing_resources(self):
+        prior = self.prior_owned_generation()
+        self.assertEqual(self.run_pi(disable=True)['state'], 'disabled')
+        self.assertFalse((self.target / MANIFEST_PATH).exists())
+        self.assertIsNone(get_target(Registry(self.root)))
+
+    def test_prior_manifest_mixed_or_unknown_native_identity_is_refused(self):
+        from binding.python.hem_pi_contracts import NATIVE_COMMIT
+        prior = self.prior_owned_generation()
+        path = self.target / MANIFEST_PATH
+        for change in (dict(native_commit=NATIVE_COMMIT), dict(native_profile='unknown')):
+            invalid = dict(prior, **change)
+            path.write_bytes(files.encoded(invalid))
+            before = self.snapshot()
+            with self.assertRaisesRegex(InvalidInput, 'unsupported Pi ownership'):
+                self.run_pi(check=True)
+            self.assertEqual(self.snapshot(), before)
 
     def test_missing_disable_does_not_initialize_state(self):
         self.assertEqual(self.run_pi(disable=True)["state"], "disabled")

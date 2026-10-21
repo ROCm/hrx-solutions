@@ -7,6 +7,7 @@ import shutil
 import textwrap
 
 from .hem_config import SETTINGS
+from .hem_http import primary_parameters
 
 
 class Literal(str):
@@ -247,7 +248,7 @@ def server(args, data, width):
 def instance_observation(data, detailed, width):
     native = data.get('native') or {}
     loom = native.get('loom') or {}
-    status, parameters = loom.get('status') or {}, loom.get('parameters') or {}
+    status, parameters = loom.get('status') or {}, primary_parameters(loom)
     lines = [warnings(data), details([
         ('Instance', data.get('instance')), ('State', data.get('state')),
         ('Model', text(data.get('model'))), ('Server', data.get('server')),
@@ -269,7 +270,7 @@ def instance_state(data):
     if state != 'observed' or not loom:
         return state
     return (text(loom.get('registration')) + '; admission ' + text((loom.get('status') or {}).get('admission'))
-            + '; parameters active: ' + text((loom.get('parameters') or {}).get('active')))
+            + '; parameters active: ' + text(primary_parameters(loom).get('active')))
 
 
 def instance(args, data, width):

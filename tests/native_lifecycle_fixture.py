@@ -26,7 +26,7 @@ def activated(document, name, original):
     assert loom['registration'] not in ('failed', 'release_failed'), loom
     return (loom['registration'] == 'ready'
             and loom['parameter_operation'] == 'idle'
-            and loom['parameters']['active'] is True
+            and loom['parameters'].get('primary', loom['parameters']).get('active') is True
             and loom['status']['admission'] == 'drained')
 
 
@@ -42,7 +42,7 @@ def eager_start(request, observe, deployment):
     assert metadata['registration'] == 'registered', metadata
     # Metadata-only registrations have no residency object yet. Native status
     # may omit parameters entirely until explicit activation prepares the model.
-    assert metadata.get('parameters', {}).get('active', False) is False, metadata
+    assert metadata.get('parameters', {}).get('primary', metadata.get('parameters', {})).get('active', False) is False, metadata
     assert metadata['status']['admission'] == 'drained', metadata
     assert request('/v1/models/activate', {'model': name})[0] == 202
     ready = observe(lambda state: activated(state, name, original))

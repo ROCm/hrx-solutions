@@ -35,8 +35,8 @@ function inspectInstallation(entryPath: string) {
   const manifest = JSON.parse(readBounded(join(target, "loom-hem", "config.json")).toString("utf8"));
   if (manifest.schema_version !== 1 || manifest.integration_version !== 1 ||
       manifest.enabled !== true || manifest.extension_version !== "1" ||
-      manifest.target !== target || manifest.native_profile !== "loom-text-serve-ed6b79c-v1" ||
-      manifest.native_commit !== "ed6b79c757c738dea7eaecd6ca55a7df73cf6185" ||
+      manifest.target !== target || manifest.native_profile !== "loom-text-serve-61417137-v1" ||
+      manifest.native_commit !== "61417137f334cfa828b38d6e9b0f2d7190503f16" ||
       manifest.pi_package !== "@earendil-works/pi-coding-agent" ||
       JSON.stringify(manifest.pi_versions) !== '["1.3.0"]' ||
       typeof manifest.integration_id !== "string" ||

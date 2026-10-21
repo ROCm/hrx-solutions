@@ -24,7 +24,7 @@ console.log('Our effective-budget guards passed');
 const { createStreamingHooks } = await jiti.import(join(assets, 'stream.ts'));
 const selected = { ...model, api: 'openai-completions', baseUrl: 'http://127.0.0.1:1/v1' };
 const endpoint = { provider: selected.provider, base_url: selected.baseUrl,
-  native_profile: 'loom-text-serve-ed6b79c-v1' };
+  native_profile: 'loom-text-serve-61417137-v1' };
 const discovery = { currentEndpoints: () => [endpoint], observations: new Map([
   [selected.provider, { endpoint: { ...endpoint }, models: [selected] }],
 ]) };

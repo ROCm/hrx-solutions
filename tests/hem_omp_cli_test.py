@@ -39,6 +39,21 @@ class OMPCliTest(unittest.TestCase):
             self.invoke('--disable');self.assertTrue((self.root/'clients/endpoints.json').exists())
         self.assertFalse(list(self.root.rglob('*.sock')))
 
+    def test_explicit_configure_refreshes_prior_owned_projection_after_passive_check(self):
+        from binding.python.hem_pi_contracts import NATIVE_PROFILE, PREVIOUS_NATIVE_PROFILE
+        Registry(self.root).create_server('local', saved_settings=dict(device='task', listen='127.0.0.1:18080'))
+        with patch.object(cli, 'inspect_runtime', return_value={'qualification': 'test metadata'}):
+            self.invoke()
+            path = self.root / 'clients/endpoints.json'
+            prior = json.loads(path.read_bytes())
+            prior['servers'][0]['native_profile'] = PREVIOUS_NATIVE_PROFILE
+            path.write_text(json.dumps(prior))
+            before = self.contents()
+            self.invoke('--check', expected=1)
+            self.assertEqual(self.contents(), before)
+            self.invoke()
+            self.assertEqual(json.loads(path.read_bytes())['servers'][0]['native_profile'], NATIVE_PROFILE)
+
     def test_missing_client_check_separate_findings_no_writes(self):
         with patch.object(cli,'inspect_runtime',side_effect=InvalidInput('client absent')),patch('subprocess.run',side_effect=AssertionError('passive check')):
             result,_=self.invoke('--check',expected=1)

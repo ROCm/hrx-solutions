@@ -14,7 +14,7 @@ export type DiscoveryHooks = {
   stream?: Provider<"openai-completions">["stream"];
   streamSimple?: Provider<"openai-completions">["streamSimple"];
 };
-const PROFILE = "loom-text-serve-ed6b79c-v1";
+const PROFILE = "loom-text-serve-61417137-v1";
 const TIMEOUT = 3000, MAX_BYTES = 1024 * 1024, PARALLEL = 4;
 const repair = "Run loom-control pi configure to repair the owned integration";
 function invalid(reason: string): never { throw new Error(`Loom Hem Pi: ${reason}. ${repair}`); }
@@ -101,6 +101,16 @@ function compatible(row: Record<string, any>): boolean {
     object(row.loom) && positive(row.loom.incarnation) && row.loom.kind === "text" &&
     row.loom.endpoint === "/v1/chat/completions" && row.loom.tokenize === true;
 }
+// Native residency is component-scoped; retain flat older external status.
+// Never use auxiliary image residency as proof the primary model is active.
+function primaryParameters(loom: Record<string, any>): Record<string, any> {
+  const parameters = loom.parameters;
+  if (!object(parameters)) return {};
+  if (Object.prototype.hasOwnProperty.call(parameters, "primary")) {
+    return object(parameters.primary) ? parameters.primary : {};
+  }
+  return parameters;
+}
 export function joinInventory(catalog: unknown, status: unknown, endpoint: Endpoint): DiscoveredModel[] {
   const models = rows(catalog), states = rows(status);
   if (models.size !== states.size || [...models.keys()].some(id => !states.has(id))) throw new SnapshotChanged("native snapshot changed");
@@ -111,7 +121,7 @@ export function joinInventory(catalog: unknown, status: unknown, endpoint: Endpo
     if (!compatible(model) || !compatible(state)) continue;
     const loom = state.loom;
     if (model.loom.error || model.loom.status?.error ||
-        loom.registration !== "ready" || loom.parameter_operation !== "idle" || loom.parameters?.active !== true ||
+        loom.registration !== "ready" || loom.parameter_operation !== "idle" || primaryParameters(loom).active !== true ||
         loom.error || loom.status?.error || loom.status?.admission !== "open" ||
         typeof loom.status.phase !== "string" || !["idle", "execute"].includes(loom.status.phase)) continue;
     result.push({ id, name: id, api: "openai-completions", provider: endpoint.provider, baseUrl: endpoint.base_url,

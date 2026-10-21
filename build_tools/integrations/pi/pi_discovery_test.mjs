@@ -68,6 +68,10 @@ try {
     assert.equal(provider.getModels().length,0,'post-bind validation missing must not advertise safe models');
   });
   const cases = [
+    ['primary-ready',r=>r.loom.parameters={primary:{active:true},image:{active:false}},1],
+    ['primary-inactive-image-active',r=>r.loom.parameters={primary:{active:false},image:{active:true}},0],
+    ['malformed-primary-no-flat-fallback',r=>r.loom.parameters={primary:null,active:true},0],
+    ['image-only',r=>r.loom.parameters={image:{active:true}},0],
     ['busy-accepting',r=>{r.loom.status.phase='execute';r.loom.status.active_requests=2;},1],
     ['drained',r=>r.loom.status.admission='drained',0],['loading',r=>r.loom.registration='loading',0],
     ['retiring',r=>r.loom.status.phase='retiring',0],['terminal-error',r=>r.loom.error={message:'failed'},0],

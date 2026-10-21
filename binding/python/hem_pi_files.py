@@ -9,7 +9,7 @@ import stat
 
 from .hem_common import InvalidInput, UncertainOutcome
 from .hem_pi_assets import bundled_assets, asset_digests
-from .hem_pi_contracts import (MANIFEST_PATH, ENDPOINT_PATH, INTEGRATION_VERSION,
+from .hem_pi_contracts import (PREVIOUS_NATIVE_PROFILE, PREVIOUS_NATIVE_COMMIT, MANIFEST_PATH, ENDPOINT_PATH, INTEGRATION_VERSION,
     MANIFEST_SCHEMA_VERSION, EXTENSION_VERSION, NATIVE_PROFILE, NATIVE_COMMIT,
     PI_PACKAGE, PI_VERSIONS)
 
@@ -159,6 +159,9 @@ def validate_manifest(manifest, target, root, assets):
         extension_version=EXTENSION_VERSION, native_profile=NATIVE_PROFILE,
         native_commit=NATIVE_COMMIT, pi_package=PI_PACKAGE, pi_versions=list(PI_VERSIONS),
         hem_root=str(root), target=str(target), endpoint_file=str(Path(root) / ENDPOINT_PATH))
+    native_identity = (manifest.get("native_profile"), manifest.get("native_commit"))
+    if native_identity == (PREVIOUS_NATIVE_PROFILE, PREVIOUS_NATIVE_COMMIT):
+        expected.update(native_profile=PREVIOUS_NATIVE_PROFILE, native_commit=PREVIOUS_NATIVE_COMMIT)
     if any(manifest.get(k) != v for k, v in expected.items()) or type(manifest.get("enabled")) is not bool:
         raise InvalidInput("foreign or unsupported Pi ownership manifest")
     try:
@@ -216,7 +219,8 @@ def inspect_target(target, root, *, assets=None):
             drift.append(relative)
     for relative in (PENDING_PATH, PREPARING_PATH):
         private_path(target / relative)
-    configured = bool(manifest and manifest["enabled"] and not drift and not pending)
+    configured = bool(manifest and manifest["enabled"] and not drift and not pending
+                      and manifest["native_profile"] == NATIVE_PROFILE and manifest["native_commit"] == NATIVE_COMMIT)
     changed = not configured or manifest["artifacts"] != asset_digests(assets)
     return dict(manifest=manifest, manifest_bytes=manifest_bytes, configured=configured,
         hashes_valid=manifest is not None and not drift, pending=pending, drift=drift,

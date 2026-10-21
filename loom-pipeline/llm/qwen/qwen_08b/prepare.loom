@@ -10,7 +10,7 @@ func.decl import("json") @members(%json: buffer) -> (buffer, i32, i64)
 
 func.decl import("prepare") @stage(%root: buffer, %tag: i64) -> (i32)
 func.decl import("prepare") @config_i64(%stage: i32, %key: buffer, %value: i64)
-func.decl import("prepare") @parameter(%stage: i32, %binding: i32, %directory: buffer, %path: buffer, %policy: buffer)
+func.decl import("prepare") @parameter(%stage: i32, %binding: i32, %source: i32, %directory: buffer, %path: buffer, %policy: buffer)
 
 // qwen38_prefill
 global.rodata.def @prefill_root = bytes("7177656e33385f70726566696c6c")
@@ -82,7 +82,8 @@ func.def @declare_stage(%root: buffer, %tokens: i64, %spans: i64, %capacity: i64
   %policy = global.load @policy : buffer
   scf.for %i = [%zero to %root_count step %one] {
     %binding = index.cast %i : index to i32
-    func.call @parameter(%stage, %binding, %empty, %weights, %policy) : (i32, i32, buffer, buffer, buffer) -> ()
+    %source = scalar.constant 0 : i32
+    func.call @parameter(%stage, %binding, %source, %empty, %weights, %policy) : (i32, i32, i32, buffer, buffer, buffer) -> ()
     scf.yield
   }
   func.return %stage : i32

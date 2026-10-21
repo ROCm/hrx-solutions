@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .hem_common import InvalidInput
 from .hem_openwebui_http import canonical_target
-from .hem_pi_contracts import NATIVE_PROFILE, provider_id
+from .hem_pi_contracts import NATIVE_PROFILE, READABLE_NATIVE_PROFILES, provider_id
 
 OWNER = "loom-control-openwebui"
 SCHEMA_VERSION = 1
@@ -164,13 +164,14 @@ def desired_connections(endpoints: dict) -> list[dict]:
             endpoints["owner"] != "loom-control-clients" or not isinstance(endpoints["servers"], list)):
         _fail()
     _root(endpoints["hem_root"])
-    servers = []
+    servers, profiles = [], set()
     for row in endpoints["servers"]:
         if (not isinstance(row, dict) or set(row) != {"server", "provider", "base_url", "native_profile"} or
-                row["native_profile"] != NATIVE_PROFILE):
+                row["native_profile"] not in READABLE_NATIVE_PROFILES):
             _fail()
         servers.append(row["server"])
-    if any(not isinstance(s, str) for s in servers) or servers != sorted(set(servers)):
+        profiles.add(row["native_profile"])
+    if any(not isinstance(s, str) for s in servers) or servers != sorted(set(servers)) or len(profiles) > 1:
         _fail()
     rows = [dict(server=r["server"], provider=r["provider"], base_url=r["base_url"],
                  config=_managed(r["provider"])) for r in endpoints["servers"]]

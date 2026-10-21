@@ -50,6 +50,15 @@ def plan(current, owned, wanted, mode='configure', identity=''):
 
 
 class OwnershipTest(unittest.TestCase):
+    def test_known_prior_endpoint_profile_preserves_webui_connections(self):
+        PREVIOUS_NATIVE_PROFILE = contracts.PREVIOUS_NATIVE_PROFILE
+        endpoints = dict(schema_version=1, owner='loom-control-clients', hem_root=str(ROOT), servers=[
+            dict(server='main', provider=contracts.provider_id('main'), base_url='http://127.0.0.1:18080/v1',
+                 native_profile=PREVIOUS_NATIVE_PROFILE)])
+        self.assertEqual(state.desired_connections(endpoints), [row()])
+        endpoints['servers'][0]['native_profile'] = 'unknown'
+        with self.assertRaises(common.InvalidInput): state.desired_connections(endpoints)
+
     def test_pure_paths_empty_decode_and_projection(self):
         with patch.object(Path, 'resolve', side_effect=AssertionError('filesystem access')), patch('builtins.open', side_effect=AssertionError('I/O')):
             value = document()

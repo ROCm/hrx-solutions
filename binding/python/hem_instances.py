@@ -14,7 +14,7 @@ import uuid
 
 from . import hem_config, hem_models, hem_process
 from .hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome, result
-from .hem_http import NativeClient, active_ready, registration, retired
+from .hem_http import NativeClient, active_ready, primary_parameters, registration, retired
 from .hem_state import _name
 
 
@@ -192,7 +192,7 @@ class InstanceManager:
             if loom.get('error') is not None:
                 raise HemError(f"native instance error after undrain: {loom['error']}", accepted=True)
             return (loom.get('registration') == 'ready' and loom.get('parameter_operation') == 'idle'
-                    and loom.get('parameters', {}).get('active') is True
+                    and primary_parameters(loom).get('active') is True
                     and loom.get('status', {}).get('admission') == 'open')
         client.wait(opened)
         return self._acknowledged(row, pending=None)

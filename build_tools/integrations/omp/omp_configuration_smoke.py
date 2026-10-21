@@ -138,7 +138,7 @@ class ConfigurationGate:
         card = next(row for row in documents['models']['data'] if row['id'] == name)
         status = next(row for row in documents['status']['data'] if row['id'] == name)
         assert card['loom']['incarnation'] == status['loom']['incarnation']
-        assert status['loom']['registration'] == 'ready' and status['loom']['parameters']['active']
+        assert status['loom']['registration'] == 'ready' and status['loom']['parameters']['primary']['active']
         assert status['loom']['status']['admission'] == 'open'
         assert card['input_modalities'] == ['text'] and card['output_modalities'] == ['text']
         record = dict(base_url=endpoint+'/v1', limit=dict(context=card['context_length'],

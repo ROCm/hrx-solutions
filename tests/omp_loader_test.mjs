@@ -44,7 +44,7 @@ try{
    assert.deepEqual(validateInstallation(join(directory,'index.ts')),config);
  }
  console.log('PASS copied TS loader accepts comment and plain CRLF heading provenance');
- const endpoint={server:'local',provider,base_url:`http://127.0.0.1:${server.port}/v1`,native_profile:'loom-text-serve-ed6b79c-v1'};
+ const endpoint={server:'local',provider,base_url:`http://127.0.0.1:${server.port}/v1`,native_profile:'loom-text-serve-61417137-v1'};
  writeFileSync(config.endpoint_file,JSON.stringify({schema_version:1,owner:'loom-control-clients',hem_root:state,servers:[endpoint]}));
  const originalYaml=readFileSync(config.native_models_file,'utf8');
  const auth=await AuthStorage.create(join(root,'auth.db')),registry=new ModelRegistry(auth,config.native_models_file,{cacheDbPath:join(root,'models.db')});

@@ -23,7 +23,7 @@ MODEL = dict(model='qwen08', id='qwen08', state='ready', completed=True,
              validation=dict(valid=True, evidence=[dict(inode=999)]),
              provenance=dict(kind='import'), pending=None, instances=[])
 NATIVE = {'id': 'chat-small', 'loom': {'incarnation': 17, 'registration': 'ready',
-          'parameters': {'active': True}, 'parameter_operation': 'idle', 'status': {'admission': 'open'}}}
+          'parameters': {'primary': {'active': True}}, 'parameter_operation': 'idle', 'status': {'admission': 'open'}}}
 INSTANCE = dict(state='observed', completed=True, instance='chat-small', model='qwen08',
                 server='local', endpoint='http://127.0.0.1:8080', observed_at=0,
                 incarnation=17, native=NATIVE, settings=SETTINGS, pending=None,

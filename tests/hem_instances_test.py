@@ -93,13 +93,13 @@ class LifecycleTest(unittest.TestCase):
             self.assertEqual(self.items[0]['loom']['registration'], 'registered')
             self.assertNotIn('parameters', self.items[0]['loom'])
             self.items[0]['loom']['registration'] = 'ready'
-            self.items[0]['loom']['parameters'] = {'active': True}
+            self.items[0]['loom']['parameters'] = {'primary': {'active': True}}
             if self.mode == 'activation-error':
                 self.items[0]['loom']['error'] = 'fixture activation failed'
             elif self.mode == 'activation-pending':
                 self.items[0]['loom']['parameter_operation'] = 'updating'
         elif path.endswith('/undrain'):
-            self.assertTrue(self.items[0]['loom']['parameters']['active'])
+            self.assertTrue(self.items[0]['loom']['parameters']['primary']['active'])
             self.assertEqual(self.items[0]['loom']['parameter_operation'], 'idle')
             self.items[0]['loom']['status']['admission'] = 'open'
         elif path.endswith('/unregister'):

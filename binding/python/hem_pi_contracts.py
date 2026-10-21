@@ -22,8 +22,13 @@ EXTENSION_VERSION = "1"
 PI_PACKAGE = "@earendil-works/pi-coding-agent"
 PI_VERSIONS = ("1.3.0",)
 NODE_MIN_VERSION = (22, 19, 0)
-NATIVE_PROFILE = "loom-text-serve-ed6b79c-v1"
-NATIVE_COMMIT = "ed6b79c757c738dea7eaecd6ca55a7df73cf6185"
+NATIVE_PROFILE = "loom-text-serve-61417137-v1"
+NATIVE_COMMIT = "61417137f334cfa828b38d6e9b0f2d7190503f16"
+# Exactly one prior owned generation can be inspected and explicitly refreshed.
+# New projections and installations always emit the current identity above.
+PREVIOUS_NATIVE_PROFILE = "loom-text-serve-ed6b79c-v1"
+PREVIOUS_NATIVE_COMMIT = "ed6b79c757c738dea7eaecd6ca55a7df73cf6185"
+READABLE_NATIVE_PROFILES = (NATIVE_PROFILE, PREVIOUS_NATIVE_PROFILE)
 OUTPUT_CAP = 8192
 REFRESH_TIMEOUT = 3.0
 DISCOVERY_PATHS = ("/v1/models", "/v1/status")

@@ -15,6 +15,7 @@ import threading
 from urllib.parse import urlsplit
 
 from . import hem_arguments as arguments, hem_display
+from .hem_http import primary_parameters
 from .hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from .hem_pi import configure_pi, resolve_target
 from .hem_pi_contracts import PI_PACKAGE, PI_VERSIONS, NODE_MIN_VERSION, REFRESH_TIMEOUT, ENDPOINT_PATH
@@ -250,7 +251,7 @@ def _available(catalog, status):
             model.get("input_modalities") == ["text"] and model.get("output_modalities") == ["text"] and
             positive(loom.get("incarnation")) and loom.get("kind") == "text" and loom.get("endpoint") == "/v1/chat/completions" and
             loom.get("tokenize") is True and loom.get("registration") == "ready" and loom.get("parameter_operation") == "idle" and
-            loom.get("parameters", {}).get("active") is True and native_status.get("admission") == "open" and
+            primary_parameters(loom).get("active") is True and native_status.get("admission") == "open" and
             native_status.get("phase") in ("idle", "execute") and not loom.get("error") and not native_status.get("error") and
             not model["loom"].get("error") and not catalog_status.get("error")):
             available.append(name)

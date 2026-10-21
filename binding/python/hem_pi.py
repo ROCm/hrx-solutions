@@ -67,6 +67,11 @@ def _endpoint(data, root, identity):
         if (value.get("schema_version") != 1 or value.get("hem_root") != str(root) or
                 value.get("integration_id") != identity["integration_id"] or not isinstance(value.get("servers"), list)):
             raise InvalidInput("foreign or incompatible Pi endpoint document")
+        # Reuse the shared row contract, accepting only current or one known
+        # prior owned profile while preserving this Pi reservation envelope.
+        from .hem_clients_endpoints import validate_endpoints, OWNER
+        validate_endpoints(dict(schema_version=1, owner=OWNER, hem_root=str(root),
+                                servers=value["servers"]), root)
 
 
 def _path(root, target, name):

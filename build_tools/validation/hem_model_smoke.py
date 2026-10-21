@@ -254,7 +254,7 @@ class Gate:
         status = self.command(namespace, 'instance', 'status', model, '--server', name)
         loom = status['native']['loom']
         assert loom['registration'] == 'ready' and loom.get('error') is None, loom
-        assert loom['parameter_operation'] == 'idle' and loom['parameters']['active'], loom
+        assert loom['parameter_operation'] == 'idle' and loom['parameters']['primary']['active'], loom
         assert loom['status']['admission'] == 'open', loom
         return answer
 

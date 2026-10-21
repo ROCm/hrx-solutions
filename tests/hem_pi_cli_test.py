@@ -359,7 +359,7 @@ class PiCliTest(unittest.TestCase):
     def test_native_join_gets_both_resources_and_reports_only_ready_models(self):
         row = dict(id="tiny", object="model", context_length=8192, limits=dict(max_output_tokens=8192),
             input_modalities=["text"], output_modalities=["text"], loom=dict(incarnation=1, registration="ready", kind="text",
-            endpoint="/v1/chat/completions", tokenize=True, parameter_operation="idle", parameters=dict(active=True), status=dict(admission="open",phase="idle")))
+            endpoint="/v1/chat/completions", tokenize=True, parameter_operation="idle", parameters=dict(primary=dict(active=True)), status=dict(admission="open",phase="idle")))
         requests = []
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(inner):
@@ -384,7 +384,7 @@ class PiCliTest(unittest.TestCase):
         row["id"] = "x" * 300
         body, _ = self.invoke("--check")
         self.assertEqual(body["available"][0]["id"], row["id"])
-        row["loom"]["parameters"]["active"] = False
+        row["loom"]["parameters"]["primary"]["active"] = False
         before = self.snapshot()
         body, _ = self.invoke("--check")
         self.assertEqual(body["available"], [])

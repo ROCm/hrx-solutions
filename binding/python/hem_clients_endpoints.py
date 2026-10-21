@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from . import hem_display
 from .hem_common import HemError, InvalidInput
-from .hem_pi_contracts import NATIVE_PROFILE, provider_id
+from .hem_pi_contracts import NATIVE_PROFILE, READABLE_NATIVE_PROFILES, provider_id
 from .hem_pi_files import atomic_replace, encoded, read_owned
 from .hem_pi_state import integration_lock
 
@@ -77,15 +77,16 @@ def validate_endpoints(document, root):
                 document["owner"] != OWNER or document["hem_root"] != _root(root) or
                 not isinstance(document["servers"], list)):
             raise ValueError()
-        names = []
+        names, profiles = [], set()
         for row in document["servers"]:
             if (not isinstance(row, dict) or set(row) != {"server", "provider", "base_url", "native_profile"} or
-                    row["provider"] != provider_id(row["server"]) or row["native_profile"] != NATIVE_PROFILE or
+                    row["provider"] != provider_id(row["server"]) or row["native_profile"] not in READABLE_NATIVE_PROFILES or
                     not row["base_url"].endswith("/v1") or
                     _origin(row["base_url"][:-3]) + "/v1" != row["base_url"]):
                 raise ValueError()
             names.append(row["server"])
-        if names != sorted(set(names)):
+            profiles.add(row["native_profile"])
+        if names != sorted(set(names)) or len(profiles) > 1:
             raise ValueError()
         _encoded(document)
     except (ValueError, TypeError, KeyError, AttributeError, InvalidInput) as error:
@@ -127,7 +128,9 @@ def _publish(registry, deadline, *, create):
         if previous is None and not create:
             return dict(changed=False, clients_update="unchanged")
         if previous is not None:
-            read_endpoints(registry.root)
+            prior = read_endpoints(registry.root)
+            if not create and any(row["native_profile"] != NATIVE_PROFILE for row in prior["servers"]):
+                raise InvalidInput("client endpoint projection needs explicit native-profile refresh; " + REPAIR)
         data = _encoded(project_endpoints(registry.root, registry.list_servers()))
         changed = data != previous
         if changed:
