@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from build_tools.wheel_tools import check_installed_cpu as gate
+from build_tools.validation import check_installed_cpu as gate
 
 
 class InstalledPayloadTest(unittest.TestCase):

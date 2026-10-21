@@ -6,7 +6,7 @@ umask 077
 scripts=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 mkdir -p -- "$1"
 runtime=$(realpath -- "$1")
-cp -a "$scripts/omp_runtime/client" "$scripts/omp_runtime/runtime" "$runtime/"
+cp -a "$scripts/runtime/client" "$scripts/runtime/runtime" "$runtime/"
 cd -- "$runtime/runtime"
 timeout --kill-after=10s 180s npm ci --ignore-scripts --no-audit --no-fund
 # npm's Bun postinstall normally moves this exact native package into place.

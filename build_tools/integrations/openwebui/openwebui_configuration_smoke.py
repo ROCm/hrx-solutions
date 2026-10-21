@@ -16,12 +16,16 @@ import secrets
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
 
-from hem_model_smoke import Cancelled, Gate, run_child, write_cleanup
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from build_tools.validation.hem_model_smoke import Cancelled, Gate, run_child, write_cleanup
 
 IMAGE = 'ghcr.io/open-webui/open-webui@sha256:a537bbe1e6b428820f52ed4a029d7fff97062e24d5cf32c365fba36fd0542def'
 REVISION = '91ea4e3421d1d8069f13d4a463fcb5986d94ea60'
@@ -213,7 +217,7 @@ class ConfigurationGate:
         number = len(self.evidence['streams'])
         output = self.root / ('wire-' + str(number) + '.json')
         observer = 'loom-webui-observer-' + uuid.uuid4().hex[:12]
-        script = self.gate.args.source / 'build_tools/openwebui_wire_capture.py'
+        script = self.gate.args.source / 'build_tools/integrations/openwebui/openwebui_wire_capture.py'
         native_port = self.gate.servers[namespace][3]
         child = subprocess.Popen(['docker', 'run', '--rm', '--name', observer, '--network', 'host',
             '--cap-drop', 'ALL', '--cap-add', 'NET_RAW', '--cap-add', 'DAC_OVERRIDE', '-v', str(script)+':/capture.py:ro',

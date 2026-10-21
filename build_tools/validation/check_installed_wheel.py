@@ -55,7 +55,7 @@ for name in ("setup_cli", "serve_start", "connection_manager", "server_manager",
     assert importlib.util.find_spec("hrx_solutions." + name) is None, name
 for name in ("loom-hem", "loom-serve-setup", "loom-serve-start"):
     assert not (Path(sys.prefix) / "bin" / name).exists(), name
-from build_tools.wheel_tools.check_installed_cpu import verify_wheel_payload
+from build_tools.validation.check_installed_cpu import verify_wheel_payload
 provenance = verify_wheel_payload(args.wheel.resolve(strict=True), package_root)
 assert (package_root / "_native/bin/loom-serve").is_file()
 assert (package_root / "_native/share/loom-serve/LICENSE").is_file()

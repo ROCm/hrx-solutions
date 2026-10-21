@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 
 class GroupedUiIntegrationTest(unittest.TestCase):
@@ -17,7 +17,7 @@ class GroupedUiIntegrationTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.scripts = self.root / 'scripts'
         self.scripts.mkdir()
-        shutil.copy2(REPO / 'build_tools/check-ui-integrations.sh', self.scripts)
+        shutil.copy2(REPO / 'build_tools/integrations/check-ui-integrations.sh', self.scripts)
         self.package = self.root / 'package'
         for name in ('pi_extension', 'opencode_plugin', 'omp_extension'):
             (self.package / name).mkdir(parents=True)
@@ -31,7 +31,8 @@ class GroupedUiIntegrationTest(unittest.TestCase):
             runtime.mkdir()
         self.trace = self.root / 'trace'
         for client in ('pi', 'opencode', 'omp'):
-            check = self.scripts / f'check-{client}-assets.sh'
+            (self.scripts / client).mkdir()
+            check = self.scripts / client / f'check-{client}-assets.sh'
             check.write_text('#!/bin/sh\necho "$1:$2" >> "$UI_TEST_TRACE"\n'
                              f'if [ "${{UI_TEST_FAIL:-}}" = {client!r} ]; then exit 19; fi\n')
             check.chmod(0o755)

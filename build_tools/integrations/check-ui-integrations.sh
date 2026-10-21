@@ -27,9 +27,9 @@ print(package)
 )
 
 echo '[ui-integrations] Pi'
-bash "$scripts/check-pi-assets.sh" "$pi_runtime" "$package/pi_extension"
+bash "$scripts/pi/check-pi-assets.sh" "$pi_runtime" "$package/pi_extension"
 echo '[ui-integrations] OpenCode'
-bash "$scripts/check-opencode-assets.sh" "$opencode_runtime" "$package/opencode_plugin"
+bash "$scripts/opencode/check-opencode-assets.sh" "$opencode_runtime" "$package/opencode_plugin"
 echo '[ui-integrations] OMP'
-bash "$scripts/check-omp-assets.sh" "$omp_runtime" "$package/omp_extension"
+bash "$scripts/omp/check-omp-assets.sh" "$omp_runtime" "$package/omp_extension"
 echo '[ui-integrations] passed'

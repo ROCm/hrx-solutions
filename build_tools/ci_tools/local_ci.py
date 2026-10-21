@@ -255,16 +255,16 @@ class Runner:
     def ui_source(self):
         # Stage the immutable public runtimes together so source tests exercise
         # the genuine loaders and report one UI integration result.
-        self.command(['bash', 'build_tools/stage-pi-runtime.sh', self.run / 'pi-runtime'])
+        self.command(['bash', 'build_tools/integrations/pi/stage-pi-runtime.sh', self.run / 'pi-runtime'])
         for client in ('opencode', 'omp'):
-            self.command(['bash', f'build_tools/stage-{client}-runtime.sh',
+            self.command(['bash', f'build_tools/integrations/{client}/stage-{client}-runtime.sh',
                           self.run / f'{client}-runtime'])
             if client == 'opencode':
                 self.env['PATH'] = str(self.run / 'opencode-runtime/node-v24.10.0-linux-x64/bin') + os.pathsep + self.env.get('PATH', '')
-        self.command(['bash', 'build_tools/check-pi-assets.sh', self.run / 'pi-runtime',
+        self.command(['bash', 'build_tools/integrations/pi/check-pi-assets.sh', self.run / 'pi-runtime',
                       self.snapshot / 'binding/python/pi_extension'])
         for client, assets in (('opencode', 'opencode_plugin'), ('omp', 'omp_extension')):
-            self.command(['bash', f'build_tools/check-{client}-assets.sh',
+            self.command(['bash', f'build_tools/integrations/{client}/check-{client}-assets.sh',
                           self.run / f'{client}-runtime', self.snapshot / 'binding/python' / assets])
         node_bin = self.run / 'opencode-runtime/node-v24.10.0-linux-x64/bin'
         self.env.update(
@@ -299,7 +299,7 @@ class Runner:
                      env={'HRX_LOCAL_CI_RUNTIME_ROOT': str(self.runtime / 'installed')})
 
     def ui_integrations(self):
-        self.command(['bash', self.snapshot / 'build_tools/check-ui-integrations.sh',
+        self.command(['bash', self.snapshot / 'build_tools/integrations/check-ui-integrations.sh',
                       self.run / 'installed-venv', self.run / 'pi-runtime',
                       self.run / 'opencode-runtime', self.run / 'omp-runtime'], cwd=self.run)
 

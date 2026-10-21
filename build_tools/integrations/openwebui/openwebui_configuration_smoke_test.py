@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-import openwebui_configuration_smoke as smoke
+from build_tools.integrations.openwebui import openwebui_configuration_smoke as smoke
 
 
 class CleanupTest(unittest.TestCase):

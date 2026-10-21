@@ -7,7 +7,8 @@ import types
 import unittest
 from unittest.mock import Mock, patch
 
-from opencode_configuration_smoke import ConfigurationGate, provider, snapshot
+from build_tools.integrations.opencode.opencode_configuration_smoke import ConfigurationGate
+from build_tools.integrations.common import provider, snapshot
 
 
 class AcceptanceProofTest(unittest.TestCase):
@@ -94,8 +95,8 @@ class AcceptanceProofTest(unittest.TestCase):
         closed.connect_ex.return_value = 1
         closed.getsockname.return_value = ('127.0.0.1',18089)
         with patch.dict('sys.modules', {'hrx_solutions.hem_process': module}), \
-             patch('opencode_configuration_smoke.subprocess.Popen',return_value=child), \
-             patch('opencode_configuration_smoke.socket.socket',return_value=closed):
+             patch('build_tools.integrations.opencode.opencode_configuration_smoke.subprocess.Popen',return_value=child), \
+             patch('build_tools.integrations.opencode.opencode_configuration_smoke.socket.socket',return_value=closed):
             with self.assertRaises(RuntimeError) as caught:
                 try:
                     self.check.start_client()
@@ -123,7 +124,7 @@ class AcceptanceProofTest(unittest.TestCase):
 
 class DeliveryWiringTest(unittest.TestCase):
     def test_repaired_wheel_ui_checks_are_grouped_outside_backend_gate(self):
-        source = Path(__file__).resolve().parents[1]
+        source = Path(__file__).resolve().parents[3]
         workflow = (source / '.github/workflows/check_model.yml').read_text()
         for required in ('runs-on: linux-gfx1151-gpu-rocm', 'name: hrx-solutions-wheel-linux-x86_64',
                          'build_tools/model-smoke.sh'):
@@ -131,13 +132,13 @@ class DeliveryWiringTest(unittest.TestCase):
         for excluded in ('LOOM_PI_RUNTIME:', 'LOOM_OPENCODE_RUNTIME:', 'stage-opencode-runtime.sh'):
             self.assertNotIn(excluded, workflow)
         build = (source / '.github/workflows/build_python_wheel.yml').read_text()
-        for required in ('LOOM_OPENCODE_TEST_NODE:', 'build_tools/stage-opencode-runtime.sh',
+        for required in ('LOOM_OPENCODE_TEST_NODE:', 'build_tools/integrations/opencode/stage-opencode-runtime.sh',
                          'Check installed UI integrations from the repaired wheel',
-                         'build_tools/check-ui-integrations.sh',
+                         'build_tools/integrations/check-ui-integrations.sh',
                          '-m build_tools.ci_tools.source_tests install'):
             self.assertIn(required, build)
-        helper = (source / 'build_tools/hem_model_smoke.py').read_text()
-        self.assertNotIn('from opencode_configuration_smoke import qualify', helper)
+        helper = (source / 'build_tools/validation/hem_model_smoke.py').read_text()
+        self.assertNotIn('from build_tools.integrations.opencode.opencode_configuration_smoke import qualify', helper)
         shell = (source / 'build_tools/model-smoke.sh').read_text()
         self.assertNotIn("for name in ('pi', 'opencode', 'omp'):", shell)
         self.assertIn("else ['--profile', 'ci08']", shell)

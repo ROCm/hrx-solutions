@@ -15,9 +15,9 @@ The commands below describe the current layout. The cleanup specification is
 | Full local CI | `bash build_tools/local-ci.sh [--model08 DIRECTORY] [--run-dir DIRECTORY]` | Source capture, source client assets, Python tests, wheel build, installed CPU and client checks, GPU backend, Open WebUI; `ci_tools/local_ci.py` |
 | Explicit reduced coverage | `bash build_tools/local-ci.sh --cpu-only [--run-dir DIRECTORY]` | Same stages through installed UI checks; skips GPU and Open WebUI, still requires Docker and network |
 | Build a repaired wheel | `bash build_tools/build-wheel.sh` | Pinned manylinux container; `.github/scripts/build_python_wheel.sh` and `wheel_tools/` |
-| Check an existing wheel | `bash build_tools/check-wheel.sh WHEEL NEW_VENV_DIRECTORY [--native-lifecycle]` | Installed payload/import/console-script checks and CPU lifecycle fixtures; `wheel_tools/check_installed_{wheel,cpu}.py`; optional empty AMDGPU server lifecycle |
-| Real-model backend | `bash build_tools/model-smoke.sh WHEEL NEW_RUN_DIRECTORY MODEL08_DIRECTORY` | Isolated Qwen 0.8B backend/configuration/lifecycle qualification; `hem_model_smoke.py`, profile `ci08` |
-| Real-model Open WebUI | `bash build_tools/model-smoke.sh --openwebui WHEEL NEW_RUN_DIRECTORY MODEL08_DIRECTORY` | Public WebUI wiring against isolated native models; `openwebui_configuration_smoke.py` |
+| Check an existing wheel | `bash build_tools/check-wheel.sh WHEEL NEW_VENV_DIRECTORY [--native-lifecycle]` | Installed payload/import/console-script checks and CPU lifecycle fixtures; `validation/check_installed_{wheel,cpu}.py`; optional empty AMDGPU server lifecycle |
+| Real-model backend | `bash build_tools/model-smoke.sh WHEEL NEW_RUN_DIRECTORY MODEL08_DIRECTORY` | Isolated Qwen 0.8B backend/configuration/lifecycle qualification; `validation/hem_model_smoke.py`, profile `ci08` |
+| Real-model Open WebUI | `bash build_tools/model-smoke.sh --openwebui WHEEL NEW_RUN_DIRECTORY MODEL08_DIRECTORY` | Public WebUI wiring against isolated native models; `integrations/openwebui/openwebui_configuration_smoke.py` |
 
 Default local CI runs the full GPU and client gate. CPU-only is explicit reduced
 coverage and does not satisfy the repository's pre-landing gate without user
@@ -104,9 +104,9 @@ Dependency installation scripts are disabled; preserve lockfiles and digests.
 
 | Client | Acquire runtime | Smallest asset check (no model/GPU) |
 | --- | --- | --- |
-| Pi | `bash build_tools/stage-pi-runtime.sh NEW_RUNTIME` | `bash build_tools/check-pi-assets.sh RUNTIME ASSET_DIRECTORY` |
-| OpenCode | `bash build_tools/stage-opencode-runtime.sh NEW_RUNTIME` | `bash build_tools/check-opencode-assets.sh RUNTIME ASSET_DIRECTORY` |
-| OMP | `bash build_tools/stage-omp-runtime.sh NEW_RUNTIME` | `bash build_tools/check-omp-assets.sh RUNTIME ASSET_DIRECTORY` |
+| Pi | `bash build_tools/integrations/pi/stage-pi-runtime.sh NEW_RUNTIME` | `bash build_tools/integrations/pi/check-pi-assets.sh RUNTIME ASSET_DIRECTORY` |
+| OpenCode | `bash build_tools/integrations/opencode/stage-opencode-runtime.sh NEW_RUNTIME` | `bash build_tools/integrations/opencode/check-opencode-assets.sh RUNTIME ASSET_DIRECTORY` |
+| OMP | `bash build_tools/integrations/omp/stage-omp-runtime.sh NEW_RUNTIME` | `bash build_tools/integrations/omp/check-omp-assets.sh RUNTIME ASSET_DIRECTORY` |
 
 Staging writes only the selected runtime directory (plus normal package-manager
 caches). Pi uses Node 22.22.1/Pi 1.3.0, OpenCode uses Node 24.10.0/OpenCode
@@ -119,7 +119,7 @@ For source assets pass `binding/python/pi_extension`,
 For installed assets run:
 
 ```sh
-bash build_tools/check-ui-integrations.sh INSTALLED_VENV PI_RUNTIME OPENCODE_RUNTIME OMP_RUNTIME
+bash build_tools/integrations/check-ui-integrations.sh INSTALLED_VENV PI_RUNTIME OPENCODE_RUNTIME OMP_RUNTIME
 ```
 
 This verifies the package is imported from the venv and selects its copied

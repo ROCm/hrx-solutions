@@ -132,9 +132,9 @@ try:
         with (run / 'install.log').open('w') as log:
             code = invoke([str(run / 'venv/bin/python'), '-m', 'pip', 'install', '--disable-pip-version-check', wheel], stdout=log, stderr=subprocess.STDOUT)
     if code == 0 and profile == 'openwebui':
-        sys.path.insert(0, scripts)
-        from local_ci_runtime import create
-        from openwebui_configuration_smoke import IMAGE
+        sys.path.insert(0, source)
+        from build_tools.ci_tools.local_ci_runtime import create
+        from build_tools.integrations.openwebui.openwebui_configuration_smoke import IMAGE
         if not os.environ.get('HRX_LOCAL_CI_RUNTIME_ROOT'):
             owner = create(run)
             (run / 'runtime-owner.json').write_text(json.dumps(owner) + '\n')
@@ -147,7 +147,7 @@ try:
         os.chdir(run)
         import hashlib
         sha = hashlib.sha256(Path(wheel).read_bytes()).hexdigest()
-        helper = 'openwebui_configuration_smoke.py' if profile == 'openwebui' else 'hem_model_smoke.py'
+        helper = 'integrations/openwebui/openwebui_configuration_smoke.py' if profile == 'openwebui' else 'validation/hem_model_smoke.py'
         qualification = [] if profile == 'openwebui' else ['--profile', 'ci08']
         code = invoke([str(run / 'venv/bin/python'), str(Path(scripts) / helper),
                        '--run', str(run / 'lifecycle'), '--wheel', wheel, '--wheel-sha256', sha,

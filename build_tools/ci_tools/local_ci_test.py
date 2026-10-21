@@ -228,9 +228,9 @@ class RunnerTest(unittest.TestCase):
         with mock.patch.object(runner, 'command') as command:
             runner.ui_source()
         self.assertEqual([str(call.args[0][1]) for call in command.call_args_list], [
-            'build_tools/stage-pi-runtime.sh', 'build_tools/stage-opencode-runtime.sh',
-            'build_tools/stage-omp-runtime.sh', 'build_tools/check-pi-assets.sh',
-            'build_tools/check-opencode-assets.sh', 'build_tools/check-omp-assets.sh'])
+            'build_tools/integrations/pi/stage-pi-runtime.sh', 'build_tools/integrations/opencode/stage-opencode-runtime.sh',
+            'build_tools/integrations/omp/stage-omp-runtime.sh', 'build_tools/integrations/pi/check-pi-assets.sh',
+            'build_tools/integrations/opencode/check-opencode-assets.sh', 'build_tools/integrations/omp/check-omp-assets.sh'])
         self.assertEqual(runner.env['LOOM_OPENCODE_TEST_NODE'],
                          str(runner.run / 'opencode-runtime/node-v24.10.0-linux-x64/bin/node'))
         self.assertEqual(runner.env['LOOM_OMP_TEST_PACKAGE'],
@@ -243,7 +243,7 @@ class RunnerTest(unittest.TestCase):
         with mock.patch.object(runner, 'command') as command:
             runner.ui_integrations()
         self.assertEqual(command.call_args.args[0], [
-            'bash', runner.snapshot / 'build_tools/check-ui-integrations.sh',
+            'bash', runner.snapshot / 'build_tools/integrations/check-ui-integrations.sh',
             runner.run / 'installed-venv', runner.run / 'pi-runtime',
             runner.run / 'opencode-runtime', runner.run / 'omp-runtime'])
         self.assertEqual(command.call_args.kwargs['cwd'], runner.run)

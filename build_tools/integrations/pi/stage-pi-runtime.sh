@@ -14,7 +14,7 @@ curl --fail --location --silent --show-error --max-time 120 \
 printf '%s  %s\n' 07c8aafa60644fb81adefa1ee7da860eb1920851ffdc9a37020ab0be47fbc10e "$runtime/$archive" | sha256sum --check --status
 tar -xzf "$runtime/$archive" -C "$runtime"
 export PATH="$runtime/node-v22.22.1-linux-x64/bin:$PATH"
-cp "$scripts/pi_runtime/package.json" "$scripts/pi_runtime/package-lock.json" "$runtime/"
+cp "$scripts/runtime/package.json" "$scripts/runtime/package-lock.json" "$runtime/"
 cd -- "$runtime"
 # Lock includes integrity for every transitive package; no install scripts run.
 timeout --kill-after=10s 180s npm ci --ignore-scripts --no-audit --no-fund

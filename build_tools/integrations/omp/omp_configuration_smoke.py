@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 
-from opencode_configuration_smoke import provider, snapshot
+from build_tools.integrations.common import provider, snapshot
 
 
 def configuration_snapshot(target):
@@ -180,7 +180,7 @@ class ConfigurationGate:
         assert hashlib.sha256(self.bun.read_bytes()).hexdigest() == BUN_SHA256
         for directory, names in [('client', ('package.json','bun.lock')), ('runtime', ('package.json','package-lock.json'))]:
             for name in names:
-                assert (self.runtime/directory/name).read_bytes() == (gate.args.source/'build_tools/omp_runtime'/directory/name).read_bytes()
+                assert (self.runtime/directory/name).read_bytes() == (gate.args.source/'build_tools/integrations/omp/runtime'/directory/name).read_bytes()
         self.evidence['runtime'] = dict(version=self.run_client('--version').strip(),
             executable=str(self.client.resolve()), bun=str(self.bun.resolve()), bun_sha256=BUN_SHA256)
         assert self.evidence['runtime']['version'] == 'omp/18.11.2'

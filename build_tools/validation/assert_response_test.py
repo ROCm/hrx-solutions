@@ -4,7 +4,7 @@ import io
 import json
 import unittest
 
-from smoke.assert_response import parse_sse
+from build_tools.validation.assert_response import parse_sse
 
 
 def sse(text="Hello!", finish="stop", done=True):

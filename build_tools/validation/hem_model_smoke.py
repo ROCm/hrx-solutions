@@ -21,7 +21,10 @@ import time
 import urllib.request
 import zipfile
 
-from local_ci_runtime import validate_stage
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from build_tools.ci_tools.local_ci_runtime import validate_stage
 
 
 class Cancelled(BaseException):
@@ -181,7 +184,7 @@ class Gate:
         # Reuse the installed contract authority: catalog-build metadata maps
         # authored source inputs to packaged bytecode instead of source files.
         import hrx_solutions
-        from build_tools.wheel_tools.check_installed_cpu import source_parity, verify_wheel_payload
+        from build_tools.validation.check_installed_cpu import source_parity, verify_wheel_payload
         package = Path(hrx_solutions.__file__).resolve().parent
         package.relative_to(Path(sys.prefix).resolve())
         verify_wheel_payload(self.args.wheel, package)

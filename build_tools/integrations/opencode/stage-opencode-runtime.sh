@@ -13,7 +13,7 @@ curl --fail --location --silent --show-error --max-time 120 \
 printf '%s  %s\n' 2b03c5417ce0b1076780df00e01da373bead3b4b80d1c78c1ad10ee7b918d90c "$runtime/$archive" | sha256sum --check --status
 tar -xzf "$runtime/$archive" -C "$runtime"
 export PATH="$runtime/node-v24.10.0-linux-x64/bin:$PATH"
-cp "$scripts/opencode_runtime/package.json" "$scripts/opencode_runtime/package-lock.json" "$runtime/"
+cp "$scripts/runtime/package.json" "$scripts/runtime/package-lock.json" "$runtime/"
 cd -- "$runtime"
 timeout --kill-after=10s 180s npm ci --ignore-scripts --no-audit --no-fund
 # Select the exact qualified Linux x64 native payload without running postinstall

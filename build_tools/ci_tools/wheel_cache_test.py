@@ -99,7 +99,7 @@ class WheelCacheTest(unittest.TestCase):
         bindir = Path(self.temp.name) / "bin"
         bindir.mkdir()
         docker = bindir / "docker"
-        from build_tools.cancellation_test import DOCKER
+        from build_tools.validation.cancellation_test import DOCKER
         docker.write_text(DOCKER.replace('PYTHON', os.sys.executable, 1).replace(
             'while state.exists(): time.sleep(.02)', 'pass').replace(
             "(root/'creating').touch()", "(root/'creating').touch(); Path(os.environ['CAPTURE']).write_text('\\n'.join(a))"))

@@ -7,8 +7,8 @@ import types
 import unittest
 from unittest.mock import Mock, patch
 
-from omp_configuration_smoke import ConfigurationGate, configuration_snapshot
-from opencode_configuration_smoke import provider
+from build_tools.integrations.omp.omp_configuration_smoke import ConfigurationGate, configuration_snapshot
+from build_tools.integrations.common import provider
 
 
 class AcceptanceProofTest(unittest.TestCase):
@@ -71,7 +71,7 @@ class AcceptanceProofTest(unittest.TestCase):
         error=RuntimeError('identity unavailable')
         module=types.ModuleType('hrx_solutions.hem_process'); module.identity=Mock(side_effect=error)
         with patch.dict('sys.modules',{'hrx_solutions.hem_process':module}), \
-             patch('omp_configuration_smoke.subprocess.Popen',return_value=child):
+             patch('build_tools.integrations.omp.omp_configuration_smoke.subprocess.Popen',return_value=child):
             with self.assertRaises(RuntimeError) as caught: self.check.run_client('--version')
         self.assertIs(caught.exception,error)
         child.terminate.assert_called_once(); child.wait.assert_called_once_with(timeout=10)
@@ -92,25 +92,25 @@ class AcceptanceProofTest(unittest.TestCase):
 
 class DeliveryWiringTest(unittest.TestCase):
     def test_real_backend_gate_excludes_clients_and_wheel_groups_them(self):
-        root=Path(__file__).resolve().parents[1]
+        root=Path(__file__).resolve().parents[3]
         model=(root/'.github/workflows/check_model.yml').read_text()
         for required in ('runs-on: linux-gfx1151-gpu-rocm','name: hrx-solutions-wheel-linux-x86_64',
                          'build_tools/model-smoke.sh'):
             self.assertIn(required,model)
         for excluded in ('LOOM_PI_RUNTIME:','LOOM_OPENCODE_RUNTIME:','LOOM_OMP_RUNTIME:',
-                         'build_tools/stage-omp-runtime.sh'):
+                         'build_tools/integrations/omp/stage-omp-runtime.sh'):
             self.assertNotIn(excluded,model)
         wheel=(root/'.github/workflows/build_python_wheel.yml').read_text()
         for required in ('LOOM_OMP_TEST_BUN:','LOOM_OMP_TEST_PACKAGE:',
                          'Check installed UI integrations from the repaired wheel',
-                         'build_tools/check-ui-integrations.sh'):
+                         'build_tools/integrations/check-ui-integrations.sh'):
             self.assertIn(required,wheel)
-        self.assertNotIn('from omp_configuration_smoke import qualify',(root/'build_tools/hem_model_smoke.py').read_text())
+        self.assertNotIn('from build_tools.integrations.omp.omp_configuration_smoke import qualify',(root/'build_tools/validation/hem_model_smoke.py').read_text())
         shell=(root/'build_tools/model-smoke.sh').read_text()
         self.assertNotIn("for name in ('pi', 'opencode', 'omp'):",shell)
         self.assertIn("else ['--profile', 'ci08']", shell)
         self.assertIn('*model, *qualification], helper=True)',shell)
-        self.assertIn("'hem_omp_installer_test'",(root/'build_tools/wheel_tools/check_installed_cpu.py').read_text())
+        self.assertIn("'hem_omp_installer_test'",(root/'build_tools/validation/check_installed_cpu.py').read_text())
 
 
 if __name__ == '__main__': unittest.main()

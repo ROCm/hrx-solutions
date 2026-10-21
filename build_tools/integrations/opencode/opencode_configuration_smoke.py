@@ -4,7 +4,6 @@ Uses the existing model Gate's public commands and bounded ownership cleanup.
 No protocol fixture, generated-file patching, vendor tool/session qualification,
 background discovery or full-window request is involved.
 """
-import base64
 import hashlib
 import json
 import os
@@ -19,15 +18,7 @@ import uuid
 BINARY_SHA256 = '2df936a20cf74af5706020342164628f9a31978c50c2b0ad306b42b614fe245d'
 
 
-def snapshot(root):
-    """File content + mtime make passive checks/idempotence falsifiable."""
-    return {str(path.relative_to(root)): dict(sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                                             mtime_ns=path.stat().st_mtime_ns)
-            for path in sorted(root.rglob('*')) if path.is_file()}
-
-
-def provider(name):
-    return 'loom-hem-' + base64.urlsafe_b64encode(name.encode()).decode().rstrip('=')
+from build_tools.integrations.common import provider, snapshot
 
 
 class ConfigurationGate:
@@ -209,7 +200,7 @@ class ConfigurationGate:
         for directory in (self.target, self.project):
             directory.mkdir(mode=0o700)
         assert hashlib.sha256(self.client.read_bytes()).hexdigest() == BINARY_SHA256
-        assert (self.runtime / 'package-lock.json').read_bytes() == (gate.args.source / 'build_tools/opencode_runtime/package-lock.json').read_bytes()
+        assert (self.runtime / 'package-lock.json').read_bytes() == (gate.args.source / 'build_tools/integrations/opencode/runtime/package-lock.json').read_bytes()
         self.evidence['runtime'] = dict(version=self.run_client('--version').strip(),
             executable=str(self.client.resolve()), binary_sha256=BINARY_SHA256,
             lock_sha256=hashlib.sha256((self.runtime / 'package-lock.json').read_bytes()).hexdigest())

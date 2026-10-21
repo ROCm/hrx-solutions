@@ -14,15 +14,15 @@ import unittest
 from contextlib import redirect_stderr
 import io
 
-from build_tools.wheel_tools import check_installed_wheel_test as checker_fixtures
+from build_tools.validation import check_installed_wheel_test as checker_fixtures
 from binding.python import hem_process, hem_display
 from binding.python.hem_common import Deadline
 from binding.python.hem_shutdown import ShutdownManager
 from binding.python.hem_state import Registry
 from unittest import mock
 
-import hem_model_smoke
-from build_tools.wheel_tools import check_installed_cpu
+from build_tools.validation import hem_model_smoke
+from build_tools.validation import check_installed_cpu
 import types
 
 
@@ -159,7 +159,7 @@ class ShutdownVerificationTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.gate = hem_model_smoke.Gate(argparse.Namespace(run=self.root))
         python = self.root / 'python'
-        source = Path(__file__).resolve().parents[1]
+        source = Path(__file__).resolve().parents[2]
         python.write_text('#!' + sys.executable + '\nimport sys\n'
                           f'sys.path.insert(0, {str(source)!r})\n'
                           'code=sys.argv[2].replace("hrx_solutions", "binding.python")\n'
@@ -243,7 +243,7 @@ class AcquisitionPathTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             gate = hem_model_smoke.Gate(argparse.Namespace(run=root))
-            source = Path(__file__).resolve().parents[1]
+            source = Path(__file__).resolve().parents[2]
             empty = root / 'empty-bin'
             global_bin = root / 'global-bin'
             empty.mkdir()
@@ -374,13 +374,13 @@ class SmokePendingLaunchTest(unittest.TestCase):
         # from this checkout too, without PYTHONPATH or an installed wheel.
         cli.write_text(self.fixture.cli.read_text().replace(
             'import functools,sys',
-            'import functools,sys,os\nos.chdir(' + repr(str(Path(__file__).resolve().parents[1])) + ')'))
+            'import functools,sys,os\nos.chdir(' + repr(str(Path(__file__).resolve().parents[2])) + ')'))
         cli.chmod(0o700)
         self.gate = hem_model_smoke.Gate(argparse.Namespace(run=self.case.root))
         python = self.case.root / 'python'
         python.write_text(
             '#!' + sys.executable + '\nimport sys\n'
-            f'sys.path.insert(0,{str(Path(__file__).resolve().parents[1])!r})\n'
+            f'sys.path.insert(0,{str(Path(__file__).resolve().parents[2])!r})\n'
             'assert sys.argv[1] == "-c"\n'
             'code=sys.argv[2].replace("hrx_solutions", "binding.python")\n'
             'sys.argv=["-c",*sys.argv[3:]]\n'
