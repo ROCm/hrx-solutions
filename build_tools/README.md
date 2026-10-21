@@ -133,10 +133,16 @@ and WebUI qualification remain separate.
 Pi's gate runs `pi_extension_test.mjs`, `pi_discovery_test.mjs`, and
 `pi_budgets_test.mjs`. OpenCode runs `tests/opencode_adapter_test.mjs`; OMP
 runs `tests/omp_adapter_test.mjs` and `tests/omp_loader_test.mjs`. The relocated
-`integrations/pi/pi_provider_test.mjs` has no checked-in gate caller found. OpenCode/OMP
-configuration modules contain `qualify()` functions with no production caller
-found, while their helpers are unit-tested. These are retirement-audit items;
-this guide does not add or remove qualification coverage.
+`integrations/pi/pi_provider_test.mjs` is retained as an accepted manual provider
+safety fixture, intentionally outside the three-file Pi gate. Run it beside an
+isolated locked Pi runtime as described in its header; it requires explicit
+source or installed asset and scratch directories and uses synthetic loopback
+protocol fixtures. It does not qualify real-model serving.
+
+OpenCode/OMP configuration modules retain their unit-tested helpers and
+explicitly unwired library `qualify()` functions. These are not standalone
+qualification CLIs and are not invoked by the backend or installed asset gates.
+No qualification coverage is added or removed by this organization.
 
 ## Helper ownership
 
@@ -152,20 +158,36 @@ preserving installed application import provenance.
 | Archive acceptance | `python -m build_tools.wheel_tools.validate_wheel WHEEL [--sdist SDIST]` | Existing archives; verifies payload/entrypoints/native constraints and optional reviewed sdist assets; console success/error, no GPU |
 | Catalog validation | `python -m build_tools.model_tools.loom_catalog validate --inventory INVENTORY --stamp STAMP` | Catalog inventory/recipes; writes validation stamp; smallest source check is `model_tools/loom_catalog_test.py` |
 | Catalog preparation | `python -m build_tools.model_tools.loom_catalog prepare --source SOURCE --output OUTPUT` | Existing bytecode source; writes prepared bytecode source; no weight acquisition |
-| Model compilation | `//build_tools:model_package_build` | Bazel action supplies catalog, integrity, module, compiler/linker, declared inputs and output paths; owns native package/metadata/role outputs; `model_tools/model_package_build.py` |
 | Catalog Bazel action | `//build_tools:loom_catalog` | Used by `loom-pipeline/bytecode.bzl`; retains runfiles/direct-import handling |
 | Cache lifecycle | `ci_tools/wheel_cache.py`, `wheel_cache_summary.py` | Build/container/CI-owned cache directory, fingerprints and diagnostics; writes cache provenance/configuration or summaries; owning unit tests are the smallest check |
 | GitHub cache maintenance | `ci_tools/github_wheel_cache.py` | Workflow-owned authenticated GitHub cache metadata and attempted key; may delete eligible remote caches; policy and client unit tests are the smallest check |
 | Shared source tests | `python -m build_tools.ci_tools.source_tests {install,verify,build_tools,tests}` | Caller owns venv/environment/runtime fixtures; installs source requirements, verifies provenance, or runs unchanged full unittest discovery; console results |
 | Shared version rules | `versioning.py` | Reads `version.json`; release/tag validation; no independent CLI |
 
-Top-level Python forwarding files remain compatibility routes into `ci_tools/`,
-`wheel_tools/`, `validation/`, `model_tools/`, and `release/` during migration.
-Checked-in consumers use canonical modules. The previously documented
-`python build_tools/setup_python.py` and `python build_tools/make_release.py`
-remain supported compatibility commands; new examples use their canonical
-module replacements above and below. Other wrappers await the final
-compatibility audit and replacement checks before retirement.
+Only two top-level forwarding files remain supported compatibility commands:
+`python build_tools/setup_python.py` and `python build_tools/make_release.py`.
+They were documented user entrypoints before this cleanup. New examples use
+`python -m build_tools.wheel_tools.setup_python` and
+`python -m build_tools.release.make_release` from the repository root.
+
+The other fifteen top-level forwarding files were internal build/CI/import
+routes. Their consumers now use the owning packages or module commands, and
+the old routes are retired after replacement validation. There is no blanket
+compatibility promise for arbitrary build-helper file paths. Use these module
+prefixes when updating an older local script:
+
+| Retired top-level stems | Canonical owning package |
+| --- | --- |
+| `local_ci`, `local_ci_source`, `local_ci_runtime`, `wheel_cache`, `wheel_cache_summary`, `github_wheel_cache` | `build_tools.ci_tools` |
+| `bazel_compiler_inputs`, `python_packaging`, `validate_wheel` | `build_tools.wheel_tools` |
+| `check_installed_cpu`, `check_installed_wheel` | `build_tools.validation` |
+| `loom_catalog` | `build_tools.model_tools` |
+| `publish_release` | `build_tools.release` |
+
+The top level contains nine files: this guide, `BUILD.bazel`, `versioning.py`,
+the four stable shell commands, and the two justified compatibility commands.
+Python source tests remain beside their owning implementation. Lockfiles and
+client runtime acquisition remain separate for each integration.
 
 `MANIFEST.in` includes build-tool Python, shell, and Bazel files. That rule does
 not include integration JavaScript, JSON manifests, or lockfiles. The release

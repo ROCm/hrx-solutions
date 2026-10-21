@@ -37,8 +37,7 @@ under `ci_tools`, `wheel_tools`, `model_tools`, and `release`.
 
 Consumers include `setup.py`, `.github/scripts/`, `.github/workflows/`,
 `loom-pipeline/bytecode.bzl`, documentation, and tests. Bazel already uses the
-model implementations directly through `//build_tools:loom_catalog` and
-`//build_tools:model_package_build`.
+catalog implementation directly through `//build_tools:loom_catalog`.
 
 ## Scope
 
@@ -131,7 +130,7 @@ acceptance using its final destination:
 | `local_ci`, `local_ci_source`, `local_ci_runtime`, `wheel_cache`, `wheel_cache_summary`, `github_wheel_cache` | `build_tools.ci_tools` |
 | `bazel_compiler_inputs`, `python_packaging`, `setup_python`, `validate_wheel` | `build_tools.wheel_tools` |
 | `check_installed_cpu`, `check_installed_wheel` | `build_tools.validation` |
-| `loom_catalog`, `model_package_build`, `model_packages` | `build_tools.model_tools` |
+| `loom_catalog` | `build_tools.model_tools` |
 | `make_release`, `publish_release` | `build_tools.release` |
 
 ## Command and execution contracts
