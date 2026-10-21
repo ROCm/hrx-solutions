@@ -71,6 +71,7 @@ Local CI acquires the shared external `gates/qwen08-gpu.lock` around its GPU
 and WebUI stages. When invoking real-model checks directly, acquire that same
 workspace lock once around the check and its cleanup. Separate state and ports
 do not replace GPU coordination. Never nest an extra lock around local CI.
+`validation/model_smoke.py` owns the shell launcher's setup/child supervision.
 The model supervisor and helpers preserve signal status and report unresolved
 owned cleanup; retain that evidence and do not stop unrelated services.
 

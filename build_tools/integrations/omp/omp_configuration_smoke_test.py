@@ -108,8 +108,10 @@ class DeliveryWiringTest(unittest.TestCase):
         self.assertNotIn('from build_tools.integrations.omp.omp_configuration_smoke import qualify',(root/'build_tools/validation/hem_model_smoke.py').read_text())
         shell=(root/'build_tools/model-smoke.sh').read_text()
         self.assertNotIn("for name in ('pi', 'opencode', 'omp'):",shell)
-        self.assertIn("else ['--profile', 'ci08']", shell)
-        self.assertIn('*model, *qualification], helper=True)',shell)
+        supervisor=(root/'build_tools/validation/model_smoke.py').read_text()
+        self.assertNotIn("for name in ('pi', 'opencode', 'omp'):",supervisor)
+        self.assertIn("else ['--profile', 'ci08']", supervisor)
+        self.assertIn('*model, *qualification], helper=True)',supervisor)
         self.assertIn("'hem_omp_installer_test'",(root/'build_tools/validation/check_installed_cpu.py').read_text())
 
 

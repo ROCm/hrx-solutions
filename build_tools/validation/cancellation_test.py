@@ -99,6 +99,24 @@ class ShellCancellationTest(unittest.TestCase):
     def test_build_cleanup_failure_preserves_cancellation_and_unresolved(self):
         self.cancel_build(failing=True)
 
+    def test_model_setup_does_not_forward_caller_stdin(self):
+        python = self.bin / 'python3'
+        python.write_text('#!' + sys.executable + '\nimport os,sys\nfrom pathlib import Path\n'
+                          'if sys.argv[1:3]==["-m","venv"]:\n'
+                          ' Path(os.environ["FAKE_DOCKER"],"setup-input").write_text(sys.stdin.read())\n'
+                          ' sys.exit(23)\n'
+                          'else: os.execv(sys.executable,[sys.executable,*sys.argv[1:]])\n')
+        python.chmod(0o700)
+        wheel = self.root / 'fake.whl'
+        wheel.touch()
+        result = subprocess.run(
+            ['bash', str(REPO / 'build_tools/model-smoke.sh'), str(wheel), str(self.root / 'run')],
+            env=self.env, input='caller input must remain outside setup children\n',
+            capture_output=True, text=True, timeout=12)
+        self.assertEqual(result.returncode, 23, (result.stdout, result.stderr))
+        self.assertEqual((self.root / 'setup-input').read_text(), '')
+        self.assertEqual(json.loads(self.cleanup.read_text())['status'], 'complete')
+
     def test_model_setup_sigterm_reaps_only_owned_setup_session(self):
         python = self.bin / 'python3'
         python.write_text('#!' + sys.executable + '\nimport os,sys,time\nfrom pathlib import Path\n'
