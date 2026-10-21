@@ -133,7 +133,8 @@ class DeliveryWiringTest(unittest.TestCase):
         build = (source / '.github/workflows/build_python_wheel.yml').read_text()
         for required in ('LOOM_OPENCODE_TEST_NODE:', 'build_tools/stage-opencode-runtime.sh',
                          'Check installed UI integrations from the repaired wheel',
-                         'build_tools/check-ui-integrations.sh', "'textual>=0.47,<2'"):
+                         'build_tools/check-ui-integrations.sh',
+                         '-m build_tools.ci_tools.source_tests install'):
             self.assertIn(required, build)
         helper = (source / 'build_tools/hem_model_smoke.py').read_text()
         self.assertNotIn('from opencode_configuration_smoke import qualify', helper)

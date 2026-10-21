@@ -248,14 +248,15 @@ class RunnerTest(unittest.TestCase):
             runner.run / 'opencode-runtime', runner.run / 'omp-runtime'])
         self.assertEqual(command.call_args.kwargs['cwd'], runner.run)
 
-    def test_source_tests_install_and_verify_tui_runtime_dependency(self):
+    def test_source_tests_use_shared_setup_and_both_discovery_suites(self):
         runner = self.runner()
         with mock.patch.object(runner, 'command') as command:
             runner.source_tests()
-        install = command.call_args_list[1].args[0]
-        verify = command.call_args_list[2].args[0]
-        self.assertIn('textual>=0.47,<2', install)
-        self.assertIn('textual.__file__', verify[-1])
+        venv = runner.run / 'source-venv'
+        self.assertEqual(command.call_args_list, [
+            mock.call(['python3', '-m', 'venv', venv]),
+            *(mock.call([venv / 'bin/python', '-m', 'build_tools.ci_tools.source_tests', action])
+              for action in ('install', 'verify', 'build_tools', 'tests'))])
 
     def test_failure_preserves_original_code_and_stops(self):
         runner = self.runner('--cpu-only')

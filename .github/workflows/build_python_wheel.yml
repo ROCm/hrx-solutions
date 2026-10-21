@@ -55,8 +55,7 @@ jobs:
       - name: Install Python test requirements
         run: |
           env -u PYTHONPATH -u PYTHONHOME python3 -m venv "${RUNNER_TEMP}/hem-source-venv"
-          env -u PYTHONPATH -u PYTHONHOME "${RUNNER_TEMP}/hem-source-venv/bin/python" -m pip install \
-            'setuptools>=77' 'wheel>=0.45' 'packaging>=24.2' 'textual>=0.47,<2'
+          env -u PYTHONPATH -u PYTHONHOME "${RUNNER_TEMP}/hem-source-venv/bin/python" -m build_tools.ci_tools.source_tests install
       - name: Stage and check source UI integrations
         run: |
           bash build_tools/stage-pi-runtime.sh "${RUNNER_TEMP}/pi-runtime"
@@ -76,9 +75,9 @@ jobs:
           # Unit-test fixtures must not inherit the enclosing CI run's identity.
           unset PYTHONPATH PYTHONHOME GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
           python="${RUNNER_TEMP}/hem-source-venv/bin/python"
-          "$python" -c 'import os,site,sys,setuptools,packaging,textual; from pathlib import Path; assert sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE; assert "include-system-site-packages = false" in (Path(sys.prefix)/"pyvenv.cfg").read_text(); assert not os.environ.get("PYTHONPATH") and not os.environ.get("PYTHONHOME"); assert all(Path(m.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()) for m in (setuptools,packaging,textual)); print(sys.executable, setuptools.__file__, packaging.__file__, textual.__file__)'
-          "$python" -m unittest discover -s build_tools -p '*_test.py' -v
-          "$python" -m unittest discover -s tests -p '*_test.py' -v
+          "$python" -m build_tools.ci_tools.source_tests verify
+          "$python" -m build_tools.ci_tools.source_tests build_tools
+          "$python" -m build_tools.ci_tools.source_tests tests
       - name: Start cache measurements
         if: inputs.use_bazel_cache
         continue-on-error: true
