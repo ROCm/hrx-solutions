@@ -60,7 +60,7 @@ class ModelCliTest(unittest.TestCase):
 
     def test_observational_packaged_inventory_and_preview_do_not_create_registry(self):
         pipelines, _ = self.invoke('pipeline', 'list')
-        self.assertEqual({item['pipeline'] for item in pipelines['items']}, {'qwen', 'qwen-08b'})
+        self.assertEqual({item['pipeline'] for item in pipelines['items']}, {'qwen', 'qwen-08b', 'moonshine-streaming-tiny'})
         info, _ = self.invoke('pipeline', 'show', 'qwen-08b')
         self.assertEqual(info['defaults']['context_capacity'], 8192)
         self.assertFalse(info['capabilities']['mtp'])

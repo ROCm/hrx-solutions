@@ -24,6 +24,23 @@ class ModelFiles:
         return self.fragments or (self.weights,)
 
 
+@dataclass(frozen=True)
+class NamedAsset:
+    """One catalog-declared file; roles need not be unique."""
+    role: str
+    logical_path: str
+    path: Path
+
+
+@dataclass(frozen=True)
+class CatalogAssets:
+    """Complete caller-prepared files, without GGUF or tokenizer assumptions."""
+    pipeline: str
+    contract: str
+    directory: Path
+    files: tuple[NamedAsset, ...]
+
+
 def readable_file(path: Path) -> bool:
     try:
         if not path.is_file():

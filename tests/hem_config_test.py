@@ -190,4 +190,20 @@ class HemConfigTest(unittest.TestCase):
             body=json.loads(stdout.getvalue())
             entries=body.get('items',[body])
             self.assertTrue(entries)
-            self.assertTrue(all('compatibility' in entry and 'defaults' in entry and 'limits' in entry for entry in entries))
+            if 'items' in body:
+                self.assertEqual({entry['pipeline'] for entry in entries},
+                                 {'qwen','qwen-08b','moonshine-streaming-tiny'})
+            for entry in entries:
+                self.assertIn('defaults',entry)
+                self.assertIn('limits',entry)
+                if entry['pipeline'] in ('qwen','qwen-08b'):
+                    self.assertIn('compatibility',entry)
+                    self.assertIn('mtp',entry['capabilities'])
+                else:
+                    self.assertEqual(entry['pipeline'],'moonshine-streaming-tiny')
+                    self.assertEqual(entry['kind'],'recognition')
+                    self.assertEqual(entry['check_kind'],'acquisition-presence')
+                    self.assertEqual(entry['defaults'],{'pending_requests':4,'options':{}})
+                    self.assertEqual({asset['path'] for asset in entry['assets']},
+                                     {'model.safetensors','tokenizer.json','config.json','rotary.safetensors'})
+                    self.assertNotIn('compatibility',entry)

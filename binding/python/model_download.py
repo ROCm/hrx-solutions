@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 
-from . import hem_display, model_store, pipeline_validation
+from . import curated_catalog, hem_display, model_store, pipeline_validation
 from .qwen_validation import load_profile
 
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -20,7 +20,18 @@ _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 def recipes() -> list[dict]:
     catalog = []
-    for pipeline in pipeline_validation.available_pipelines():
+    pipelines = pipeline_validation.available_pipelines()
+    # Keep existing Qwen recipe ordering when adding curated acquisition entries.
+    for pipeline in (*[item for item in pipelines if item not in curated_catalog.CATALOGS],
+                     *[item for item in pipelines if item in curated_catalog.CATALOGS]):
+        if pipeline in curated_catalog.CATALOGS:
+            entry = curated_catalog.load_catalog(pipeline)
+            if entry.recipe is not None:
+                descriptor = dict(entry.recipe, pipeline=pipeline,
+                                  asset_contract=entry.contract, check_kind='acquisition-presence')
+                _sources(descriptor)
+                catalog.append(descriptor)
+            continue
         profile = load_profile(pipeline_validation.resolve_catalog(pipeline))
         if "download_recipe" not in profile:
             continue
@@ -57,6 +68,18 @@ def cache_root() -> Path:
 
 
 def _sources(recipe: dict) -> list[dict]:
+    if 'sources' in recipe:
+        sources = recipe['sources']
+        if not isinstance(sources, list) or not sources:
+            raise model_store.ModelImportError('Named recipe must specify pinned HF sources')
+        for source in sources:
+            if (not isinstance(source, dict) or
+                    set(source) != {'role', 'kind', 'repo_id', 'revision', 'filename'} or
+                    source['kind'] != 'huggingface' or not isinstance(source['role'], str) or
+                    not source['role']):
+                raise model_store.ModelImportError('Invalid named recipe source')
+        _check_sources(sources)
+        return sources
     gguf = recipe["gguf"]
     tokenizer = recipe["tokenizer"]
     sources = [{"role": "gguf", "kind": "huggingface", "repo_id": gguf["repo_id"],
@@ -65,8 +88,13 @@ def _sources(recipe: dict) -> list[dict]:
                     "revision": tokenizer["revision"], "filename": tokenizer["filename"]})
     if len(sources) < 2:
         raise model_store.ModelImportError("Recipe must specify GGUF and tokenizer files")
+    _check_sources(sources)
+    return sources
+
+
+def _check_sources(sources):
     for source in sources:
-        if not _COMMIT.fullmatch(source["revision"]):
+        if not isinstance(source['revision'], str) or not _COMMIT.fullmatch(source["revision"]):
             raise model_store.ModelImportError("Bundled recipes must pin each repository to an immutable commit")
         for key in ("repo_id", "filename"):
             value = source[key]
@@ -74,7 +102,6 @@ def _sources(recipe: dict) -> list[dict]:
                 raise model_store.ModelImportError(f"Invalid recipe {key}: {value!r}")
     if len({(s['repo_id'], s['revision'], s['filename']) for s in sources}) != len(sources):
         raise model_store.ModelImportError("Recipe contains duplicate files")
-    return sources
 
 
 def _cache_path(source: dict) -> Path:

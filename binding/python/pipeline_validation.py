@@ -16,6 +16,7 @@ from typing import Protocol, Optional
 import sys
 import threading
 
+from . import curated_catalog
 from .runtime_paths import runtime_cache_dir
 from .gguf import GGUF, inspect_gguf_set
 from .model_store import ModelFiles
@@ -46,6 +47,8 @@ _QWEN_CATALOGS = {"qwen": "qwen_27b", "qwen-08b": "qwen_08b"}
 
 def resolve_catalog(pipeline: str) -> Path:
     """Resolve an explicitly selected catalog in source or installed layouts."""
+    if pipeline in curated_catalog.CATALOGS:
+        return curated_catalog.catalog_path(pipeline)
     package = Path(__file__).resolve().parent
     relative = Path("qwen") / _QWEN_CATALOGS[pipeline] if pipeline in _QWEN_CATALOGS else Path(pipeline)
     candidates = (
@@ -146,7 +149,7 @@ def register_pipeline(pipeline: Pipeline) -> None:
 
 def available_pipelines() -> tuple[str, ...]:
     """Return the registered pipeline identifiers in stable order."""
-    return tuple(sorted(_PIPELINES))
+    return tuple(sorted(set(_PIPELINES) | set(curated_catalog.CATALOGS)))
 
 
 def validate_model(

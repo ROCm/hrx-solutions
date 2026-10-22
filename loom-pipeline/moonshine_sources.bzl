@@ -1,0 +1,2 @@
+# Explicit Moonshine artifact inputs; Qwen inventory remains independent.
+MOONSHINE_ARTIFACTS = {'prepare.loombc': ['prepare.loom'], 'control.loombc': ['control.loom'], 'weights.loombc': ['weights.loom'], 'providers.loombc': ['convolution.loom', 'decoder.loom', 'decoder_attention.loom', 'decoder_state.loom', 'encoder.loom', 'encoder_attention.loom', 'encoder_state.loom', 'frontend.loom', 'initialize.loom', 'normalization.loom', 'pointwise.loom', 'projection.loom', 'reset.loom']}

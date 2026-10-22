@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import shlex
 import shutil
 import textwrap
@@ -87,7 +88,8 @@ def warnings(data):
 def settings(data, width):
     return table(['Setting', 'Submitted value'],
                  [(key, 'Not applicable' if key == 'mtp_depth' and data.get('mtp') is False else data[key])
-                  for key in (*SETTINGS, 'mtp') if key in data], width)
+                  for key in (*SETTINGS, 'mtp', *(key for key in data if key not in SETTINGS and key != 'mtp'))
+                  if key in data], width)
 
 
 def target(args, action, name):
@@ -101,6 +103,8 @@ def target(args, action, name):
 
 def model_state(data):
     state = data.get('state')
+    if state == 'ready' and data.get('check_kind') == 'acquisition-presence':
+        return 'Acquisition complete (native unprobed)'
     return 'Structurally valid' if state == 'ready' else text(state)
 
 
@@ -116,7 +120,7 @@ def model(args, data, width):
         if not items:
             return ['No local models are registered.', 'Discover download recipes: loom-control model available']
         return [table(['Model', 'Asset / validation state', 'Pipeline'],
-                      [(item.get('model', item.get('id')), model_state(item), item.get('pipeline')) for item in items], width),
+                      [(item.get('model', item.get('id')), model_state(item), item.get('pipeline') or item.get('intended_pipeline')) for item in items], width),
                 *[f'{item.get("model", item.get("id"))}: {warnings(item)}' for item in items if warnings(item)]]
     identifier = data.get('model', getattr(args, 'model', None))
     if data.get('dry_run'):
@@ -124,7 +128,20 @@ def model(args, data, width):
                 details([('Recipe', (data.get('recipe') or {}).get('id')),
                          ('Offline cache only', data.get('offline'))]),
                 *[details([('Asset', item.get('filename')), ('Cached', item.get('cached')),
-                           ('Cache path', item.get('cache_path'))]) for item in data.get('files', [])]]
+                           ('Cache path', item.get('cache_path'))]) for item in data.get('files', [])],
+                *[details([('Required generated asset', item.get('path')), ('Role', item.get('role'))])
+                  for item in data.get('generated', [])]]
+    if data.get('check_kind') == 'acquisition-presence':
+        lines = [f'Model {identifier}: {model_state(data)}.', warnings(data),
+                 details([('Pipeline', data.get('intended_pipeline', data.get('pipeline'))),
+                          ('Check', 'Acquisition completion and file presence'),
+                          ('Native readiness', 'Unprobed')])]
+        lines.extend(details([('Role', asset.get('role')), ('Asset', asset.get('logical_path')),
+                              ('Path', asset.get('path'))]) for asset in data.get('named_assets', []))
+        lines.append('Local acquisition checks do not prove native loading or inference readiness.')
+        if 'instances' in data:
+            lines.append('Referencing instances: ' + str(len(data['instances'])))
+        return lines
     lead = (f'Model {identifier}: {model_state(data)}.' if command == 'show' else
             f'Model {identifier}: {model_state(data)} after {command}.')
     if command != 'show':
@@ -168,10 +185,18 @@ def model(args, data, width):
 def pipeline(args, data, width):
     if args.command == 'list':
         items = data.get('items', [])
-        return [table(['Pipeline', 'Profile', 'MTP supported'],
-                      [(item.get('pipeline'), item.get('profile'), (item.get('capabilities') or {}).get('mtp'))
+        return [table(['Pipeline', 'Profile / kind', 'MTP supported'],
+                      [(item.get('pipeline'), item.get('profile', item.get('kind')), (item.get('capabilities') or {}).get('mtp'))
                        for item in items], width) if items else 'No pipelines are packaged.',
                 'Inspect defaults and limits: loom-control pipeline show PIPELINE']
+    if data.get('check_kind') == 'acquisition-presence':
+        return [details([('Pipeline', data.get('pipeline')), ('Kind', data.get('kind')),
+                         ('Asset contract', data.get('asset_contract')), ('Catalog', data.get('catalog'))]),
+                table(['Role', 'File', 'Required'],
+                      [(item['role'], item['path'], item['required']) for item in data.get('assets', [])], width),
+                'Fixed native defaults: ' + json.dumps(data.get('defaults', {}), sort_keys=True),
+                'Acquisition/presence checks only; native preparation/loading is authoritative.',
+                'Qwen serving flags and --config do not apply.']
     defaults, limits = data.get('defaults', {}), data.get('limits', {})
     rows = []
     for key in (*SETTINGS, 'mtp'):
@@ -309,7 +334,7 @@ def instance(args, data, width):
     return [f'Deployment exported for instance {name}.', details([
         ('Output', data.get('output')), ('Model', data.get('model')), ('Pipeline', data.get('pipeline'))]),
         settings(data.get('settings') or {}, width),
-        'Preserve the referenced weights, tokenizer and pipeline modules through retirement.',
+        'Preserve all referenced model assets and pipeline programs/policies through retirement.',
         'Registration curl is printed on stderr. Replace SERVER:PORT with a compatible server endpoint.']
 
 

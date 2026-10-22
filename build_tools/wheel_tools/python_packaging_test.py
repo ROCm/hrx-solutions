@@ -1,15 +1,17 @@
 """Model validation assets and removal of the obsolete native checker."""
 
 from pathlib import Path
+from contextlib import ExitStack
 import os
 import json
 import tempfile
+import shutil
 import unittest
 from unittest.mock import patch
 import zipfile
 
 from build_tools.wheel_tools import python_packaging as packaging
-from build_tools.model_tools import loom_catalog
+from build_tools.model_tools import loom_catalog, moonshine_catalog, moonshine_preparer
 from build_tools.wheel_tools.validate_wheel import HEM_MODULES, OBSOLETE_MODULES, OBSOLETE_ENTRY_POINTS, REQUIRED_ENTRY_POINTS, PI_ASSETS, validate_wheel
 from binding.python import hem_pi_assets, hem_pi_contracts
 import hashlib
@@ -26,6 +28,9 @@ class PackagingTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root=Path(temporary.name)
         self.decode = patch.object(loom_catalog, 'validate_bytecode_artifact').start()
+        self.preparer_data = {'prepare_assets.py': b'# synthetic trusted tool\n', 'model.json': b'{}\n'}
+        patch.object(moonshine_preparer, 'FILES', {name:hashlib.sha256(data).hexdigest()
+                                                for name,data in self.preparer_data.items()}).start()
         self.addCleanup(patch.stopall)
 
     def test_build_includes_catalog_but_native_mapping_only_contains_server(self):
@@ -38,7 +43,8 @@ class PackagingTest(unittest.TestCase):
         self.assertEqual(packaging.BAZEL_TARGETS,{'loom-serve':'//:loom-serve'})
         self.assertEqual(query.call_count,1)
         self.assertIn(packaging.BAZEL_TARGETS['loom-serve'],run.call_args.args[0])
-        self.assertEqual(run.call_args.args[0][-1],loom_catalog.CATALOG_TARGET)
+        self.assertIn(loom_catalog.CATALOG_TARGET,run.call_args.args[0])
+        self.assertEqual(run.call_args.args[0][-1],moonshine_catalog.TARGET)
         self.assertNotIn('epoch_check',' '.join(run.call_args.args[0]))
 
     def test_explicit_cache_disable_overrides_stale_rc_for_build_and_query(self):
@@ -48,6 +54,32 @@ class PackagingTest(unittest.TestCase):
         self.assertIn("--disk_cache=", query.call_args.args[2])
         self.assertIn("--action_env=HRX_WHEEL_COMPILER_INPUTS=", run.call_args.args[0])
         self.assertIn("--host_action_env=HRX_WHEEL_COMPILER_INPUTS=", run.call_args.args[0])
+
+    def test_catalog_stages_share_one_required_decoder_lookup(self):
+        bazel, rocm, decoder = (self.root / name for name in ('bazel', 'rocm', 'decoder'))
+        options = ('--config=opt', '--disk_cache=')
+        environment = {'HRX_BAZEL_CACHE_ENABLED': '0'}
+        command = packaging.BazelBuildPy(packaging.BinaryDistribution())
+        command.build_lib = str(self.root / 'build')
+        with ExitStack() as stack:
+            for name, result in (
+                ('validate_wheel_platform', None), ('discover_bazel', bazel),
+                ('discover_rocm_root', rocm), ('build_native_executables', {}),
+                ('wheel_build_options', options), ('bazel_environment', environment),
+                ('discover_hrx_source', self.root / 'hrx'), ('stage_native_payload', []),
+            ):
+                stack.enter_context(patch.object(packaging, name, return_value=result))
+            stack.enter_context(patch.object(packaging.build_py, 'run'))
+            stack.enter_context(patch.object(loom_catalog, 'query_bytecode_outputs', return_value={}))
+            stack.enter_context(patch.object(moonshine_catalog, 'query_outputs', return_value={}))
+            lookup = stack.enter_context(patch.object(loom_catalog, 'query_decoder', return_value=decoder))
+            qwen = stack.enter_context(patch.object(loom_catalog, 'stage_bytecode_catalog', return_value=[]))
+            moonshine = stack.enter_context(patch.object(moonshine_catalog, 'stage', return_value=[]))
+            command.run()
+        lookup.assert_called_once_with(bazel, packaging.REPO_ROOT, build_options=options,
+                                       environment=environment)
+        self.assertIs(qwen.call_args.kwargs['decoder'], decoder)
+        self.assertIs(moonshine.call_args.kwargs['decoder'], decoder)
 
     def test_metrics_only_apply_to_native_build(self):
         with patch.dict(os.environ, {"HRX_BAZEL_METRICS_DIR": str(self.root / "metrics")}), patch.object(packaging, "_query_bazel_output", return_value=self.root / "server") as query, patch.object(packaging.subprocess, "run") as run:
@@ -65,6 +97,10 @@ class PackagingTest(unittest.TestCase):
         hrx=self.root/'hrx'
         hrx.mkdir()
         (hrx/'LICENSE').write_text('license')
+        tool = hrx / moonshine_preparer.UPSTREAM
+        tool.mkdir(parents=True)
+        for name, data in self.preparer_data.items():
+            (tool/name).write_bytes(data)
         server=self.root/'server'
         server.write_text('server')
         native=self.root/'_native'
@@ -89,6 +125,17 @@ class PackagingTest(unittest.TestCase):
             product.write_bytes(b'LOOMfixture')
             products[architecture] = product
         catalog=loom_catalog.stage_bytecode_catalog(package / 'loom-pipeline/llm', products, inventory, decoder=Path("fixture-decoder"))
+        moonshine_products = {}
+        for name in moonshine_catalog.ARTIFACTS:
+            product = self.root / 'outputs' / name
+            product.parent.mkdir(parents=True, exist_ok=True)
+            product.write_bytes(b'LOOMfixture')
+            moonshine_products[name] = product
+        def fixture_roots(path, sources, root, decoder, policy=False):
+            return moonshine_catalog.roots('\n'.join((root/source).read_text() for source in sources))
+        with patch.object(moonshine_catalog, 'validate_artifact', side_effect=fixture_roots):
+            catalog.extend(moonshine_catalog.stage(package/'loom-pipeline'/moonshine_catalog.RELATIVE,
+                moonshine_products,packaging.REPO_ROOT,decoder=Path('fixture-decoder')))
         members={
             'hrx_solutions/_native/bin/loom-serve':b'server',
             'hrx_solutions/_native/share/loom-serve/LICENSE':b'license',
@@ -96,10 +143,22 @@ class PackagingTest(unittest.TestCase):
             'hrx_solutions/_native/lib/libhsa-amd-aqlprofile64.so.1':b'profile',
         }
         members.update({'hrx_solutions/'+path.relative_to(package).as_posix():path.read_bytes() for path in catalog})
+        hrx = self.root / 'fixture-hrx'
+        tool = hrx / moonshine_preparer.UPSTREAM
+        tool.mkdir(parents=True, exist_ok=True)
+        (hrx/'LICENSE').write_text('license')
+        for name,data in self.preparer_data.items():
+            (tool/name).write_bytes(data)
+        destination = package / '_native' / moonshine_preparer.RELATIVE
+        if destination.exists():
+            shutil.rmtree(destination)
+        moonshine_preparer.stage(package/'_native', hrx)
+        members.update({'hrx_solutions/'+path.relative_to(package).as_posix():path.read_bytes()
+                        for path in destination.iterdir()})
         members.update({'hrx_solutions/pi_extension/'+name:
                         (packaging.REPO_ROOT/'binding/python/pi_extension'/name).read_bytes()
                         for name in PI_ASSETS})
-        for name in ('pipeline_validation.py','runtime_paths.py','model_store.py','model_download.py','gguf.py','qwen_validation.py','loom_serve.py', *(name+'.py' for name in HEM_MODULES)):
+        for name in ('moonshine_preparation.py','moonshine_preparer_identity.py','curated_catalog.py','pipeline_validation.py','runtime_paths.py','model_store.py','model_download.py','gguf.py','qwen_validation.py','loom_serve.py', *(name+'.py' for name in HEM_MODULES)):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         version=read_package_version()
         prefix=f'hrx_solutions-{version}.dist-info/'

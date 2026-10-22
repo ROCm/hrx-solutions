@@ -236,6 +236,36 @@ class TransportTest(unittest.TestCase):
                 client.config()
             self.assertEqual(len(records), 2)
 
+    def test_audio_model_wire_routes_and_only_model_404_is_absence(self):
+        from binding.python import hem_openwebui_stt as stt
+        audio = dict(tts=dict.fromkeys(stt.TTS_STRINGS, ''),
+                     stt=dict(dict.fromkeys(stt.STT_STRINGS, ''), MISTRAL_USE_CHAT_COMPLETIONS=False),
+                     realtime={'OPENAI_API_KEY': FOREIGN})
+        def respond(h, _):
+            if h.command == 'GET' and h.path.startswith('/api/v1/models/model?id='):
+                reply(h, {'secret': FOREIGN}, status=404)
+            else:
+                reply(h, audio if '/audio/' in h.path else True)
+        with fixture(respond) as (target, records):
+            client = WebUIClient(target, TOKEN, Deadline.after())
+            self.assertEqual(client.audio_config(), audio)
+            body = {'tts': audio['tts'], 'stt': audio['stt']}
+            client.update_audio(body)
+            self.assertIsNone(client.model('prefix.name'))
+            client.create_model({'id': 'prefix.name'})
+            client.delete_model('prefix.name')
+            self.assertEqual([(r[0], r[1]) for r in records], [
+                ('GET', '/api/v1/audio/config'), ('POST', '/api/v1/audio/config/update'),
+                ('GET', '/api/v1/models/model?id=prefix.name'), ('POST', '/api/v1/models/create'),
+                ('POST', '/api/v1/models/model/delete')])
+            self.assertEqual(json.loads(records[1][3]), body)
+            self.assertEqual(json.loads(records[-1][3]), {'id': 'prefix.name'})
+            self.assertTrue(all(r[2]['Authorization'] == 'Bearer ' + TOKEN for r in records))
+        for code in (401, 403, 500):
+            with fixture(lambda h, _: reply(h, {'secret': FOREIGN}, status=code)) as (target, _):
+                with self.assertRaises(HemError) as error: WebUIClient(target, TOKEN, Deadline.after()).model('target')
+                self.assertNotIn(FOREIGN, str(error.exception))
+
     def test_oversize_without_content_length_is_bounded(self):
         def oversized(h, _):
             h.send_response(200)

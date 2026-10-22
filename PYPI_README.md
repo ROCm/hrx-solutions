@@ -6,10 +6,15 @@ define application structure and model policy in Loom source, backed by
 reusable compiler, execution, and memory services. Developers and agents can
 run, inspect, and adapt these examples for their own workloads.
 
-The current package provides Loom Serve for streaming LLM chat on AMD GPUs.
-It includes the native server, Python GGUF compatibility validation, the Qwen
-two complete Loom bytecode pipelines (`pipeline.loombc`, one per supported model specification), and the required ROCm runtime libraries.
+The current package provides Loom Serve for streaming LLM chat and finite
+Moonshine speech recognition on AMD GPUs. It includes the native server, Qwen
+GGUF compatibility checks and two complete Qwen bytecode pipelines, the selected
+Moonshine bytecode package and HRX asset preparer, and the required ROCm libraries.
 Model weights are downloaded separately.
+For Moonshine acquisition, use Python 3.12 or newer and install
+`hrx-solutions[moonshine]`; complete prepared local imports do not need that extra.
+See [Moonshine speech recognition](https://github.com/ROCm/hrx-solutions/blob/main/docs/solutions/loom-control.md#moonshine-speech-recognition)
+for acquisition, transcription and Open WebUI dictation.
 
 The serving solution makes model computation, weight preparation, and chat
 policy explicit in source while sharing native scheduling and execution

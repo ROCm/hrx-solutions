@@ -1,0 +1,61 @@
+{
+  "format": 1,
+  "id": "moonshine-streaming-tiny",
+  "contract": "moonshine-streaming-tiny-assets-v1",
+  "description": "Moonshine streaming tiny English speech recognition",
+  "assets": [
+    {
+      "role": "checkpoint",
+      "path": "model.safetensors",
+      "required": true
+    },
+    {
+      "role": "tokenizer",
+      "path": "tokenizer.json",
+      "required": true
+    },
+    {
+      "role": "configuration",
+      "path": "config.json",
+      "required": true
+    },
+    {
+      "role": "rotary",
+      "path": "rotary.safetensors",
+      "required": true
+    }
+  ],
+  "download_recipe": {
+    "id": "moonshine-streaming-tiny",
+    "description": "Pinned Moonshine streaming tiny with HRX-owned rotary preparation",
+    "sources": [
+      {"role":"checkpoint","kind":"huggingface","repo_id":"moonshine-ai/moonshine-streaming-tiny","revision":"f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a","filename":"model.safetensors"},
+      {"role":"tokenizer","kind":"huggingface","repo_id":"moonshine-ai/moonshine-streaming-tiny","revision":"f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a","filename":"tokenizer.json"},
+      {"role":"configuration","kind":"huggingface","repo_id":"moonshine-ai/moonshine-streaming-tiny","revision":"f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a","filename":"config.json"}
+    ],
+    "generated": [{"role":"rotary","path":"rotary.safetensors"}]
+  },
+  "definition": {
+    "kind": "recognition",
+    "prepare": "prepare.loom",
+    "control": "control.loom",
+    "sources": [
+      "convolution.loom",
+      "decoder.loom",
+      "decoder_attention.loom",
+      "decoder_state.loom",
+      "encoder.loom",
+      "encoder_attention.loom",
+      "encoder_state.loom",
+      "frontend.loom",
+      "initialize.loom",
+      "normalization.loom",
+      "pointwise.loom",
+      "projection.loom",
+      "reset.loom"
+    ],
+    "assets": ".",
+    "pending_requests": 4,
+    "options": {}
+  }
+}

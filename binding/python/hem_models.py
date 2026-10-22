@@ -10,12 +10,13 @@ import os
 from pathlib import Path
 import shutil
 
-from . import hem_config, hem_display, model_download
+from . import curated_catalog, hem_config, hem_display, model_download
 from .gguf import inspect_gguf_set
 from .hem_common import HemError, InvalidInput
-from .model_store import ModelFiles, ModelImportError, readable_file, validate_model_id
+from .model_store import CatalogAssets, ModelFiles, ModelImportError, readable_file, validate_model_id
 
 _INDEX = 'model.safetensors.index.json'
+_GENERATED_RECEIPT = '.loom-acquisition.json'
 
 
 def _assets(ggufs, tokenizer, alias):
@@ -33,6 +34,8 @@ def _assets(ggufs, tokenizer, alias):
 
 
 def _files(record, directory=None):
+    if curated_catalog.is_curated_record(record):
+        return curated_catalog.record_files(record, directory)
     directory = Path(directory or record['directory'])
     members = tuple(directory / item['logical_path'] for item in record['assets'][:-1])
     return ModelFiles(members[0] if len(members) == 1 else directory / _INDEX,
@@ -41,9 +44,11 @@ def _files(record, directory=None):
 
 def _evidence(files):
     result = []
-    for path in dict.fromkeys((*files.gguf_paths, files.weights, files.tokenizer)):
+    paths = (tuple(asset.path for asset in files.files) if isinstance(files, CatalogAssets)
+             else (*files.gguf_paths, files.weights, files.tokenizer))
+    for path in dict.fromkeys(paths):
         if not readable_file(path):
-            raise InvalidInput(f'Model asset is missing, empty or unreadable: {path}')
+            raise InvalidInput(f'Model asset is missing or unreadable: {path}')
         stat = path.stat()
         result.append(dict(path=str(path), device=stat.st_dev, inode=stat.st_ino,
                            size=stat.st_size, mtime_ns=stat.st_mtime_ns, ctime_ns=stat.st_ctime_ns))
@@ -85,6 +90,36 @@ def _index(files):
         _atomic_file(files.weights, lambda stream: stream.write(content))
 
 
+def _generated_receipt(record, directory=None, *, create=False):
+    """Keep the first published generated identity separate from revalidation."""
+    provenance = record.get('provenance', {})
+    if (not isinstance(provenance, dict) or provenance.get('kind') != 'download' or
+            provenance.get('pipeline') != 'moonshine-streaming-tiny'):
+        return
+    root = Path(directory or record['directory'])
+    rotary = root / 'rotary.safetensors'
+    receipt = root / _GENERATED_RECEIPT
+    try:
+        if rotary.is_symlink() or not readable_file(rotary):
+            raise ValueError('owned generated rotary is missing or aliased')
+        stat = rotary.stat()
+        expected = dict(format=1, generated={'rotary.safetensors': dict(
+            device=stat.st_dev, inode=stat.st_ino, size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns, ctime_ns=stat.st_ctime_ns)})
+        if create and not os.path.lexists(receipt):
+            pending = record.get('pending') or {}
+            if (pending.get('stage') != 'staging' or str(root) != pending.get('path') or
+                    root.is_symlink() or not root.is_dir() or os.path.lexists(record['directory']) or
+                    any(asset['logical_path'] == _GENERATED_RECEIPT for asset in record['assets'])):
+                raise ValueError('first generated receipt requires an unpublished owned staging directory')
+            content = (json.dumps(expected, sort_keys=True) + '\n').encode()
+            _atomic_file(receipt, lambda stream: stream.write(content))
+        if receipt.is_symlink() or json.loads(receipt.read_text()) != expected:
+            raise ValueError('first generated receipt is invalid or rotary changed')
+    except (OSError, ValueError) as error:
+        raise InvalidInput(f'Generated rotary acquisition identity is unproven; preserve the model and acquire under a new ID: {error}') from error
+
+
 def _populate(record):
     pending = record['pending']
     if not pending or pending['stage'] != 'staging':
@@ -104,6 +139,11 @@ def _populate(record):
             continue
         if not readable_file(source):
             raise HemError(f'Source is missing, empty or unreadable: {source}; incomplete acquisition retained')
+        try:
+            destination.parent.resolve().relative_to(stage.resolve(strict=True))
+        except ValueError as exc:
+            raise HemError('Staged asset parent escapes its reserved directory') from exc
+        destination.parent.mkdir(parents=True, exist_ok=True)
         if asset['ownership'] == 'reference':
             destination.symlink_to(source)
         else:
@@ -115,11 +155,17 @@ def _populate(record):
 
 def _qualify(registry, model_id, pipeline=None):
     record = registry.get_model(model_id)
-    files = _files(record)
     try:
-        _index(files)
+        files = _files(record)
+        _generated_receipt(record)
+        if not isinstance(files, CatalogAssets):
+            _index(files)
         before = _evidence(files)
-        selected = hem_config.select_pipeline(files, pipeline)
+        if isinstance(files, CatalogAssets):
+            curated_catalog.check_assets(files, pipeline)
+            selected = files.pipeline
+        else:
+            selected = hem_config.select_pipeline(files, pipeline)
         after = _evidence(files)
         if before != after:
             raise InvalidInput('Model assets changed during qualification; retry after making inputs stable')
@@ -149,11 +195,27 @@ def _acquire(registry, model_id, assets, provenance, pipeline, obtain=None):
 
 def import_model(registry, model_id, *, ggufs, tokenizer, alias=False, pipeline=None):
     """Import copies (default) or immutable external references, then qualify."""
+    if pipeline in curated_catalog.CATALOGS:
+        raise InvalidInput('Curated pipelines require --assets-dir with their complete prepared file set')
     if isinstance(ggufs, (str, Path)):
         ggufs = [ggufs]
     assets = _assets(ggufs, tokenizer, alias)
     hem_display.emit('Local model acquisition and packaged pipeline validation (no native equivalent)')
     return _acquire(registry, model_id, assets, {'kind': 'import'}, pipeline)
+
+
+def import_assets(registry, model_id, *, directory, pipeline, alias=False):
+    """Copy or alias an explicitly selected, complete caller-prepared file set."""
+    catalog = curated_catalog.load_catalog(pipeline)
+    directory = Path(directory).expanduser().absolute()
+    assets = [dict(logical_path=asset['path'], source_path=str(directory / asset['path']),
+                   ownership='reference' if alias else 'owned', role=asset['role'])
+              for asset in catalog.assets
+              if asset['required'] or os.path.lexists(directory / asset['path'])]
+    provenance = dict(kind='import', format=1, asset_contract=catalog.contract,
+                      pipeline=pipeline, source={'kind': 'caller-prepared'})
+    hem_display.emit('Local acquisition/presence checks only; native loading remains unprobed')
+    return _acquire(registry, model_id, assets, provenance, pipeline)
 
 
 def available():
@@ -178,14 +240,19 @@ def download(registry, recipe_id, *, model_id, pipeline=None, offline=False, dry
     offline = offline or os.environ.get('HF_HUB_OFFLINE', '').upper() in ('1', 'ON', 'YES', 'TRUE')
     files = [model_download.source_status(source) for source in sources]
     paths = [Path(item['cache_path']) for item in files]
-    assets = _assets(paths[:-1], paths[-1], True)
+    named = 'sources' in recipe
+    assets = ([dict(logical_path=source['filename'], source_path=str(path),
+                    ownership='reference', role=source['role'])
+               for source, path in zip(sources, paths)] if named
+              else _assets(paths[:-1], paths[-1], True))
     selected = pipeline or recipe['pipeline']
     commands = [['hf', 'download', source['repo_id'], source['filename'], '--revision',
                  source['revision'], '--cache-dir', str(model_download.cache_root())] for source in sources]
     if dry_run:
         return dict(model=model_id, recipe=recipe, files=files, assets=assets,
                     commands=[hem_display.command(command) for command in commands],
-                    offline=offline, dry_run=True, completed=True, state='preview')
+                    offline=offline, dry_run=True, completed=True, state='preview',
+                    **({'generated': recipe.get('generated', []), 'check_kind': 'acquisition-presence'} if named else {}))
     def obtain():
         for source, command in zip(sources, commands):
             if not model_download.source_status(source)['cached']:
@@ -198,6 +265,43 @@ def download(registry, recipe_id, *, model_id, pipeline=None, offline=False, dry
                     raise HemError(str(exc)) from exc
                 if not model_download.source_status(source)['cached']:
                     raise HemError('hf did not populate the pinned snapshot; incomplete record retained')
+    if named:
+        if recipe['id'] != 'moonshine-streaming-tiny' or selected != recipe['pipeline']:
+            raise InvalidInput('Unsupported named preparation recipe or pipeline override')
+        from . import moonshine_preparation
+        generated = registry.root / 'models' / model_id / 'rotary.safetensors'
+        assets.append(dict(role='rotary', logical_path='rotary.safetensors',
+                           ownership='owned', source_path=str(generated)))
+        provenance = dict(kind='download', format=1, pipeline=selected,
+                          asset_contract=recipe['asset_contract'], source=recipe,
+                          preparation=dict(revision=moonshine_preparation.REVISION,
+                                           files=moonshine_preparation.TOOL_FILES))
+        with registry.lock('model', model_id):
+            record = registry.prepare_model(model_id, assets=assets, provenance=provenance)
+            pending = record['pending']
+            stage = Path(pending['path']) if pending and pending['stage'] == 'staging' else None
+            needs_rotary = stage is not None and stage.exists() and not os.path.lexists(stage / 'rotary.safetensors')
+            if needs_rotary:
+                moonshine_preparation.preflight()  # Before network acquisition.
+            obtain()
+            if needs_rotary:
+                rotary = moonshine_preparation.prepare(registry, record)
+                try:
+                    _atomic_file(stage / 'rotary.safetensors', lambda stream: stream.write(rotary.read_bytes()))
+                except OSError as error:
+                    raise HemError(f'Could not stage prepared rotary; incomplete acquisition retained: {error}') from error
+            elif stage is None or not stage.exists():
+                # This includes a crash after directory rename but before DB publication.
+                _generated_receipt(record)
+            if stage is not None:
+                try:
+                    _populate(record)
+                    if stage.exists():
+                        _generated_receipt(record, stage, create=True)
+                except OSError as error:
+                    raise HemError(f'Could not populate model; incomplete acquisition retained: {error}') from error
+                registry.publish_model(model_id)
+            return _qualify(registry, model_id, selected)
     return _acquire(registry, model_id, assets, {'kind': 'download', 'recipe': recipe}, selected, obtain)
 
 
@@ -226,9 +330,14 @@ def model_files(registry, model_id, *, pipeline=None):
 def show(registry, model_id):
     """Observational inventory preserves missing aliases and saved qualification."""
     record = registry.get_model(model_id)
-    files = _files(record)
+    files = None
+    named = curated_catalog.is_curated_record(record)
     try:
+        files = _files(record)
         evidence = _evidence(files)
+        if named:
+            curated_catalog.check_assets(files)
+            _generated_receipt(record)
         accessible, error = True, None
     except (OSError, HemError) as exc:
         evidence, accessible, error = None, False, str(exc)
@@ -237,6 +346,12 @@ def show(registry, model_id):
              'missing' if not accessible else
              'ready' if validation and validation['valid'] and validation['evidence'] == evidence else
              'invalid' if validation and not validation['valid'] else 'unvalidated')
+    if named:
+        return dict(record, model=model_id, state=state, accessible=accessible, error=error,
+                    intended_pipeline=record['provenance'].get('pipeline'),
+                    check_kind='acquisition-presence', native_readiness='unprobed',
+                    named_assets=[dict(role=item.role, logical_path=item.logical_path, path=str(item.path))
+                                  for item in files.files] if files else [])
     return dict(record, model=model_id, state=state, accessible=accessible, error=error,
                 weights=str(files.weights), tokenizer=str(files.tokenizer),
                 fragments=[str(path) for path in files.gguf_paths])

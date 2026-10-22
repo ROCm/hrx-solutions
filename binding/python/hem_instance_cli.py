@@ -177,7 +177,7 @@ def run(args, deadline):
         # and atomic output are owned by the shared configuration adapter.
         with registry.lock('model', args.model, deadline=budget):
             files = hem_models.model_files(registry, args.model, pipeline=args.pipeline)
-            hem_display.emit('Local packaged pipeline validation (no native equivalent)')
+            hem_display.emit('Local asset checks (Qwen structural, curated presence); no native equivalent')
             answer = hem_config.export_deployment(files, args.output, args.name or args.model,
                         overrides=_overrides(args), config_path=args.config, pipeline=args.pipeline)
         hem_display.emit('# Registration example: replace SERVER:PORT with your compatible server endpoint.')
@@ -187,7 +187,7 @@ def run(args, deadline):
     server = resolve_server(registry, args.server, args.url)
     manager = ProcessManager(registry)
     if args.command == 'start':
-        hem_display.emit('Local packaged pipeline validation and bookkeeping (no native equivalent)')
+        hem_display.emit('Local asset checks and bookkeeping (Qwen structural, curated presence); no native equivalent')
         return InstanceManager(registry, processes=manager).start(server, args.model, budget,
                     name=args.name, overrides=_overrides(args), config_path=args.config, pipeline=args.pipeline)
     if args.command == 'stop':

@@ -1,0 +1,56 @@
+{
+  "format": 1,
+  "local_patches": {
+    "control.loom": "Recognition host ABI: requested outputs argument restricted to transcript, typed event envelope around unchanged transcript payload, explicit returned packet byte length; numerical state and decoding unchanged.",
+    "prepare.loom": "Recognition host ABI: event capacity 1, transcript output mask 1 and 12-byte event envelope capacity; existing model geometry unchanged."
+  },
+  "notices": {
+    "LICENSE-APACHE-2.0": "579fa63489ca4714793e90fa778b320f84527d7ebee37f1798db487e80c13cc0",
+    "LICENSE.moonshine": "3e23ddd917b4f4d76f2f2543ffda0d02be1decd2e49591383bf8097509911fcf"
+  },
+  "projection": {
+    "prepare.loom": {
+      "policy_from": "weights.loom",
+      "policy_to": "weights.loombc"
+    }
+  },
+  "repository": "https://github.com/ROCm/hrx-system",
+  "revision": "61417137f334cfa828b38d6e9b0f2d7190503f16",
+  "sources": {
+    "control.loom": "ba70b9745b32d149e23e241cfacc04ba4a399b4a69c1090365a867a128852bf1",
+    "convolution.loom": "59fd63d71ca4fcc51cac0f6db9b4890ab339441d10aca86fd9b99d46dd3309a8",
+    "decoder.loom": "e54ee7956f99ef7611b45acd23488413b2896dbcee531300d39441106e672b3d",
+    "decoder_attention.loom": "8efcd3d042dee668833585e7120f08e0cdc4fbc14f9ac08f60c3e67fb7b08d8f",
+    "decoder_state.loom": "7f565d580fe6dde3fe7051d96bc4d4d615a9986d5ae5f4131193867653a95a5c",
+    "encoder.loom": "86da8cde1c485b9bb3e384dfbed8d54eb5d6491c27a34851498e4f09466e62ca",
+    "encoder_attention.loom": "6002a1e226cc441f4c73c098b69ed89f92d86ef3d51c840eff2c0e8be07b48ab",
+    "encoder_state.loom": "a02eeaa4a3f371ab1fbe3257672d535ba54ecac6fd19d779442505c0c04cd934",
+    "frontend.loom": "1a87bed314c760e871c22e282953bb6da404b66695257b7705bff9eec8f8db35",
+    "initialize.loom": "1d5728410c03c9f53d702cb03b3c5d15397df3ee9c60da4b5aa9a57762079900",
+    "normalization.loom": "4e45cc7d97b802c2fb6048fdd576e5390eb95e64a4e70375197e13e0b015dad8",
+    "pointwise.loom": "392898e01b3107014bb86cd2ebfebcfa992f7e71169f6bbce4b4ad22ed8ba550",
+    "prepare.loom": "1341e80923286c8c27e432db680a62cec5e8bc5d288112017eb49ddd6068a8bc",
+    "projection.loom": "723ec85379c898e9a87e3fa33e3a03eed60a8446755108ef9708afc20dff268b",
+    "reset.loom": "47132484bdca1c664fc757995d408877da8de157fdc21b497265008f801e950d",
+    "weights.loom": "37e3fa1c1cafa8230212847d4aed5b57ae711d24420d9988036b3373a302e3af"
+  },
+  "upstream_directory": "experimental/loom_serve/models/moonshine",
+  "upstream_sources": {
+    "control.loom": "4cfeaace5c1d570c45cd41ca7a371413059ec19c31cbb205416c03894592f268",
+    "convolution.loom": "59fd63d71ca4fcc51cac0f6db9b4890ab339441d10aca86fd9b99d46dd3309a8",
+    "decoder.loom": "e54ee7956f99ef7611b45acd23488413b2896dbcee531300d39441106e672b3d",
+    "decoder_attention.loom": "8efcd3d042dee668833585e7120f08e0cdc4fbc14f9ac08f60c3e67fb7b08d8f",
+    "decoder_state.loom": "7f565d580fe6dde3fe7051d96bc4d4d615a9986d5ae5f4131193867653a95a5c",
+    "encoder.loom": "86da8cde1c485b9bb3e384dfbed8d54eb5d6491c27a34851498e4f09466e62ca",
+    "encoder_attention.loom": "6002a1e226cc441f4c73c098b69ed89f92d86ef3d51c840eff2c0e8be07b48ab",
+    "encoder_state.loom": "a02eeaa4a3f371ab1fbe3257672d535ba54ecac6fd19d779442505c0c04cd934",
+    "frontend.loom": "1a87bed314c760e871c22e282953bb6da404b66695257b7705bff9eec8f8db35",
+    "initialize.loom": "1d5728410c03c9f53d702cb03b3c5d15397df3ee9c60da4b5aa9a57762079900",
+    "normalization.loom": "4e45cc7d97b802c2fb6048fdd576e5390eb95e64a4e70375197e13e0b015dad8",
+    "pointwise.loom": "392898e01b3107014bb86cd2ebfebcfa992f7e71169f6bbce4b4ad22ed8ba550",
+    "prepare.loom": "cbb2edff5cca564ab81f9bce59eaec96f1b04ce159806d4f4f93c26b0f050b16",
+    "projection.loom": "723ec85379c898e9a87e3fa33e3a03eed60a8446755108ef9708afc20dff268b",
+    "reset.loom": "47132484bdca1c664fc757995d408877da8de157fdc21b497265008f801e950d",
+    "weights.loom": "37e3fa1c1cafa8230212847d4aed5b57ae711d24420d9988036b3373a302e3af"
+  }
+}

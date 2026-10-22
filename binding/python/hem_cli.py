@@ -66,9 +66,9 @@ def parser():
 
 def parse_args(argv=None):
     args = parser().parse_args(argv)
-    if args.resource == "server" and args.command is not None:
+    if args.resource in ("server", "model") and args.command is not None:
         try:
-            hem_server_cli.validate(args)
+            DOMAINS[args.resource].validate(args)
         except InvalidInput as error:
             error.parser = args._help_parser
             raise

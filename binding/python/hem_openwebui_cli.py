@@ -28,6 +28,8 @@ def configure(parser):
     mode.add_argument('--check', action='store_true')
     mode.add_argument('--disable', action='store_true')
     child.add_argument('--url', help='WebUI management origin; overrides OPENWEBUI_URL')
+    child.add_argument('--stt-server', type=arguments.name, help='Managed server for the selected recognition instance; requires --stt-instance')
+    child.add_argument('--stt-instance', type=arguments.name, help='Unprefixed served recognition instance; requires --stt-server')
 
 
 def resolve_target(override=None):
@@ -49,7 +51,10 @@ def display_request(target):
     def display(method, path, intent=None):
         # Routes are fixed adapter operations, never remote-controlled response fields.
         if (method, path) not in {('GET', '/api/version'), ('GET', '/openai/config'),
-                                  ('POST', '/openai/config/update')}:
+                                  ('POST', '/openai/config/update'), ('GET', '/api/v1/audio/config'),
+                                  ('POST', '/api/v1/audio/config/update'),
+                                  ('POST', '/api/v1/models/create'), ('POST', '/api/v1/models/model/delete')} and not (
+                method == 'GET' and path.startswith('/api/v1/models/model?id=')):
             raise InvalidInput('Unsupported WebUI management display operation')
         command = ('curl --fail --silent --show-error --request ' + method + ' '
                    + shlex.quote(target + path)
@@ -69,6 +74,8 @@ def display_request(target):
 
 def run(args, deadline):
     # Import lazily: help and input validation require no coordinator/runtime assets.
+    if (args.stt_server is None) != (args.stt_instance is None) or args.disable and args.stt_server is not None:
+        raise InvalidInput('Supply both --stt-server and --stt-instance; omit selectors with --disable')
     target = resolve_target(args.url)
     token = os.environ.get('OPENWEBUI_TOKEN')
     if not token:
@@ -79,8 +86,9 @@ def run(args, deadline):
     private_path(value)
     root = value.resolve()
     from .hem_openwebui import configure_openwebui
+    selectors = dict(stt_server=args.stt_server, stt_instance=args.stt_instance) if args.stt_server is not None else {}
     response = configure_openwebui(root, target, token, deadline,
-        check=args.check, disable=args.disable, display=display_request(target))
+        check=args.check, disable=args.disable, display=display_request(target), **selectors)
     response['guidance'] = GUIDANCE
     hem_display.emit(GUIDANCE)
     return response

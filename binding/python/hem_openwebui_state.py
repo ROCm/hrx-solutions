@@ -117,11 +117,15 @@ def _records(rows):
 
 
 def _validate_document(document, root, target):
-    if (not isinstance(document, dict) or set(document) != _DOCUMENT_KEYS or
-            type(document["schema_version"]) is not int or document["schema_version"] != SCHEMA_VERSION or
+    if (not isinstance(document, dict) or
+            set(document) != (_DOCUMENT_KEYS | {"stt"} if document.get("schema_version") == 2 else _DOCUMENT_KEYS) or
+            type(document["schema_version"]) is not int or document["schema_version"] not in (SCHEMA_VERSION, 2) or
             document["owner"] != OWNER or document["hem_root"] != _root(root) or
             document["target_url"] != _origin(target) or not isinstance(document["deployment_id"], str)):
         _fail()
+    if document["schema_version"] == 2:
+        from .hem_openwebui_stt import validate_record
+        validate_record(document["stt"])
     owned = _records(document["connections"])
     pending = document["pending"]
     if pending is not None:

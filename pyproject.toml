@@ -25,6 +25,9 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
+[project.optional-dependencies]
+moonshine = ["huggingface-hub==2.2.0; python_version >= '3.12'", "safetensors==0.8.0; python_version >= '3.12'"]
+
 [project.scripts]
 loom-control = "hrx_solutions.hem_cli:main"
 loom-serve = "hrx_solutions.loom_serve:main"

@@ -67,6 +67,16 @@ try {
     await provider.refreshModels({allowNetwork:true,signal:new AbortController().signal,publish:async({update})=>{update();return true;}});
     assert.equal(provider.getModels().length,0,'post-bind validation missing must not advertise safe models');
   });
+  await test('mixed-text-recognition-keeps-chat-only',async()=>{
+    response=path=>{
+      const text=row(path==='/v1/status'),speech=row(path==='/v1/status');speech.id='dictation';
+      speech.loom.kind='recognition';speech.loom.endpoint='/v1/audio/transcriptions';speech.input_modalities=['audio'];
+      return {object:'list',data:[text,speech]};
+    };
+    const loaded=await load(setup('mixed-text-recognition'));
+    assert.deepEqual(loaded.errors,[]);
+    assert.deepEqual(loaded.runtime.pendingNativeProviderRegistrations[0].provider.getModels().map(r=>r.id),['model-a']);
+  });
   const cases = [
     ['primary-ready',r=>r.loom.parameters={primary:{active:true},image:{active:false}},1],
     ['primary-inactive-image-active',r=>r.loom.parameters={primary:{active:false},image:{active:true}},0],

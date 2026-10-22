@@ -12,33 +12,33 @@ from .hem_config import SETTINGS, EXPORT_RESPONSIBILITY
 from .hem_common import DEFAULT_TIMEOUT
 
 RESOURCES = {
-    'openwebui': 'Owned Open WebUI connections for local managed servers.',
+    'openwebui': 'Owned Open WebUI chat connections and selected finite dictation.',
     'omp': 'Owned Oh My Pi configuration for local managed servers.',
     'opencode': 'Owned OpenCode 2 configuration for local managed servers.',
     'tui': 'Interactive, read-only terminal dashboard for Loom Serve.',
     'pi': 'Owned Pi coding-agent configuration for local managed servers.',
-    'model': 'Checkpoint files acquired or imported locally, with structural validation.',
+    'model': 'Checkpoint files acquired or imported locally; Qwen structural or curated presence checks.',
     'pipeline': 'Packaged model implementation, compatibility rules and serving defaults.',
     'server': 'Saved device/listener settings and the managed native process.',
     'instance': 'A model loaded on a server, with its submitted serving configuration.',
 }
 ACTIONS = {
-    'openwebui': {'configure': ('Configure Open WebUI connections, inspect them, or remove unchanged owned entries.', 'openwebui configure --url http://127.0.0.1:3000\nloom-control openwebui configure --url http://127.0.0.1:3000 --check')},
+    'openwebui': {'configure': ('Configure Open WebUI chat or selected STT, inspect them, or disconnect unchanged owned entries.', 'openwebui configure --url http://127.0.0.1:3000\nloom-control openwebui configure --url http://127.0.0.1:3000 --stt-server local --stt-instance dictation\nloom-control openwebui configure --url http://127.0.0.1:3000 --check')},
     'omp': {'configure': ('Configure Oh My Pi, inspect configuration, or remove unchanged owned entries.', 'omp configure\nloom-control omp configure --check')},
     'opencode': {'configure': ('Configure OpenCode 2, inspect configuration, or remove unchanged owned files.', 'opencode configure\nloom-control opencode configure --check')},
     'tui': {},
     'pi': {'configure': ('Configure Pi, inspect configuration, or remove unchanged owned files.', 'pi configure\nloom-control pi configure --check')},
     'model': {
         'available': ('Discover downloadable recipes (not local inventory).', 'model available'),
-        'download': ('Acquire external checkpoint files and validate them locally.', 'model download qwen35-08b-q5-k-xl --id qwen08'),
-        'import': ('Copy existing GGUF fragments and tokenizer, or alias immutable files.', 'model import qwen08 --gguf weights.gguf --tokenizer tokenizer.json --alias'),
-        'validate': ('Repeat structural compatibility validation; does not prove inference or memory fit.', 'model validate qwen08 --pipeline qwen-08b'),
+        'download': ('Acquire pinned assets; use recipe preparation and applicable local checks, not native readiness.', 'model download qwen35-08b-q5-k-xl --id qwen08'),
+        'import': ('Copy existing GGUF/tokenizer or curated --assets-dir files; --alias keeps immutable references.', 'model import qwen08 --gguf weights.gguf --tokenizer tokenizer.json --alias'),
+        'validate': ('Repeat Qwen structural or curated acquisition/presence checks; does not prove native readiness.', 'model validate qwen08 --pipeline qwen-08b'),
         'list': ('List registered local models and asset accessibility.', 'model list'),
         'show': ('Inspect assets, validation and referencing instances.', 'model show qwen08'),
     },
     'pipeline': {
         'list': ('List packaged pipelines and their capabilities.', 'pipeline list'),
-        'show': ('Inspect exact defaults, limits, capabilities and compatibility rules; no GPU or local model required.', 'pipeline show qwen-08b'),
+        'show': ('Inspect exact defaults, limits, capabilities and compatibility rules; no GPU or local model required.', 'pipeline show qwen-08b\nloom-control pipeline show moonshine-streaming-tiny'),
     },
     'server': {
         'start': ('Start a new named server, or reuse saved settings. New processes start empty; prior instances are not reloaded.', 'server start --name local --device amdgpu --listen 127.0.0.1:8080\nloom-control server start local'),
@@ -70,6 +70,9 @@ This sequence requires an installed wheel, a supported AMD device and the
 external download CLI required by the recipe. Downloads acquire external
 checkpoint files. For existing assets: loom-control model import --help
 Chat requests use the server's HTTP endpoint.
+For finite recognition, inspect: loom-control pipeline show moonshine-streaming-tiny
+Moonshine download requires Python>=3.12 and the wheel's [moonshine] extra;
+complete prepared --assets-dir imports do not run preparation.
 
 Use loom-control RESOURCE --help or loom-control RESOURCE ACTION --help for details.
 Bare root/resource commands show text guidance, even with --json.
@@ -77,7 +80,7 @@ Bare root/resource commands show text guidance, even with --json.
 
 
 def configuration_reference():
-    lines = ['Configuration:',
+    lines = ['Configuration (Qwen only; curated entries reject --config and these flags):',
              '  --config accepts a flat JSON object. Flags override file values, which',
              '  override pipeline defaults. Accepted keys and numeric ranges:']
     for key, (default, maximum, _) in SETTINGS.items():
@@ -142,6 +145,7 @@ def _arguments(parser, resource, command):
         'offline': 'Use only files already present in the download CLI cache; missing cached assets fail.',
         'dry_run': 'Preview acquisition commands; acquire no files and create no model record.',
         'gguf': 'One or more matching GGUF fragment paths; copied by default.',
+        'assets_dir': 'Complete caller-prepared files for an explicit curated --pipeline; copy by default or --alias. No preparation or fetch.',
         'tokenizer': 'Matching tokenizer.json path; copied by default.',
         'alias': 'Reference immutable external files instead of copying; they must remain available.',
         'name': ('Required name for a new saved server; use positional SERVER for a saved start.' if resource == 'server' else
@@ -173,7 +177,9 @@ def _arguments(parser, resource, command):
                      opencode_dir='Explicit OpenCode configuration directory; overrides OPENCODE_CONFIG_DIR. Launch with the printed environment setting.')
     if resource == 'openwebui':
         helps.update(check='Inspect version and connection configuration without writes or probing model availability.',
-                     disable='Remove unchanged owned connections; requires reachable WebUI and administrator authentication. Preserve edits.',
+                     disable='Disconnect unchanged owned STT and remove owned model override/connections; preserve edits and foreign prerequisites. Requires administrator authentication.',
+                     stt_server='Managed STT server; requires --stt-instance. Uses the existing host-network backend connection topology.',
+                     stt_instance='Unprefixed served recognition instance; requires --stt-server. Configure validates readiness; --check remains unprobed.',
                      url='WebUI management HTTP origin with numeric loopback address and explicit port; overrides OPENWEBUI_URL. OPENWEBUI_TOKEN supplies the administrator credential.',
                      timeout=f'Finite positive total management budget in seconds (default: {DEFAULT_TIMEOUT:g}); inspect with --check before retrying an uncertain update.')
     groups = {name: parser.add_argument_group(name) for name in

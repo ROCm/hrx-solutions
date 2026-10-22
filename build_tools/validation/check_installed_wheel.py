@@ -132,7 +132,15 @@ def invoke(*arguments, expected=0, timeout=15):
     return answer, process.stderr
 
 pipelines, _ = invoke("pipeline", "list")
-assert {item["pipeline"] for item in pipelines["items"]} == {"qwen", "qwen-08b"}
+pipeline_entries = {item["pipeline"]:item for item in pipelines["items"]}
+assert set(pipeline_entries) == {"qwen", "qwen-08b", "moonshine-streaming-tiny"}
+for identifier in ("qwen", "qwen-08b"):
+    assert "compatibility" in pipeline_entries[identifier] and "mtp" in pipeline_entries[identifier]["capabilities"]
+recognition = pipeline_entries["moonshine-streaming-tiny"]
+assert recognition["kind"] == "recognition" and recognition["check_kind"] == "acquisition-presence"
+assert recognition["defaults"] == {"pending_requests":4,"options":{}}
+assert {asset["path"] for asset in recognition["assets"]} == {"model.safetensors","tokenizer.json","config.json","rotary.safetensors"}
+assert "compatibility" not in recognition
 recipes, _ = invoke("model", "available")
 for recipe in recipes["items"]:
     preview, diagnostic = invoke("model", "download", recipe["id"], "--id", "preview", "--dry-run")

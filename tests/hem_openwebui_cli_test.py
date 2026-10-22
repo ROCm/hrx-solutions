@@ -33,7 +33,7 @@ class WebUICliTest(unittest.TestCase):
         module.configure_openwebui = self.coordinator
         patch.dict(sys.modules, {'binding.python.hem_openwebui': module}).start()
 
-    def coordinate(self, root, target, token, deadline, *, check=False, disable=False, display=None):
+    def coordinate(self, root, target, token, deadline, *, check=False, disable=False, display=None, stt_server=None, stt_instance=None):
         self.assertEqual(root, self.root)
         self.assertEqual(token, self.token)
         self.assertLessEqual(deadline.remaining(), 10)
@@ -60,6 +60,16 @@ class WebUICliTest(unittest.TestCase):
             self.assertEqual(len(lines), 1)
             return json.loads(lines[0]), errors.getvalue()
         return output.getvalue(), errors.getvalue()
+
+    def test_stt_selector_pair_forwarded_and_rejected_combinations_are_passive(self):
+        self.invoke('--stt-server', 'local', '--stt-instance', 'dictation')
+        self.assertEqual(self.coordinator.call_args.kwargs['stt_server'], 'local')
+        self.assertEqual(self.coordinator.call_args.kwargs['stt_instance'], 'dictation')
+        self.coordinator.reset_mock()
+        for flags in (('--stt-server', 'local'), ('--stt-instance', 'dictation'),
+                      ('--disable', '--stt-server', 'local', '--stt-instance', 'dictation')):
+            self.invoke(*flags, expected=2)
+        self.coordinator.assert_not_called()
 
     def test_modes_share_budget_and_stdout_stderr_contract(self):
         for flags, mode in [((), 'configure'), (('--check',), 'check'), (('--disable',), 'disable')]:

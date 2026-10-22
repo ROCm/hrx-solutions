@@ -4,7 +4,7 @@ For direct foreground setup and manual Pi configuration, follow the
 [primary Loom Serve walkthrough](llm-serving.md). This companion covers Loom Control
 model management and server/instance lifecycle commands.
 
-Loom Control acquires and validates model files, starts empty Loom Serve processes,
+Loom Control manages model assets, starts empty Loom Serve processes,
 and loads models through the native HTTP interface. Its commands use
 `loom-control <type> <command>`. A **model** is a local asset set, a **pipeline** is
 its packaged implementation, a **server** is an owned native process with saved
@@ -47,10 +47,12 @@ The management command is now `loom-control`; update scripts that invoke
 `loom-hem`. No compatibility alias is installed. Existing state and configuration
 remain unchanged.
 
-## Current example
+## Supported pipelines
 
-The wheel includes Qwen pipelines and their compatibility contracts, the native
-server and its user-space ROCm runtime libraries. Weights remain external.
+The wheel includes Qwen and Moonshine pipelines, the native server and its
+user-space ROCm libraries. Checkpoints remain external. The table below describes
+Qwen; [Moonshine speech recognition](#moonshine-speech-recognition) has its own
+finite audio contract.
 
 | Area | Coverage |
 | --- | --- |
@@ -105,12 +107,13 @@ files; omit it to copy files into owned storage. Multiple fragments can follow
 such as `tokenizer.json` separate. Inspection shows both scoped and external
 locations. Never move, modify or evict an aliased file while it may be in use.
 
-Import and download validate against packaged pipelines before marking a model
-ready. A unique compatible pipeline is selected; `--pipeline` constrains that
-selection for import and validation. Download defaults to the recipe's declared
-pipeline; `--pipeline` overrides that selection. An unknown or ambiguous match
-blocks serving. Names alone do not
-establish compatibility. Completed assets and an inspectable invalid/incomplete
+Qwen import and download perform the existing structural checks before marking
+a model ready. Qwen selects a unique compatible pipeline; `--pipeline` constrains
+import/validation or overrides the recipe selection subject to those checks. An
+unknown or ambiguous Qwen match blocks serving; names alone do not establish
+compatibility. Curated Moonshine instead checks completed acquisition and asset
+presence; native preparation/loading is authoritative. Its recipe has a fixed
+named pipeline, and a different `--pipeline` override is rejected. Completed assets and an inspectable invalid/incomplete
 record survive failure. Repeating the same acquisition can retry; conflicting
 assets under an existing ID are refused. Use another ID for a different asset
 set. There are no replacement, deletion or shared-cache pruning commands.
@@ -123,8 +126,100 @@ loom-control model validate qwen08 --pipeline qwen-08b
 
 Inventory reports accessibility and validation state, including broken aliases;
 it does not imply the model is loaded. `show` includes paths, ownership,
-provenance and current referencing instances. Every start and export repeats
-structural validation rather than trusting a saved result.
+provenance and current referencing instances. Every start and export repeats the
+applicable local checks. For Qwen these are structural checks; for Moonshine they
+are acquisition/presence checks, including the original generated-asset receipt.
+A locally ready model is not yet a loaded native instance.
+
+## Moonshine speech recognition
+
+`moonshine-streaming-tiny` is the curated English recognition pipeline. It uses
+F32 `moonshine-ai/moonshine-streaming-tiny` assets pinned by its recipe. Model and
+numerical preparation remain in HRX; Control invokes the packaged trusted preparer
+and manages its files. It does not convert weights or hand-validate model tensors.
+The selected Loom sources and notices are maintained in this repository, so users
+do not need an upstream model checkout.
+
+Inspect the recipe and pipeline before acquisition:
+
+```bash
+loom-control model available
+loom-control pipeline show moonshine-streaming-tiny
+```
+
+Automatic acquisition requires **Python 3.12 or newer** and the optional
+`moonshine` dependencies in that same interpreter. Install
+`python -m pip install 'hrx-solutions[moonshine]'` when the package is published,
+or install your local wheel with its `[moonshine]` extra. Other workflows retain
+the base Python 3.9 minimum. Control neither installs dependencies automatically
+nor creates another preparation environment.
+
+```bash
+loom-control model download moonshine-streaming-tiny --id moonshine --dry-run
+loom-control model download moonshine-streaming-tiny --id moonshine
+```
+
+`--dry-run` previews without writes, network calls or preparation. `--offline`
+requires the pinned inputs already in the normal HF cache. The checkpoint,
+tokenizer and configuration remain HF-cache references; generated rotary data is
+owned by the local model. Keep references unchanged and available. Preparation
+runs in private staging before publication; failed/incomplete records stay visible
+and cannot start. Repeating the same acquisition can recover compatible staged
+work; it does not overwrite a different model ID mapping or adopt edited generated
+assets. No model deletion/cache-pruning command is added.
+
+Alternatively import a **complete prepared directory** containing
+`model.safetensors`, `tokenizer.json`, `config.json` and `rotary.safetensors`:
+
+```bash
+loom-control model import moonshine --assets-dir /srv/models/moonshine-prepared \
+  --pipeline moonshine-streaming-tiny
+```
+
+This copies files by default; `--alias` keeps immutable external references.
+Complete prepared import does not fetch, run preparation or require the optional
+acquisition dependencies. An incomplete raw checkpoint/tokenizer pair is not a
+complete prepared import. Local registration stores assets; it does not load them
+into Loom Serve.
+
+Start a server (or reuse an existing named server), then load the instance:
+
+```bash
+loom-control server start --name local --device amdgpu --listen 127.0.0.1:18080
+loom-control instance start moonshine --name dictation --server local \
+  --pipeline moonshine-streaming-tiny
+loom-control instance status dictation --server local
+curl --fail --silent --show-error http://127.0.0.1:18080/v1/audio/transcriptions \
+  -F model=dictation -F file=@recording.wav
+loom-control instance stop dictation --server local
+loom-control server shutdown local
+```
+
+Use the **served instance name** (`dictation`) in requests. A successful start
+waits for native preparation/loading, active primary parameters and open admission;
+asset acquisition alone does not prove this. Native errors remain authoritative.
+Inspect an uncertain start/stop with `instance status` and resolve or stop that
+incarnation rather than blindly replaying the operation. Stopping preserves local
+models and their external inputs; dependencies remain reserved until retirement.
+
+The endpoint accepts finite WAV or MP3 uploads, or signed PCM16LE with part type
+`audio/pcm;rate=16000;channels=1`. Encoded audio is normalized by the native decoder.
+The bound is **655360 normalized samples (40.96 seconds at 16 kHz mono)**, with a
+512-token hypothesis limit and four resident requests. Use English (empty or `en`
+language), empty prompt, temperature0, `stream=false` and `response_format=json`
+(default) or `text`. The model's name does not imply a streaming HTTP API. Qwen
+capacity/MTP flags and `--config` do not apply to this pipeline.
+
+Recognition can share a server with Qwen chat. Word and homophone substitutions
+were observed on reference recordings: verify transcripts that need exact wording.
+Release smoke checks compare fixed reference recordings (B/D) exactly against
+independent corpus gold. Concurrency stress instead compares each response only
+with that recording's serial native transcript, frozen before stress: this tests
+request/result attribution and consistency, not recognition accuracy. Neither
+criterion guarantees arbitrary-speech accuracy or establishes throughput. Browser dictation
+acceptance is a separate user-performed check, not implied by API configuration.
+
+For Open WebUI, use [finite dictation configuration](#open-webui-dictation).
 
 ## Start a server, then load an instance
 
@@ -809,7 +904,8 @@ explicit nonzero port, without credentials, query, fragment or application
 subpath. A local `open-webui` executable is unnecessary. The administrator token
 is read only from `OPENWEBUI_TOKEN`; there is no token flag, automatic login or
 saved credential. It authenticates WebUI management and is never sent to Loom.
-Our inference connections use an empty API key and `auth_type: none`.
+Chat connections use an empty API key and `auth_type: none`; STT uses a public
+placeholder key for the unauthenticated native endpoint.
 
 In WebUI, open **Admin Settings → Connections → Refresh model list**, then select
 `loom-hem-d2VidWktbG9jYWw.webui-small` in the ordinary model picker and send a short
@@ -818,6 +914,53 @@ the suffix is the exact instance name. Prefixes distinguish servers that expose
 the same native model ID and are removed before inference. Configure adds one
 connection per saved server, including stopped servers, with an empty static
 model list so WebUI discovers models from native `/v1/models`.
+
+### Open WebUI dictation
+
+With the same host-network topology and administrator prerequisites above, select
+a ready recognition instance explicitly:
+
+```bash
+loom-control openwebui configure --url http://127.0.0.1:3000 \
+  --stt-server local --stt-instance dictation
+loom-control openwebui configure --url http://127.0.0.1:3000 --check
+```
+
+Both selectors are required together. The selected native instance must be ready
+recognition with open admission on the matching managed server. WebUI's backend
+must be able to reach that server's `/v1` URL; a successful management request
+does not prove backend reachability. Use English recordings of at most 40.96 seconds.
+Existing WebUI upload restrictions must permit MP3 and WAV; Control preserves
+those restrictions rather than broadening them automatically.
+
+STT forwards multipart audio using the unprefixed served name. Control creates an
+inactive override for only the prefixed recognition entry in WebUI's chat list;
+existing and newly discovered text models remain dynamically discoverable. The
+native inventory stays unchanged. A preexisting foreign inactive override can
+satisfy this prerequisite without becoming owned; active/custom conflicts refuse.
+
+No-selector configure retains the existing chat workflow. Foreign STT providers
+are not silently replaced. Control preserves unrelated TTS/realtime/chat/STT values
+and keeps foreign credentials only in memory while carrying them through the API.
+`--check` writes nothing and leaves native availability unprobed. Persistence and
+user-info forwarding remain operator prerequisites, not proven by configuration.
+
+`--disable` disconnects only unchanged owned STT routing and removes its unchanged
+created override and chat connections; foreign inactive prerequisites remain.
+Disconnect leaves an inert OpenAI STT profile with blank URL/key/model, so it cannot
+fall back to cloud/native inference or initialize an unrelated Whisper model. It
+does not restore earlier providers/credentials. Exact blank routing can be configured
+again. Edited owned fields or uncertain writes retain evidence for inspection;
+there is no cross-endpoint transaction or automatic retry of an unconfirmed STT
+update. Changing an existing selected target requires disable, then configure.
+Native models/servers keep running until normal lifecycle commands stop them.
+
+After configuration, the user must check recording English audio in WebUI and
+receiving its transcript in the composer, while existing chat/settings still work.
+Record the wheel/WebUI identity and outcome. This browser microphone check remains
+manual; successful configuration and native codec smoke tests do not complete it.
+
+### Refresh, inspect and remove configuration
 
 Configure once for existing servers. After starting or stopping their models,
 **refresh WebUI's model list**; no reconfigure is needed. Adding a new saved
@@ -894,3 +1037,5 @@ Run disable before uninstalling if you want those connections removed.
 For an interrupted or uncertain write, first run `--check`, then rerun configure
 to reconcile current remote truth and pending intent. Never blindly replay a
 whole configuration snapshot: a timed-out request may already have succeeded.
+An unconfirmed STT before-state requires operator reconciliation; another
+configure does not blindly replay that pending write.

@@ -17,10 +17,10 @@ from packaging.requirements import Requirement
 
 try:
     from ..versioning import read_package_version
-    from ..model_tools import loom_catalog
+    from ..model_tools import loom_catalog, moonshine_catalog, moonshine_preparer
 except ImportError:
     from build_tools.versioning import read_package_version
-    from build_tools.model_tools import loom_catalog
+    from build_tools.model_tools import loom_catalog, moonshine_catalog, moonshine_preparer
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -126,6 +126,9 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             PACKAGE_PREFIX + "_native/share/loom-serve/LICENSE",
             PACKAGE_PREFIX + "pipeline_validation.py",
             PACKAGE_PREFIX + "model_store.py",
+            PACKAGE_PREFIX + "curated_catalog.py",
+            PACKAGE_PREFIX + "moonshine_preparation.py",
+            PACKAGE_PREFIX + "moonshine_preparer_identity.py",
             PACKAGE_PREFIX + "runtime_paths.py",
             PACKAGE_PREFIX + "model_download.py",
         }
@@ -211,6 +214,9 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         if actual != allowed:
             raise RuntimeError(f"wheel catalog file inventory mismatch: extra={sorted(actual-allowed)}, missing={sorted(allowed-actual)}")
 
+        moonshine_catalog.validate_archive(wheel, REPO_ROOT)
+        moonshine_preparer.validate_archive(wheel)
+
         weight_suffixes = {".gguf", ".safetensors", ".pt", ".pth", ".ckpt"}
         bundled_weights = sorted(
             name for name in names if Path(name).suffix.lower() in weight_suffixes
@@ -260,6 +266,8 @@ def main() -> int:
     count, size = validate_wheel(args.wheel)
     if args.sdist:
         validate_pi_sdist(args.sdist)
+        with tarfile.open(args.sdist) as source_archive:
+            moonshine_catalog.validate_source_archive(source_archive, REPO_ROOT)
     print(f"Validated {args.wheel}: {count} native libraries, {size} bytes")
     return 0
 

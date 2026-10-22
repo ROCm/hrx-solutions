@@ -54,8 +54,9 @@ and adaptation are encouraged.
 | Solution | What you can do |
 | --- | --- |
 | [LLM serving](docs/solutions/llm-serving.md) | Acquire model assets, operate Loom Serve directly, and configure Pi. |
+| [Speech recognition](docs/solutions/loom-control.md#moonshine-speech-recognition) | Fetch or import Moonshine Streaming Tiny, transcribe audio, and configure Open WebUI dictation. |
 
-Image serving, audio, NPU workloads, and interactive applications such as [Doom](https://gist.github.com/benvanik/20fbfd298ab1d53588ad12aedade6457)
+Image generation, speech synthesis, NPU workloads, and interactive applications such as [Doom](https://gist.github.com/benvanik/20fbfd298ab1d53588ad12aedade6457)
 are candidates for future worked solutions.
 
 ## Install from PyPI
@@ -210,10 +211,12 @@ its exact filename. The setup command checks the Bazel version from
 `.bazelrc.configured`. Handwritten `.bazelrc.local` settings are loaded last.
 Its `--help` includes commands to install the pinned Bazelisk.
 
-The wheel build invokes Bazel for `//:loom-serve` and the Qwen bytecode catalog
-from this root. It stages the executable, HRX license, redistributable ROCm libraries,
-solution helpers, and exactly two complete `pipeline.loombc` modules, one per supported model specification. Authored `.loom` files remain
-in the repository; the wheel ships bytecode instead. To use a sibling
+The wheel build invokes Bazel for `//:loom-serve` and the selected bytecode catalog
+from this root. It stages the executable, licenses, redistributable ROCm libraries,
+solution helpers, two complete Qwen `pipeline.loombc` modules, and the four-artifact
+Moonshine recognition package with its fixed HRX asset preparer. Authored `.loom`
+sources are maintained in this repository; the wheel ships bytecode instead.
+Model checkpoints remain external. To use a sibling
 checkout for wheel builds, add an absolute override to `.bazelrc.local`:
 
 ```bash

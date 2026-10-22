@@ -14,6 +14,7 @@ import re
 import socket
 import threading
 from urllib.parse import urlsplit
+from urllib.parse import quote
 
 from .hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 
@@ -131,7 +132,25 @@ class WebUIClient:
             raise UncertainOutcome("WebUI accepted update but returned an invalid configuration; inspect before retrying",
                                    accepted=True) from None
 
-    def _request(self, method, path, payload=None):
+    def audio_config(self):
+        from .hem_openwebui_stt import validate_audio
+        return validate_audio(self._request("GET", "/api/v1/audio/config"))
+
+    def update_audio(self, configuration):
+        from .hem_openwebui_stt import validate_audio
+        validate_audio(configuration)
+        return self._request("POST", "/api/v1/audio/config/update", _json_bytes(configuration))
+
+    def model(self, model_id):
+        return self._request("GET", "/api/v1/models/model?id=" + quote(model_id, safe=""), missing_ok=True)
+
+    def create_model(self, body):
+        return self._request("POST", "/api/v1/models/create", _json_bytes(body))
+
+    def delete_model(self, model_id):
+        return self._request("POST", "/api/v1/models/model/delete", _json_bytes(dict(id=model_id)))
+
+    def _request(self, method, path, payload=None, *, missing_ok=False):
         parsed = urlsplit(self.target)
         address = ipaddress.ip_address(parsed.hostname)
         budget = self.deadline
@@ -167,6 +186,8 @@ class WebUIClient:
             connection.request(method, path, body=payload, headers=headers)
             response = connection.getresponse()
             status = response.status
+            if missing_ok and method == "GET" and status == 404:
+                return None
             # Do not read or render rejection bodies, which can echo credentials.
             if not 200 <= status < 300:
                 if method == "POST" and status >= 500:

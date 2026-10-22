@@ -14,10 +14,10 @@ from typing import Callable, Optional
 
 try:
     from ..versioning import read_package_version
-    from ..model_tools import loom_catalog
+    from ..model_tools import loom_catalog, moonshine_catalog, moonshine_preparer
 except ImportError:
     from build_tools.versioning import read_package_version
-    from build_tools.model_tools import loom_catalog
+    from build_tools.model_tools import loom_catalog, moonshine_catalog, moonshine_preparer
 
 from setuptools import Distribution
 from setuptools.command.bdist_wheel import bdist_wheel
@@ -209,7 +209,7 @@ def build_native_executables(bazel: Path, rocm_root: Path) -> dict[str, Path]:
             f"--build_event_json_file={metrics_path / 'native-build.events.json'}",
         ]
     subprocess.run(
-        [str(bazel), "build", *build_options, *metrics_options, *BAZEL_TARGETS.values(), loom_catalog.DECODER_TARGET, loom_catalog.CATALOG_TARGET],
+        [str(bazel), "build", *build_options, *metrics_options, *BAZEL_TARGETS.values(), loom_catalog.DECODER_TARGET, loom_catalog.CATALOG_TARGET, moonshine_catalog.TARGET],
         cwd=REPO_ROOT,
         check=True,
         env=environment,
@@ -336,6 +336,7 @@ def stage_native_payload(
         hrx_source_root / "LICENSE",
         native_root / "share" / "loom-serve" / "LICENSE",
     )
+    moonshine_preparer.stage(native_root, hrx_source_root)
 
     runtime_payload = resolve_rocm_runtime_payload(
         rocm_root, needed_libraries=needed_libraries
@@ -397,12 +398,21 @@ class BazelBuildPy(build_py):
         if package_root.exists():
             shutil.rmtree(package_root)
         super().run()
+        decoder = loom_catalog.query_decoder(
+            bazel, REPO_ROOT, build_options=wheel_build_options(rocm_root),
+            environment=bazel_environment(),
+        )
         self._catalog_outputs = loom_catalog.stage_bytecode_catalog(
             package_root / "loom-pipeline/llm", bytecodes,
             REPO_ROOT / "loom-pipeline/catalog_sources.bzl",
-            decoder=loom_catalog.query_decoder(bazel, REPO_ROOT, build_options=wheel_build_options(rocm_root),
-                                               environment=bazel_environment()),
+            decoder=decoder,
         )
+        self._catalog_outputs.extend(moonshine_catalog.stage(
+            package_root / "loom-pipeline" / moonshine_catalog.RELATIVE,
+            moonshine_catalog.query_outputs(bazel, REPO_ROOT, build_options=wheel_build_options(rocm_root),
+                                             environment=bazel_environment()), REPO_ROOT,
+            decoder=decoder,
+        ))
         native_root = package_root / "_native"
         self._native_outputs = stage_native_payload(
             native_root, executables, rocm_root, discover_hrx_source(bazel)

@@ -14,9 +14,10 @@ import sys
 import tempfile
 from typing import Mapping, Optional
 
+from . import curated_catalog
 from .gguf import inspect_gguf_set
 from .hem_common import HemError, InvalidInput
-from .model_store import ModelFiles
+from .model_store import CatalogAssets, ModelFiles
 from .pipeline_validation import available_pipelines, catalog_modules, resolve_catalog
 from .qwen_validation import compare_gguf, compare_tokenizer, load_profile
 
@@ -34,7 +35,7 @@ LIMITS = {key: metadata[1] for key, metadata in SETTINGS.items()}
 DEFAULTS = {key: metadata[0] for key, metadata in SETTINGS.items() if key != "mtp_depth"}
 EXPORT_RESPONSIBILITY = (
     "Export does not reserve dependencies or validate a running server. You must "
-    "preserve the referenced weights, tokenizer and pipeline modules, and use "
+    "preserve all referenced model assets and pipeline programs/policies, and use "
     "a compatible server for the entire raw-curl registration lifetime. Package "
     "upgrades or external file changes may invalidate paths; revalidate/regenerate "
     "before use."
@@ -81,6 +82,14 @@ def load_config(path: Optional[Path]) -> dict:
 def pipeline_info(identifier: str) -> dict:
     if identifier not in available_pipelines():
         raise InvalidInput(f"Unknown pipeline {identifier!r}; choose from {', '.join(available_pipelines())}")
+    if identifier in curated_catalog.CATALOGS:
+        catalog = curated_catalog.load_catalog(identifier)
+        settings = {key: catalog.definition[key] for key in ('pending_requests', 'options')
+                    if key in catalog.definition}
+        return dict(pipeline=identifier, kind=catalog.definition['kind'], catalog=str(catalog.directory),
+                    asset_contract=catalog.contract, assets=list(catalog.assets),
+                    description=catalog.description, check_kind='acquisition-presence',
+                    defaults=settings, limits={})
     try:
         catalog = resolve_catalog(identifier)
         profile = load_profile(catalog)
@@ -96,7 +105,10 @@ def pipeline_info(identifier: str) -> dict:
 
 def select_pipeline(model: ModelFiles, pipeline: Optional[str] = None) -> str:
     """Inspect headers/tokenizer once and require one compatible packaged profile."""
-    choices = (pipeline,) if pipeline is not None else available_pipelines()
+    if pipeline in curated_catalog.CATALOGS:
+        raise InvalidInput('Curated pipelines require their declared named asset set')
+    choices = (pipeline,) if pipeline is not None else tuple(
+        identifier for identifier in available_pipelines() if identifier not in curated_catalog.CATALOGS)
     if pipeline is not None and pipeline not in available_pipelines():
         raise InvalidInput(f"Unknown pipeline {pipeline!r}; choose from {', '.join(available_pipelines())}")
     try:
@@ -135,7 +147,7 @@ def select_pipeline(model: ModelFiles, pipeline: Optional[str] = None) -> str:
 
 @dataclass(frozen=True)
 class ResolvedConfiguration:
-    model: ModelFiles
+    model: ModelFiles | CatalogAssets
     pipeline: str
     catalog: Path
     settings: dict
@@ -143,6 +155,8 @@ class ResolvedConfiguration:
 
     @property
     def dependencies(self) -> tuple[Path, ...]:
+        if isinstance(self.model, CatalogAssets):
+            return tuple(asset.path for asset in self.model.files)
         # weights may be an index distinct from the GGUF members.
         return tuple(dict.fromkeys((*self.model.gguf_paths, self.model.weights, self.model.tokenizer)))
 
@@ -155,6 +169,17 @@ def resolve(model: ModelFiles, overrides: Optional[Mapping] = None,
     `sources` records the winner for every submitted setting, including defaults.
     No writes, native calls, model hashing or registry reservations occur here.
     """
+    if isinstance(model, CatalogAssets):
+        if config_path is not None or overrides:
+            raise InvalidInput('Qwen serving settings and --config are unsupported for curated pipelines')
+        catalog = curated_catalog.check_assets(model, pipeline)
+        from .model_store import readable_file
+        if any(not readable_file(asset.path) for asset in model.files):
+            raise InvalidInput('Curated model assets are missing or unreadable')
+        settings = {key: catalog.definition[key] for key in ('pending_requests', 'options')
+                    if key in catalog.definition}
+        return ResolvedConfiguration(model, model.pipeline, catalog.directory, settings,
+                                     dict.fromkeys(settings, 'catalog'))
     file_settings = load_config(config_path)
     flags = _settings(overrides if overrides is not None else {}, "flags")
     selected = select_pipeline(model, pipeline)
@@ -191,6 +216,13 @@ def deployment_document(resolved: ResolvedConfiguration, name: str, *,
     if type(device) is not int or device < 0:
         raise InvalidInput("Device group index must be a nonnegative integer")
     catalog = Path(catalog).absolute()
+    if isinstance(resolved.model, CatalogAssets):
+        definition = curated_catalog.load_catalog(resolved.pipeline, directory=catalog)
+        if definition.contract != resolved.model.contract:
+            raise InvalidInput('Retained catalog asset contract differs from the model record')
+        return {'name': name, 'device': device, 'admission': 'drained',
+                'base_directory': str(catalog),
+                'definition': curated_catalog.definition_for(definition, resolved.model)}
     try:
         modules = catalog_modules(catalog)
     except (OSError, UnicodeError, ValueError) as exc:

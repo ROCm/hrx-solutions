@@ -37,6 +37,12 @@ try {
   test('numeric exact loopback origins',()=>{for(const url of ['http://127.0.0.1:80/v1','http://[::1]:18080/v1','http://127.255.2.3:65535/v1'])assert.equal(validateBaseUrl(url),url);for(const url of ['http://localhost:80/v1','https://127.0.0.1:80/v1','http://127.0.0.1:0/v1','http://127.256.0.1:80/v1','http://127.0.0.1:65536/v1','http://127.0.0.1/v1','http://127.0.0.1:80/v1?x','http://user@127.0.0.1:80/v1','http://127.0.0.1:080/v1'])assert.throws(()=>validateBaseUrl(url));});
   test('projection ownership/ordering/profile and count',()=>{projection([endpoint()]);assert.equal(readEndpoints(config).length,1);for(const rows of [[endpoint(),endpoint()],[{...endpoint(),provider:'wrong'}],[{...endpoint(),native_profile:'unknown'}],Array.from({length:257},(_,i)=>endpoint('n'+i))]){projection(rows);assert.throws(()=>readEndpoints(config));}projection();const text=readFileSync(config.endpoint_file,'utf8');writeFileSync(config.endpoint_file,text.replace('loom-control-clients','foreign'));assert.throws(()=>readEndpoints(config));projection();});
   test('native exact IDs truthful output without Pi cap',()=>{const models=joinInventory(list(row()),list(row()),endpoint());assert.equal(models[0].id,'qwen-a');assert.deepEqual(models[0].capabilities,{tools:false,input:['text'],output:['text']});assert.deepEqual(models[0].limit,{context:32768,output:16384});const small=row();small.context_length=4096;assert.equal(joinInventory(list(small),list(small),endpoint())[0].limit.output,4096);});
+  test('mixed recognition and text inventory keeps only chat model',()=>{
+    const speech=row('dictation');speech.loom.kind='recognition';speech.loom.endpoint='/v1/audio/transcriptions';
+    speech.input_modalities=['audio'];speech.output_modalities=['text'];
+    const text=row();
+    assert.deepEqual(joinInventory(list(text,speech),list(text,speech),endpoint()).map(r=>r.id),['qwen-a']);
+  });
   test('primary residency with legacy flat compatibility and no auxiliary fallback',()=>{
     for (const [parameters,count] of [
       [{primary:{active:true},image:{active:false}},1],

@@ -125,10 +125,10 @@ def validate_catalog(inventory: Path) -> tuple[str, ...]:
     return expected
 
 
-def preparation_bytecode_source(source: str) -> str:
+def preparation_bytecode_source(source: str, policy: str = "pipeline.loombc") -> str:
     """Change precisely the known policy locator, rejecting symbol/value drift."""
     old = 'global.rodata.def @policy = bytes("' + b"weights.loom".hex() + '")'
-    new = 'global.rodata.def @policy = bytes("' + b"pipeline.loombc".hex() + '")'
+    new = 'global.rodata.def @policy = bytes("' + policy.encode().hex() + '")'
     declarations = re.findall(r"^global\.rodata\.def\s+@policy\s*=.*$", source, re.MULTILINE)
     if declarations != [old]:
         raise ValueError("Preparation must define exactly one expected @policy weights.loom locator")
@@ -246,12 +246,13 @@ def main() -> None:
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--source", type=Path, required=True)
     prepare.add_argument("--output", type=Path, required=True)
+    prepare.add_argument("--policy", choices=("pipeline.loombc", "weights.loombc"), default="pipeline.loombc")
     args = parser.parse_args()
     if args.command == "validate":
         validate_catalog(args.inventory)
         args.stamp.write_text("validated\n", encoding="utf-8")
     else:
-        args.output.write_text(preparation_bytecode_source(args.source.read_text(encoding="utf-8")), encoding="utf-8")
+        args.output.write_text(preparation_bytecode_source(args.source.read_text(encoding="utf-8"), args.policy), encoding="utf-8")
 
 
 if __name__ == "__main__":

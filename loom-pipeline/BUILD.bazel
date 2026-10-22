@@ -1,7 +1,10 @@
-load(":bytecode.bzl", "bytecode_catalogs")
+load(":bytecode.bzl", "bytecode_catalogs", "moonshine_bytecode")
+load(":moonshine_sources.bzl", "MOONSHINE_ARTIFACTS")
 load(":catalog_sources.bzl", "CATALOG_VARIANTS")
 
 bytecode_catalogs(
     name = "bytecode_catalogs",
     variants = CATALOG_VARIANTS,
 )
+
+moonshine_bytecode(name = "moonshine_bytecode", artifacts = MOONSHINE_ARTIFACTS)

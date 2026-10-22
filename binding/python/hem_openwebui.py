@@ -7,6 +7,7 @@ never a replayable whole-configuration request or foreign credentials.
 from __future__ import annotations
 
 from pathlib import Path
+from contextlib import nullcontext
 
 from .hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from .hem_openwebui_http import QUALIFIED_VERSIONS, WebUIClient, canonical_target
@@ -51,7 +52,8 @@ def _replace_before_submission(path, data, *, expected, deadline):
 
 def configure_openwebui(root: Path, target: str, token: str, deadline, *,
                         check=False, disable=False, client_factory=WebUIClient,
-                        display=None) -> OpenWebUIResult:
+                        display=None, stt_server=None, stt_instance=None,
+                        _chat_only=False, _lock_held=False) -> OpenWebUIResult:
     """Inspect passively or execute one bounded owned merge under a local lock.
 
     ``display(method, path, intent=None)`` receives only routes and nonsecret
@@ -66,6 +68,13 @@ def configure_openwebui(root: Path, target: str, token: str, deadline, *,
     target = canonical_target(target)
     mode = "check" if check else "disable" if disable else "configure"
     path = ownership_path(root, target)
+    if not _chat_only:
+        document = decode_document(files.read_owned(path), root, target)
+        if stt_server is not None or stt_instance is not None or document.get("stt") is not None:
+            from .hem_openwebui_stt import configure_stt
+            return configure_stt(root, target, token, deadline, check=check, disable=disable,
+                client_factory=client_factory, display=display,
+                stt_server=stt_server, stt_instance=stt_instance)
     client = client_factory(target, token, deadline)
 
     def request(method, route, operation, intent=None):
@@ -123,8 +132,9 @@ def configure_openwebui(root: Path, target: str, token: str, deadline, *,
 
     # This publisher acquires its own integration lock. Never nest acquisition.
     registry = Registry(root, deadline=deadline)
-    ensure_endpoints(registry, deadline)
-    with integration_lock(root, deadline):
+    if not _lock_held:
+        ensure_endpoints(registry, deadline)
+    with nullcontext() if _lock_held else integration_lock(root, deadline):
         expected, projection, previous, document = inputs()
         if not _same(projection, expected):
             raise InvalidInput("WebUI endpoint projection changed; rerun configure")

@@ -13,6 +13,11 @@ Dimensions, tensor names, quantization layouts, layer order,
 and chat conventions are explicit in the source. Adapting it to another model
 requires reviewing those choices, even when the checkpoint has a similar name.
 
+This guide covers Qwen text pipelines. The separately curated
+[Moonshine recognition sources](../recognition/moonshine/streaming_tiny/) use the
+same native lifecycle; see the [Control recognition workflow](../../docs/solutions/loom-control.md#moonshine-speech-recognition)
+for asset acquisition, finite transcription and WebUI dictation.
+
 ## Ownership and reading order
 
 Three layers cooperate:
