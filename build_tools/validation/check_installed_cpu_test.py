@@ -126,6 +126,71 @@ class InstalledPayloadTest(unittest.TestCase):
                     target.write_bytes(original)
 
 
+class FixtureAdmissionTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        (self.root / 'tests').mkdir()
+
+    def write(self, name, code):
+        (self.root / 'tests' / (name + '.py')).write_text(code)
+
+    def test_late_transitive_fixture_is_admitted_and_only_selected_test_runs(self):
+        self.write('helper', 'value = 17\n')
+        self.write('instances_test', 'from tests.helper import value\n')
+        self.write('assets_test', '''import unittest
+class Assets(unittest.TestCase):
+    def test_selected(self):
+        from tests.instances_test import value
+        self.assertEqual(value, 17)
+    def test_unselected(self):
+        raise AssertionError("unselected test ran")
+''')
+        with patch.object(gate, 'HELPERS', ('helper',)), \
+             patch.object(gate, 'CONTRACTS', ('instances_test', 'assets_test')), \
+             patch.dict(sys.modules):
+            complete = gate.load_contracts(self.root, self.root / 'package')
+            self.assertEqual(complete.countTestCases(), 2)
+            selected = gate.select_contracts(complete, ['tests.assets_test.Assets.test_selected'])
+            result = unittest.TestResult()
+            selected.run(result)
+            self.assertEqual(result.testsRun, 1)
+            self.assertTrue(result.wasSuccessful(), result.errors)
+
+    def test_missing_late_fixture_rejects_before_any_fixture_code_executes(self):
+        marker = self.root / 'executed'
+        self.write('first', f'from pathlib import Path\nPath({str(marker)!r}).touch()\n')
+        self.write('assets_test', 'def late():\n    from tests.instances_test import value\n')
+        with patch.object(gate, 'HELPERS', ('first',)), \
+             patch.object(gate, 'CONTRACTS', ('assets_test',)):
+            with self.assertRaisesRegex(AssertionError, 'incomplete installed-contract fixtures.*instances_test'):
+                gate.load_contracts(self.root, self.root / 'package')
+        self.assertFalse(marker.exists())
+
+    def test_missing_transitive_fixture_file_is_rejected(self):
+        self.write('assets_test', 'from tests import instances_test as fixture\n')
+        with self.assertRaisesRegex(AssertionError, 'missing installed-contract fixture: tests.instances_test'):
+            gate.admit_fixtures(self.root, ('assets_test', 'instances_test'))
+
+    def test_transitive_dependency_of_fixture_is_checked(self):
+        self.write('assets_test', 'def late():\n    from tests import instances_test\n')
+        self.write('instances_test', 'def helper():\n    import tests.absent\n')
+        with self.assertRaisesRegex(AssertionError, 'incomplete installed-contract fixtures.*absent'):
+            gate.admit_fixtures(self.root, ('assets_test', 'instances_test'))
+
+    def test_exact_selection_rejects_unknown_and_duplicate_ids_before_execution(self):
+        test = unittest.FunctionTestCase(lambda: self.fail('must not run'))
+        for ids, message in ((['does.not.exist'], 'unknown'),
+                             ([test.id(), test.id()], 'duplicate')):
+            with self.subTest(ids=ids), self.assertRaisesRegex(ValueError, message):
+                gate.select_contracts(unittest.TestSuite([test]), ids)
+
+    def test_default_selection_preserves_complete_suite(self):
+        suite = unittest.TestSuite([unittest.FunctionTestCase(lambda: None)])
+        self.assertIs(gate.select_contracts(suite, []), suite)
+
+
 class RunnerFailureTest(unittest.TestCase):
     def test_failed_contract_is_not_reported_as_success(self):
         with tempfile.TemporaryDirectory() as directory:

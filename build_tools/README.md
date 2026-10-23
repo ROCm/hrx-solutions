@@ -23,6 +23,17 @@ Default local CI runs the full GPU and client gate. CPU-only is explicit reduced
 coverage and does not satisfy the repository's pre-landing gate without user
 approval. `--model08` is incompatible with `--cpu-only`.
 
+For an affected installed CPU contract, invoke the existing
+`build_tools.validation.check_installed_cpu` runner from outside the checkout
+using the isolated wheel venv and a new absolute `LOOM_SERVE_DIR`. Pass
+`--source-root CHECKOUT --evidence EXTERNAL_JSON` and repeat `--test EXACT_ID`
+for each full discovered ID, for example
+`--test tests.curated_assets_test.CuratedAssetsTest.test_managed_lifecycle_reserves_named_files_and_retained_catalog`.
+The runner admits and loads the complete fixture inventory before selection;
+do not trim `HELPERS` or `CONTRACTS` in adapters. Unknown or duplicate IDs fail
+before test execution. Omitting `--test` retains the full installed suite and
+all source parity and payload checks.
+
 ### Invocation, prerequisites, and outputs
 
 All four top-level shell commands locate this checkout from their own path and

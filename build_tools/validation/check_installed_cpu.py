@@ -10,6 +10,7 @@ own temporary ELF, sparse GGUFs, loopback ports and Loom namespace; these checks
 do not qualify native execution, GPU readiness, or model inference.
 """
 import argparse
+import ast
 import hashlib
 import importlib
 import json
@@ -118,6 +119,32 @@ def source_parity(source_root, package):
     return checked
 
 
+def admit_fixtures(source_root, names):
+    """Check the complete fixture inventory before executing any fixture code.
+
+    Walk function bodies too: some contracts import another test's fixtures only
+    when the test runs. Selection must never trim these transitive dependencies.
+    """
+    sources = {}
+    for name in names:
+        path = source_root / 'tests' / (name + '.py')
+        assert path.is_file(), f'missing installed-contract fixture: tests.{name}'
+        sources[name] = path.read_text()
+    for name, code in sources.items():
+        dependencies = set()
+        for node in ast.walk(ast.parse(code, filename=str(source_root / 'tests' / (name + '.py')))):
+            if isinstance(node, ast.ImportFrom) and node.module == 'tests':
+                dependencies.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and node.module.startswith('tests.'):
+                dependencies.add(node.module.split('.')[1])
+            elif isinstance(node, ast.Import):
+                dependencies.update(alias.name.split('.')[1] for alias in node.names
+                                    if alias.name.startswith('tests.'))
+        missing = dependencies - sources.keys()
+        assert not missing, f'incomplete installed-contract fixtures for tests.{name}: {sorted(missing)}'
+    return sources
+
+
 def load_contracts(source_root, package):
     """Load only test fixtures from source; every product import uses the wheel.
 
@@ -125,18 +152,19 @@ def load_contracts(source_root, package):
     Fixture discovery is the sole path adaptation, selecting the installed
     compatibility contract instead of a checkout-relative catalog.
     """
+    sources = admit_fixtures(source_root, dict.fromkeys((*HELPERS, *CONTRACTS)))
     test_package = types.ModuleType('tests')
     test_package.__path__ = []
     sys.modules['tests'] = test_package
     suite = unittest.TestSuite()
-    for name in dict.fromkeys((*HELPERS, *CONTRACTS)):
+    for name, text in sources.items():
         source = source_root / 'tests' / (name + '.py')
         module = types.ModuleType('tests.' + name)
         module.__file__ = str(source)
         module.__package__ = 'tests'
         sys.modules[module.__name__] = module
         setattr(test_package, name, module)
-        code = source.read_text().replace('binding.python', 'hrx_solutions')
+        code = text.replace('binding.python', 'hrx_solutions')
         exec(compile(code, str(source), 'exec'), module.__dict__)
         if name == 'gguf_fixtures':
             module.PROFILE_PATH = package / 'loom-pipeline/llm/qwen/qwen_27b/compatibility.json'
@@ -146,10 +174,34 @@ def load_contracts(source_root, package):
     return suite
 
 
+def contract_cases(suite):
+    for test in suite:
+        if isinstance(test, unittest.TestSuite):
+            yield from contract_cases(test)
+        else:
+            yield test
+
+
+def select_contracts(suite, test_ids):
+    """Select exact discovered IDs after loading the complete fixture inventory."""
+    if not test_ids:
+        return suite
+    if len(set(test_ids)) != len(test_ids):
+        raise ValueError('duplicate installed-contract test IDs')
+    cases = {test.id(): test for test in contract_cases(suite)}
+    missing = set(test_ids) - cases.keys()
+    if missing:
+        raise ValueError(f'unknown installed-contract test IDs: {sorted(missing)}')
+    return unittest.TestSuite(cases[test_id] for test_id in test_ids)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-root', type=Path, required=True)
     parser.add_argument('--evidence', type=Path, required=True)
+    parser.add_argument('--test', action='append', default=[], metavar='EXACT_ID',
+                        help='Run this exact discovered test ID; repeat to select several. '
+                             'All fixture modules are still loaded; omission runs the full suite.')
     args = parser.parse_args(argv)
     source_root = args.source_root.resolve()
     assert sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE
@@ -168,11 +220,16 @@ def main(argv=None):
                 'qualification': 'Installed Python CPU contracts with test-owned ELF and sparse GGUF; no GPU/native inference qualification'}
     try:
         evidence['source_files'] = source_parity(source_root, package)
-        suite = load_contracts(source_root, package)
+        suite = select_contracts(load_contracts(source_root, package), args.test)
+        evidence['fixture_admission'] = True
+        evidence['test_ids'] = [test.id() for test in contract_cases(suite)]
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         evidence['tests_run'] = result.testsRun
         evidence['failures'] = len(result.failures)
         evidence['errors'] = len(result.errors)
+        evidence['skipped'] = len(result.skipped)
+        evidence['failed_test_ids'] = [test.id() for test, _ in result.failures]
+        evidence['error_test_ids'] = [test.id() for test, _ in result.errors]
         assert result.wasSuccessful(), 'installed CPU contracts failed'
         assert snapshot(package) == before, 'installed wheel payload changed during tests'
         evidence['payload_unchanged'] = True
