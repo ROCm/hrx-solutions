@@ -12,9 +12,9 @@ import unittest
 from unittest.mock import patch, Mock
 
 PACKAGE = os.environ.get('HEM_TEST_PACKAGE', 'binding.python')
-hem = importlib.import_module(PACKAGE + '.hem_openwebui')
-stt = importlib.import_module(PACKAGE + '.hem_openwebui_stt')
-state = importlib.import_module(PACKAGE + '.hem_openwebui_state')
+hem = importlib.import_module(PACKAGE + '.integrations.openwebui.hem_openwebui')
+stt = importlib.import_module(PACKAGE + '.integrations.openwebui.hem_openwebui_stt')
+state = importlib.import_module(PACKAGE + '.integrations.openwebui.hem_openwebui_state')
 files = importlib.import_module(PACKAGE + '.hem_pi_files')
 common = importlib.import_module(PACKAGE + '.hem_common')
 Registry = importlib.import_module(PACKAGE + '.hem_state').Registry

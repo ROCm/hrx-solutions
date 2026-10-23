@@ -33,7 +33,7 @@ print(f"package: {hrx_solutions.__file__}")
 package_root = Path(hrx_solutions.__file__).resolve().parent
 package_root.relative_to(Path(sys.prefix).resolve())
 for name in (
-    "hem_integrations", "hem_client_documents", "hem_openwebui_wire", "hem_openwebui_receipts",
+    "hem_integrations", "hem_client_documents",
     "hem_bootstrap", "hem_cli", "hem_common",
     "hem_display", "hem_http", "hem_instances", "hem_process",
     "hem_shutdown", "hem_state",
@@ -94,6 +94,23 @@ for relative in (
     'integrations/__init__.py',
     'integrations/opencode/__init__.py',
     'integrations/opencode/hem_opencode.py',
+):
+    parts = Path(relative).with_suffix('').parts
+    if parts[-1] == '__init__':
+        parts = parts[:-1]
+    module = importlib.import_module('.'.join(('hrx_solutions', *parts)))
+    installed = Path(module.__file__).resolve()
+    assert installed.is_relative_to(package_root)
+    assert installed == (package_root / relative).resolve()
+for relative in (
+    'integrations/__init__.py',
+    'integrations/openwebui/__init__.py',
+    'integrations/openwebui/hem_openwebui.py',
+    'integrations/openwebui/hem_openwebui_http.py',
+    'integrations/openwebui/hem_openwebui_state.py',
+    'integrations/openwebui/hem_openwebui_stt.py',
+    'integrations/openwebui/hem_openwebui_receipts.py',
+    'integrations/openwebui/hem_openwebui_wire.py',
 ):
     parts = Path(relative).with_suffix('').parts
     if parts[-1] == '__init__':

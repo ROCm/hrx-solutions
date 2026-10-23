@@ -14,7 +14,7 @@ import threading
 from urllib.parse import urlsplit
 from urllib.parse import quote
 
-from .hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
+from ...hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 
 from .hem_openwebui_wire import (MAX_BYTES, canonical_target,
     json_bytes as _json_bytes, decode_json as _decode, validate_config, validate_audio)

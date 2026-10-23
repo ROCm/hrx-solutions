@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
-from binding.python.hem_openwebui_http import MAX_BYTES, QUALIFIED_VERSIONS, WebUIClient, canonical_target, validate_config
+from binding.python.integrations.openwebui.hem_openwebui_http import MAX_BYTES, QUALIFIED_VERSIONS, WebUIClient, canonical_target, validate_config
 
 TOKEN = "admin.private.token"
 FOREIGN = "foreign.private.key"
@@ -237,7 +237,7 @@ class TransportTest(unittest.TestCase):
             self.assertEqual(len(records), 2)
 
     def test_audio_model_wire_routes_and_only_model_404_is_absence(self):
-        from binding.python import hem_openwebui_stt as stt
+        from binding.python.integrations.openwebui import hem_openwebui_stt as stt
         audio = dict(tts=dict.fromkeys(stt.TTS_STRINGS, ''),
                      stt=dict(dict.fromkeys(stt.STT_STRINGS, ''), MISTRAL_USE_CHAT_COMPLETIONS=False),
                      realtime={'OPENAI_API_KEY': FOREIGN})

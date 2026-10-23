@@ -17,7 +17,7 @@ def configure_integration(integration, root, deadline, *, mode="configure", pi_d
         from .integrations.opencode.hem_opencode import configure_opencode
         return configure_opencode(root, opencode_dir, deadline, check=mode == "check", disable=mode == "disable")
     if integration == "openwebui":
-        from .hem_openwebui import configure_openwebui
+        from .integrations.openwebui.hem_openwebui import configure_openwebui
         return configure_openwebui(root, url, token, deadline, check=mode == "check", disable=mode == "disable",
                                    stt_server=stt_server, stt_instance=stt_instance)
     raise InvalidInput("unsupported integration")

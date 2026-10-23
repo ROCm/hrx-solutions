@@ -38,7 +38,7 @@ STABLE_RUNTIME_NAMES = {
 }
 ROCM_LIBRARY_PREFIXES = ("libamd", "libhsa", "libroc")
 HEM_MODULES = (
-    "hem_integrations", "hem_client_documents", "hem_openwebui_wire", "hem_openwebui_receipts",
+    "hem_integrations", "hem_client_documents",
     "hem_bootstrap", "hem_cli", "hem_common",
     "hem_display", "hem_http", "hem_instances", "hem_operation_targets", "hem_process",
     "hem_shutdown", "hem_state", "hem_pi_assets",
@@ -90,6 +90,16 @@ OMP_PYTHON_PATHS = (
     'integrations/omp/hem_omp.py',
     'integrations/omp/hem_omp_yaml.py',
 )
+OPENWEBUI_PYTHON_PATHS = (
+    'integrations/__init__.py',
+    'integrations/openwebui/__init__.py',
+    'integrations/openwebui/hem_openwebui.py',
+    'integrations/openwebui/hem_openwebui_http.py',
+    'integrations/openwebui/hem_openwebui_state.py',
+    'integrations/openwebui/hem_openwebui_stt.py',
+    'integrations/openwebui/hem_openwebui_receipts.py',
+    'integrations/openwebui/hem_openwebui_wire.py',
+)
 PI_ASSETS = ("index.ts", "discovery.ts", "budgets.ts", "stream.ts",
              "profile.json", "package.json")
 # Independent authored resource inventory; do not derive acceptance from installers.
@@ -101,6 +111,13 @@ CLIENT_ASSETS = (
     "opencode_plugin/profile.json", "opencode_plugin/package.json",
 )
 OBSOLETE_MODULES = (
+    'hem_openwebui',
+    'hem_openwebui_http',
+    'hem_openwebui_state',
+    'hem_openwebui_stt',
+    'hem_openwebui_receipts',
+    'hem_openwebui_wire',
+
     'hem_opencode',
     'hem_arguments',
     'hem_help',
@@ -202,6 +219,18 @@ def validate_opencode_sdist(path: Path) -> None:
                 raise RuntimeError('sdist OpenCode source differs from reviewed source: ' + relative)
 
 
+def validate_openwebui_sdist(path: Path) -> None:
+    """Require the exact regular Python sources for the complete OpenWebUI package."""
+    with tarfile.open(path) as archive:
+        for relative in OPENWEBUI_PYTHON_PATHS:
+            matches = [member for member in archive.getmembers()
+                       if member.name.endswith('/binding/python/' + relative)]
+            if len(matches) != 1 or not matches[0].isfile():
+                raise RuntimeError('sdist is missing or duplicates OpenWebUI source: ' + relative)
+            expected = (REPO_ROOT / 'binding/python' / relative).read_bytes()
+            if matches[0].size != len(expected) or archive.extractfile(matches[0]).read() != expected:
+                raise RuntimeError('sdist OpenWebUI source differs from reviewed source: ' + relative)
+
 def validate_wheel(path: Path) -> tuple[int, int]:
     duplicates: dict[str, list[str]] = defaultdict(list)
     native_libraries: list[str] = []
@@ -259,6 +288,7 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         required_files.update(PACKAGE_PREFIX + name + ".py" for name in HEM_MODULES)
         required_files.update(PACKAGE_PREFIX + name for name in OMP_PYTHON_PATHS)
         required_files.update(PACKAGE_PREFIX + name for name in OPENCODE_PYTHON_PATHS)
+        required_files.update(PACKAGE_PREFIX + name for name in OPENWEBUI_PYTHON_PATHS)
         required_files.add(PACKAGE_PREFIX + "models/__init__.py")
         required_files.update(PACKAGE_PREFIX + "models/" + name + ".py" for name in MODEL_MODULES)
         required_files.update(PACKAGE_PREFIX + name for name in CLI_FILES)
@@ -307,6 +337,15 @@ def validate_wheel(path: Path) -> tuple[int, int]:
                     or stat.S_IFMT(matches[0].external_attr >> 16) not in (0, stat.S_IFREG)
                     or wheel.read(matches[0]) != expected):
                 raise RuntimeError('wheel OpenCode source duplicates or differs from reviewed source: ' + member)
+
+        for relative in OPENWEBUI_PYTHON_PATHS:
+            member = PACKAGE_PREFIX + relative
+            matches = [info for info in wheel.infolist() if info.filename == member]
+            expected = (REPO_ROOT / 'binding/python' / relative).read_bytes()
+            if (len(matches) != 1 or matches[0].is_dir()
+                    or stat.S_IFMT(matches[0].external_attr >> 16) not in (0, stat.S_IFREG)
+                    or wheel.read(matches[0]) != expected):
+                raise RuntimeError('wheel OpenWebUI source duplicates or differs from reviewed source: ' + member)
 
         for name in PI_ASSETS:
             member = PACKAGE_PREFIX + "pi_extension/" + name
@@ -405,6 +444,7 @@ def main() -> int:
 
         validate_omp_sdist(args.sdist)
         validate_opencode_sdist(args.sdist)
+        validate_openwebui_sdist(args.sdist)
         with tarfile.open(args.sdist) as source_archive:
             moonshine_catalog.validate_source_archive(source_archive, REPO_ROOT)
     print(f"Validated {args.wheel}: {count} native libraries, {size} bytes")

@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from binding.python import hem_cli, hem_openwebui as owner
+from binding.python import hem_cli
+from binding.python.integrations.openwebui import hem_openwebui as owner
 from binding.python.hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 
 

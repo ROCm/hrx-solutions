@@ -11,7 +11,7 @@ import math
 import re
 from urllib.parse import urlsplit
 
-from .hem_common import InvalidInput
+from ...hem_common import InvalidInput
 
 MAX_BYTES = 2 * 1024 * 1024
 _FIELDS = {"ENABLE_OPENAI_API", "OPENAI_API_BASE_URLS", "OPENAI_API_KEYS", "OPENAI_API_CONFIGS"}

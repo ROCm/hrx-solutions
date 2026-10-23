@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 PACKAGE = os.environ.get('HEM_TEST_PACKAGE', 'binding.python')
-state = importlib.import_module(PACKAGE + '.hem_openwebui_state')
+state = importlib.import_module(PACKAGE + '.integrations.openwebui.hem_openwebui_state')
 common = importlib.import_module(PACKAGE + '.hem_common')
 contracts = importlib.import_module(PACKAGE + '.hem_pi_contracts')
 files = importlib.import_module(PACKAGE + '.hem_pi_files')
@@ -138,7 +138,7 @@ class PureOnly(importlib.abc.MetaPathFinder):
                 'hem_state', 'hem_pi_state', 'hem_process'):
             raise AssertionError('operational schema dependency: ' + fullname)
 sys.meta_path.insert(0, PureOnly())
-state = __import__(PACKAGE + '.hem_openwebui_state', fromlist=['state'])
+state = __import__(PACKAGE + '.integrations.openwebui.hem_openwebui_state', fromlist=['state'])
 root = '/nonexistent/owned-root'
 target = 'http://127.0.0.1:3000'
 document = state.decode_document(None, root, target)
@@ -152,7 +152,7 @@ assert state.stt_selection(document) == {'server': 'later', 'instance': 'future'
                        check=True, capture_output=True, text=True)
 
     def test_http_and_ownership_preserve_distinct_unicode_byte_limits(self):
-        transport = importlib.import_module(PACKAGE + '.hem_openwebui_http')
+        transport = importlib.import_module(PACKAGE + '.integrations.openwebui.hem_openwebui_http')
         current = remote(foreign=True)
         current['OPENAI_API_CONFIGS']['0']['opaque'] = '\u00e9' * (state.MAX_BYTES // 4)
         # HTTP emits UTF-8 (two bytes); receipts/admission retain ASCII escapes
@@ -405,7 +405,7 @@ assert state.stt_selection(document) == {'server': 'later', 'instance': 'future'
             self.assertEqual(final['connections'], [row()])
 
     def test_target_canonicalization_agrees_with_transport(self):
-        transport = importlib.import_module(PACKAGE + '.hem_openwebui_http')
+        transport = importlib.import_module(PACKAGE + '.integrations.openwebui.hem_openwebui_http')
         for target in ('http://[::1]:3000', 'http://[0:0:0:0:0:0:0:1]:3000/', TARGET + '/'):
             canonical = transport.canonical_target(target)
             self.assertEqual(state.decode_document(None, ROOT, target)['target_url'], canonical)
@@ -419,7 +419,7 @@ assert state.stt_selection(document) == {'server': 'later', 'instance': 'future'
                         canonicalizer(target)
 
     def test_remote_rejects_nested_python_json_coercions(self):
-        transport = importlib.import_module(PACKAGE + '.hem_openwebui_http')
+        transport = importlib.import_module(PACKAGE + '.integrations.openwebui.hem_openwebui_http')
         for nested in ((1, 2), {1: 'nonstring'}, {'nested': (1,)}, [{'nested': {False: None}}],
                        float('nan'), float('inf'), {1, 2}, b'bytes'):
             current = remote(foreign=True)
