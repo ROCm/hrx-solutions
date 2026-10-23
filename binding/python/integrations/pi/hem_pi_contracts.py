@@ -11,7 +11,7 @@ import base64
 import re
 from typing import Dict, List, TypedDict
 
-from .hem_common import InvalidInput
+from ...hem_common import InvalidInput
 
 
 INTEGRATION_VERSION = 1

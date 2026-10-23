@@ -42,7 +42,7 @@ class OMPCliTest(unittest.TestCase):
         self.assertFalse(list(self.root.rglob('*.sock')))
 
     def test_explicit_configure_refreshes_prior_owned_projection_after_passive_check(self):
-        from binding.python.hem_pi_contracts import NATIVE_PROFILE, PREVIOUS_NATIVE_PROFILE
+        from binding.python.integrations.pi.hem_pi_contracts import NATIVE_PROFILE, PREVIOUS_NATIVE_PROFILE
         Registry(self.root).create_server('local', saved_settings=dict(device='task', listen='127.0.0.1:18080'))
         with patch.object(owner, 'inspect_runtime', return_value={'qualification': 'test metadata'}):
             self.invoke()

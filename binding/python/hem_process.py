@@ -513,7 +513,7 @@ class ProcessManager:
                 return record
             # Persist all configured connection targets before accepting any
             # native launch. This short publication never spans readiness waits.
-            from .hem_pi_endpoints import publish_endpoints
+            from .integrations.pi.hem_pi_endpoints import publish_endpoints
             publish_endpoints(self.registry, deadline)
             token = uuid.uuid4().hex
             record = self.registry.reserve_launch(server_id, launch_token=token,

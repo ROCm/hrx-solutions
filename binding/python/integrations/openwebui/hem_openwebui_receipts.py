@@ -11,7 +11,7 @@ from copy import deepcopy
 import re
 
 from ...hem_common import InvalidInput
-from ...hem_pi_contracts import provider_id
+from ..pi.hem_pi_contracts import provider_id
 from .hem_openwebui_wire import canonical_target, strict_equal as same, json_bytes
 
 

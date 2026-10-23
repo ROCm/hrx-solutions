@@ -18,7 +18,7 @@ from build_tools.wheel_tools import python_packaging as packaging
 from build_tools.wheel_tools import validate_wheel as wheel_validation
 from build_tools.model_tools import loom_catalog, moonshine_catalog, moonshine_preparer
 from build_tools.wheel_tools.validate_wheel import HEM_MODULES, MODEL_MODULES, OBSOLETE_MODULES, OBSOLETE_ENTRY_POINTS, REQUIRED_ENTRY_POINTS, PI_ASSETS, validate_wheel
-from binding.python import hem_pi_assets, hem_pi_contracts
+from binding.python.integrations.pi import hem_pi_assets, hem_pi_contracts
 import hashlib
 import json
 import io
@@ -433,7 +433,7 @@ class PackagingTest(unittest.TestCase):
                         for name in PI_ASSETS})
         members.update({'hrx_solutions/'+name:(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
                         for name in wheel_validation.CLIENT_ASSETS})
-        for name in ('pipeline_validation.py','runtime_paths.py','loom_serve.py','models/__init__.py', *(name+'.py' for name in HEM_MODULES), *('models/'+name+'.py' for name in MODEL_MODULES), *wheel_validation.CLI_FILES, *wheel_validation.OMP_PYTHON_PATHS, *wheel_validation.OPENCODE_PYTHON_PATHS, *wheel_validation.OPENWEBUI_PYTHON_PATHS):
+        for name in ('pipeline_validation.py','runtime_paths.py','loom_serve.py','models/__init__.py', *(name+'.py' for name in HEM_MODULES), *('models/'+name+'.py' for name in MODEL_MODULES), *wheel_validation.CLI_FILES, *wheel_validation.OMP_PYTHON_PATHS, *wheel_validation.OPENCODE_PYTHON_PATHS, *wheel_validation.OPENWEBUI_PYTHON_PATHS, *wheel_validation.PI_PYTHON_FILES):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         for name in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
                      'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'):
@@ -596,8 +596,12 @@ class PackagingTest(unittest.TestCase):
                             with warnings.catch_warnings():
                                 warnings.simplefilter('ignore', UserWarning)
                                 archive.writestr(member, data)
-                with self.subTest(target=target, failure=failure), self.assertRaisesRegex(RuntimeError, 'OMP source|missing setup assets'):
+                diagnostic = 'OMP source|missing setup assets'
+                if target == 'integrations/__init__.py':
+                    diagnostic = 'OMP source|Pi Python source|missing setup assets'
+                with self.subTest(target=target, failure=failure), self.assertRaisesRegex(RuntimeError, diagnostic) as raised:
                     validate_wheel(wheel)
+                self.assertIn(target, str(raised.exception))
 
     def test_wheel_requires_each_exact_regular_opencode_source_once(self):
         import warnings
@@ -620,9 +624,12 @@ class PackagingTest(unittest.TestCase):
                             with warnings.catch_warnings():
                                 warnings.simplefilter('ignore', UserWarning)
                                 archive.writestr(member, data)
-                owner = 'OMP' if target == 'integrations/__init__.py' else 'OpenCode'
-                with self.subTest(target=target, failure=failure), self.assertRaisesRegex(RuntimeError, owner + ' source|missing setup assets'):
+                diagnostic = 'OpenCode source|missing setup assets'
+                if target == 'integrations/__init__.py':
+                    diagnostic = 'OMP source|Pi Python source|missing setup assets'
+                with self.subTest(target=target, failure=failure), self.assertRaisesRegex(RuntimeError, diagnostic) as raised:
                     validate_wheel(wheel)
+                self.assertIn(target, str(raised.exception))
 
     def test_sdist_requires_each_exact_regular_openwebui_source_once(self):
         names = ('integrations/__init__.py', 'integrations/openwebui/__init__.py', 'integrations/openwebui/hem_openwebui.py', 'integrations/openwebui/hem_openwebui_http.py', 'integrations/openwebui/hem_openwebui_state.py', 'integrations/openwebui/hem_openwebui_stt.py', 'integrations/openwebui/hem_openwebui_receipts.py', 'integrations/openwebui/hem_openwebui_wire.py')
@@ -671,9 +678,12 @@ class PackagingTest(unittest.TestCase):
                             with warnings.catch_warnings():
                                 warnings.simplefilter('ignore', UserWarning)
                                 archive.writestr(member, data)
-                error = 'OMP source' if target == 'integrations/__init__.py' else 'OpenWebUI source'
-                with self.subTest(target=target, failure=failure), self.assertRaisesRegex(RuntimeError, error + '|missing setup assets'):
+                diagnostic = 'OpenWebUI source|missing setup assets'
+                if target == 'integrations/__init__.py':
+                    diagnostic = 'OMP source|Pi Python source|missing setup assets'
+                with self.subTest(target=target, failure=failure), self.assertRaisesRegex(RuntimeError, diagnostic) as raised:
                     validate_wheel(wheel)
+                self.assertIn(target, str(raised.exception))
 
     def test_sdist_requires_each_exact_regular_model_source_once(self):
         names = (
@@ -735,6 +745,74 @@ class PackagingTest(unittest.TestCase):
                             archive.writestr(member, data)
             with self.subTest(failure=failure), self.assertRaisesRegex(RuntimeError, 'model source'):
                 validate_wheel(wheel)
+
+    def test_sdist_requires_each_exact_regular_pi_python_source_once(self):
+        names = (
+            'integrations/__init__.py',
+            'integrations/pi/__init__.py',
+            'integrations/pi/hem_pi.py',
+            'integrations/pi/hem_pi_assets.py',
+            'integrations/pi/hem_pi_contracts.py',
+            'integrations/pi/hem_pi_endpoints.py',
+            'integrations/pi/hem_pi_files.py',
+            'integrations/pi/hem_pi_state.py',
+        )
+        for target in names:
+            for failure in (None, 'missing', 'changed', 'symlink', 'duplicate'):
+                path = self.root / 'pi-python-source.tar.gz'
+                with tarfile.open(path, 'w:gz') as archive:
+                    for name in names:
+                        data = (packaging.REPO_ROOT / 'binding/python' / name).read_bytes()
+                        if name == target and failure == 'missing':
+                            continue
+                        if name == target and failure == 'changed':
+                            data += b'\n# changed source'
+                        member = tarfile.TarInfo('hrx-solutions/binding/python/' + name)
+                        member.size = len(data)
+                        if name == target and failure == 'symlink':
+                            member.type = tarfile.SYMTYPE
+                            member.linkname = '/unreviewed/' + name
+                        archive.addfile(member, io.BytesIO(data))
+                        if name == target and failure == 'duplicate':
+                            archive.addfile(member, io.BytesIO(data))
+                with self.subTest(target=target, failure=failure):
+                    if failure:
+                        with self.assertRaisesRegex(RuntimeError, 'Pi Python source'):
+                            wheel_validation.validate_pi_python_sdist(path)
+                    else:
+                        wheel_validation.validate_pi_python_sdist(path)
+
+    def test_wheel_requires_each_exact_regular_pi_python_source_once(self):
+        import warnings
+        names = (
+            'integrations/__init__.py',
+            'integrations/pi/__init__.py',
+            'integrations/pi/hem_pi.py',
+            'integrations/pi/hem_pi_assets.py',
+            'integrations/pi/hem_pi_contracts.py',
+            'integrations/pi/hem_pi_endpoints.py',
+            'integrations/pi/hem_pi_files.py',
+            'integrations/pi/hem_pi_state.py',
+        )
+        for target in names:
+            with self.subTest(missing=target), self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
+                validate_wheel(self.wheel(missing='hrx_solutions/' + target))
+            for failure in ('changed', 'duplicate', 'symlink'):
+                wheel = self.wheel()
+                with zipfile.ZipFile(wheel) as archive:
+                    members = {name: archive.read(name) for name in archive.namelist()}
+                with zipfile.ZipFile(wheel, 'w') as archive:
+                    for name, data in members.items():
+                        member = zipfile.ZipInfo(name)
+                        if name == 'hrx_solutions/' + target and failure == 'symlink':
+                            member.external_attr = 0o120777 << 16
+                        archive.writestr(member, data + b'changed' if name == 'hrx_solutions/' + target and failure == 'changed' else data)
+                        if name == 'hrx_solutions/' + target and failure == 'duplicate':
+                            with warnings.catch_warnings():
+                                warnings.simplefilter('ignore', UserWarning)
+                                archive.writestr(member, data)
+                with self.subTest(target=target, failure=failure), self.assertRaisesRegex(RuntimeError, 'Pi Python source'):
+                    validate_wheel(wheel)
 
     def test_pi_resources_match_contract_and_loader_metadata(self):
         assets = hem_pi_assets.bundled_assets()
@@ -804,7 +882,7 @@ class PackagingTest(unittest.TestCase):
         command.run()
         expected = {'models/__init__.py', *('models/'+name+'.py' for name in MODEL_MODULES),
                     *wheel_validation.CLI_FILES, *('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
-                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py')}
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'), *wheel_validation.PI_PYTHON_FILES}
         expected.update(('integrations/__init__.py', 'integrations/omp/__init__.py',
                          'integrations/omp/hem_omp.py', 'integrations/omp/hem_omp_yaml.py'))
         expected.update(('integrations/__init__.py', 'integrations/opencode/__init__.py',

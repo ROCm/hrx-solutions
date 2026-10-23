@@ -12,8 +12,8 @@ from unittest.mock import patch
 PACKAGE = os.environ.get('HEM_TEST_PACKAGE', 'binding.python')
 clients = importlib.import_module(PACKAGE + '.hem_clients_endpoints')
 common = importlib.import_module(PACKAGE + '.hem_common')
-contracts = importlib.import_module(PACKAGE + '.hem_pi_contracts')
-state = importlib.import_module(PACKAGE + '.hem_pi_state')
+contracts = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_contracts')
+state = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_state')
 Registry = importlib.import_module(PACKAGE + '.hem_state').Registry
 from tests import hem_server_cli_test as fixtures
 
@@ -187,7 +187,7 @@ class ProjectionTest(unittest.TestCase):
             self.assertIn(b'deadline', result.stderr)
 
     def test_secondary_failure_preserves_result_and_pi_independent(self):
-        pi = importlib.import_module(PACKAGE + '.hem_pi_endpoints')
+        pi = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_endpoints')
         self.ensure()
         self.path.write_bytes(b'corrupt')
         payload = pi.update_result(self.registry, common.Deadline.after(), common.result('running', completed=True))

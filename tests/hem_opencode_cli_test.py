@@ -42,7 +42,7 @@ class OpenCodeCliTest(unittest.TestCase):
         return {str(p): (p.lstat().st_mtime_ns, p.read_bytes() if p.is_file() else None) for p in self.base.rglob('*')}
 
     def test_explicit_configure_refreshes_prior_owned_projection_after_passive_check(self):
-        from binding.python.hem_pi_contracts import NATIVE_PROFILE, PREVIOUS_NATIVE_PROFILE
+        from binding.python.integrations.pi.hem_pi_contracts import NATIVE_PROFILE, PREVIOUS_NATIVE_PROFILE
         from binding.python.hem_state import Registry
         Registry(self.root).create_server('local', saved_settings=dict(device='task', listen='127.0.0.1:18080'))
         self.invoke()
@@ -108,7 +108,7 @@ class OpenCodeCliTest(unittest.TestCase):
         self.invoke('--check', expected=2)
 
     def test_foreign_refusal_before_root_initialization_and_edited_disable(self):
-        from binding.python.hem_pi_files import private_path
+        from binding.python.integrations.pi.hem_pi_files import private_path
         directory = self.target / PLUGIN
         private_path(directory, create=True)
         (directory / 'index.ts').write_text('foreign')
@@ -192,7 +192,7 @@ class OpenCodeCliTest(unittest.TestCase):
             self.assertFalse(self.target.exists())
 
     def test_direct_owner_preflights_before_root_and_rechecks_after_publication(self):
-        from binding.python.hem_pi_files import private_path
+        from binding.python.integrations.pi.hem_pi_files import private_path
         private_path(self.target / PLUGIN, create=True)
         foreign = self.target / PLUGIN / 'index.ts'
         foreign.write_text('foreign')

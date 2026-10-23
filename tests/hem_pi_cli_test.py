@@ -13,10 +13,11 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_cli, hem_pi
+from binding.python import hem_cli
 from binding.python.cli import hem_pi_cli
+from binding.python.integrations.pi import hem_pi
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
-from binding.python.hem_pi_contracts import MANIFEST_PATH
+from binding.python.integrations.pi.hem_pi_contracts import MANIFEST_PATH
 from binding.python.hem_state import Registry
 
 
@@ -467,7 +468,8 @@ class PiCliTest(unittest.TestCase):
         # CLI dispatch/compatibility/installer up to the failing reservation.
         program = """import sys
 from unittest.mock import patch
-from binding.python import hem_cli, hem_pi
+from binding.python import hem_cli
+from binding.python.integrations.pi import hem_pi
 from binding.python.hem_common import DeadlineExpired, UncertainOutcome
 error = DeadlineExpired('accepted pending', accepted=True) if sys.argv[1]=='3' else UncertainOutcome('reservation uncertain')
 with patch.object(hem_pi, 'set_target', side_effect=error):

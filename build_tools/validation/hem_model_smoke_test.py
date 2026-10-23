@@ -71,7 +71,7 @@ class SmokeFailureTest(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][0], str(self.root / 'a/venv/bin/loom-control'))
         self.assertTrue((self.root / 'results.json').is_file())
         self.assertFalse((runtime / 'model/results.json').exists())
-        from binding.python.hem_pi_state import integration_lock
+        from binding.python.integrations.pi.hem_pi_state import integration_lock
         from binding.python.hem_common import Deadline
         with integration_lock(registry.root, Deadline.after()):
             pass
@@ -190,6 +190,14 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
             'models/pipeline_validation.py',
             'models/qwen_validation.py',
             'pipeline_validation.py',
+            'integrations/__init__.py',
+            'integrations/pi/__init__.py',
+            'integrations/pi/hem_pi.py',
+            'integrations/pi/hem_pi_assets.py',
+            'integrations/pi/hem_pi_contracts.py',
+            'integrations/pi/hem_pi_endpoints.py',
+            'integrations/pi/hem_pi_files.py',
+            'integrations/pi/hem_pi_state.py',
 ):
             self.files[name] = (source / name).read_bytes()
         for relative in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',

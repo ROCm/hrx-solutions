@@ -8,7 +8,7 @@ def configure_integration(integration, root, deadline, *, mode="configure", pi_d
     if mode not in ("configure", "check", "disable"):
         raise InvalidInput("unsupported integration configuration mode")
     if integration == "pi":
-        from .hem_pi import configure_pi
+        from .integrations.pi.hem_pi import configure_pi
         return configure_pi(root, pi_dir, deadline, check=mode == "check", disable=mode == "disable")
     if integration == "omp":
         from .integrations.omp.hem_omp import configure_omp

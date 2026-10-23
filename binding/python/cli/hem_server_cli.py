@@ -12,7 +12,7 @@ from ..hem_http import NativeClient
 from ..hem_process import ProcessManager, read_logs, validate_launch_settings
 from ..hem_state import Registry
 from ..hem_shutdown import ShutdownManager
-from ..hem_pi_endpoints import update_result
+from ..integrations.pi.hem_pi_endpoints import update_result
 
 
 def configure(parser):

@@ -11,11 +11,11 @@ import types
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_pi, hem_pi_files as files
+from binding.python.integrations.pi import hem_pi, hem_pi_files as files
 from binding.python.hem_common import Deadline, InvalidInput, UncertainOutcome
-from binding.python.hem_pi_assets import bundled_assets
-from binding.python.hem_pi_contracts import MANIFEST_PATH, ENDPOINT_PATH
-from binding.python.hem_pi_state import passive_snapshot, get_target, set_target
+from binding.python.integrations.pi.hem_pi_assets import bundled_assets
+from binding.python.integrations.pi.hem_pi_contracts import MANIFEST_PATH, ENDPOINT_PATH
+from binding.python.integrations.pi.hem_pi_state import passive_snapshot, get_target, set_target
 from binding.python.hem_state import Registry
 
 
@@ -26,7 +26,7 @@ def projection(root, target, servers):
 
 
 def projector_fixture():
-    module = types.ModuleType("binding.python.hem_pi_endpoints")
+    module = types.ModuleType("binding.python.integrations.pi.hem_pi_endpoints")
     module.project_endpoints = projection
     from contextlib import ExitStack
     stack = ExitStack()
@@ -87,7 +87,7 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(self.run_pi(disable=True)["changed"], False)
 
     def prior_owned_generation(self):
-        from binding.python.hem_pi_contracts import (NATIVE_PROFILE, NATIVE_COMMIT,
+        from binding.python.integrations.pi.hem_pi_contracts import (NATIVE_PROFILE, NATIVE_COMMIT,
             PREVIOUS_NATIVE_PROFILE, PREVIOUS_NATIVE_COMMIT)
         self.run_pi()
         path = self.target / MANIFEST_PATH
@@ -104,7 +104,7 @@ class InstallerTest(unittest.TestCase):
         return manifest
 
     def test_prior_owned_check_is_passive_and_explicit_refresh_retains_identity(self):
-        from binding.python.hem_pi_contracts import NATIVE_PROFILE, NATIVE_COMMIT
+        from binding.python.integrations.pi.hem_pi_contracts import NATIVE_PROFILE, NATIVE_COMMIT
         prior = self.prior_owned_generation()
         before = self.snapshot()
         result = self.run_pi(check=True)
@@ -124,7 +124,7 @@ class InstallerTest(unittest.TestCase):
         self.assertIsNone(get_target(Registry(self.root)))
 
     def test_prior_manifest_mixed_or_unknown_native_identity_is_refused(self):
-        from binding.python.hem_pi_contracts import NATIVE_COMMIT
+        from binding.python.integrations.pi.hem_pi_contracts import NATIVE_COMMIT
         prior = self.prior_owned_generation()
         path = self.target / MANIFEST_PATH
         for change in (dict(native_commit=NATIVE_COMMIT), dict(native_profile='unknown')):
@@ -460,7 +460,7 @@ class InstallerTest(unittest.TestCase):
         code = """from pathlib import Path
 import sys
 from tests.hem_pi_installer_test import projector_fixture
-from binding.python.hem_pi import configure_pi
+from binding.python.integrations.pi.hem_pi import configure_pi
 from binding.python.hem_common import Deadline, InvalidInput
 try:
  with projector_fixture():

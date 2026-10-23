@@ -13,8 +13,8 @@ from unittest.mock import patch
 PACKAGE = os.environ.get('HEM_TEST_PACKAGE', 'binding.python')
 state = importlib.import_module(PACKAGE + '.integrations.openwebui.hem_openwebui_state')
 common = importlib.import_module(PACKAGE + '.hem_common')
-contracts = importlib.import_module(PACKAGE + '.hem_pi_contracts')
-files = importlib.import_module(PACKAGE + '.hem_pi_files')
+contracts = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_contracts')
+files = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_files')
 
 ROOT = Path('/nonexistent/owned-root')
 TARGET = 'http://127.0.0.1:3000'

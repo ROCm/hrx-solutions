@@ -53,6 +53,14 @@ class InstalledPayloadTest(unittest.TestCase):
             'models/pipeline_validation.py',
             'models/qwen_validation.py',
             'pipeline_validation.py',
+            'integrations/__init__.py',
+            'integrations/pi/__init__.py',
+            'integrations/pi/hem_pi.py',
+            'integrations/pi/hem_pi_assets.py',
+            'integrations/pi/hem_pi_contracts.py',
+            'integrations/pi/hem_pi_endpoints.py',
+            'integrations/pi/hem_pi_files.py',
+            'integrations/pi/hem_pi_state.py',
 ):
             self.files[name] = (source / name).read_bytes()
         for relative in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
@@ -86,10 +94,10 @@ class InstalledPayloadTest(unittest.TestCase):
                     gate.verify_wheel_payload(self.wheel, self.package)
                 target.write_bytes(self.files[name])
 
-    def test_models_require_unique_regular_members_in_the_wheel(self):
+    def test_nested_packages_require_unique_regular_members_in_the_wheel(self):
         import warnings
         for target in self.files:
-            if not target.startswith('models/'):
+            if not target.startswith(('models/', 'integrations/')):
                 continue
             for failure in ('missing', 'changed', 'duplicate', 'symlink', 'directory'):
                 with self.subTest(target=target, failure=failure):
@@ -108,9 +116,9 @@ class InstalledPayloadTest(unittest.TestCase):
                     with self.assertRaises(AssertionError):
                         gate.verify_wheel_payload(self.wheel, self.package)
 
-    def test_models_refuse_installed_symlinks_even_with_identical_bytes(self):
+    def test_nested_packages_refuse_installed_symlinks_even_with_identical_bytes(self):
         for name in self.files:
-            if not name.startswith('models/'):
+            if not name.startswith(('models/', 'integrations/')):
                 continue
             with self.subTest(name=name):
                 target = self.package / name
@@ -258,7 +266,9 @@ class InstalledPayloadTest(unittest.TestCase):
                                ('tui/__init__.py', 'hrx_solutions.tui'),
                                ('integrations/__init__.py', 'hrx_solutions.integrations'),
                                ('integrations/opencode/__init__.py', 'hrx_solutions.integrations.opencode'),
-                               ('integrations/opencode/hem_opencode.py', 'hrx_solutions.integrations.opencode.hem_opencode')):
+                               ('integrations/opencode/hem_opencode.py', 'hrx_solutions.integrations.opencode.hem_opencode'),
+                               ('integrations/pi/__init__.py', 'hrx_solutions.integrations.pi'),
+                               ('integrations/pi/fixture.py', 'hrx_solutions.integrations.pi.fixture')):
             with self.subTest(relative=relative):
                 authored = source / relative
                 authored.parent.mkdir(parents=True, exist_ok=True)

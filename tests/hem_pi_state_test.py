@@ -13,7 +13,7 @@ import uuid
 from binding.python import hem_state
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput
 from binding.python.hem_state import Registry
-from binding.python.hem_pi_state import (passive_snapshot, integration_lock,
+from binding.python.integrations.pi.hem_pi_state import (passive_snapshot, integration_lock,
                                         target_lock, get_target, set_target, clear_target)
 
 
@@ -134,7 +134,7 @@ hem_state.Registry(sys.argv[1])
     def test_passive_snapshot_never_acquires_publication_lock(self):
         Registry(self.root)
         with integration_lock(self.root,Deadline.after()):
-            code='''from binding.python.hem_pi_state import passive_snapshot
+            code='''from binding.python.integrations.pi.hem_pi_state import passive_snapshot
 from binding.python.hem_common import Deadline
 from pathlib import Path
 import sys
@@ -164,7 +164,7 @@ print(passive_snapshot(Path(sys.argv[1]),Deadline.after(.1))['schema_version'])
     def test_reservation_survives_crash_without_claiming_installation(self):
         Registry(self.root)
         code='''from binding.python.hem_state import Registry
-from binding.python.hem_pi_state import set_target
+from binding.python.integrations.pi.hem_pi_state import set_target
 import json,os,sys
 set_target(Registry(sys.argv[1]),json.loads(sys.argv[2]))
 os._exit(24)
@@ -177,7 +177,7 @@ os._exit(24)
     def test_atomic_concurrent_reservations_have_one_winner(self):
         registry=Registry(self.root)
         code='''from binding.python.hem_state import Registry
-from binding.python.hem_pi_state import set_target
+from binding.python.integrations.pi.hem_pi_state import set_target
 from binding.python.hem_common import InvalidInput
 import json,sys
 try:
@@ -210,7 +210,7 @@ except InvalidInput:
                              target_lock(self.target,deadline)):
                     with self.assertRaises(HemError):
                         with lock: pass
-            code='''from binding.python.hem_pi_state import integration_lock
+            code='''from binding.python.integrations.pi.hem_pi_state import integration_lock
 from binding.python.hem_common import Deadline,DeadlineExpired
 import sys
 try:
@@ -220,7 +220,7 @@ except DeadlineExpired: print('timeout')
             result=self.child(code)
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual(result.stdout.strip(),'timeout')
-        code='''from binding.python.hem_pi_state import integration_lock
+        code='''from binding.python.integrations.pi.hem_pi_state import integration_lock
 from binding.python.hem_common import Deadline
 from pathlib import Path
 import sys,os

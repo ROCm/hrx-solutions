@@ -448,7 +448,7 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(runner.summary['runtime']['run_dir'], str(runner.run))
         self.assertTrue(runner.summary['runtime']['retained'])
         # Exercise the real unchanged Pi policy, not a duplicate predicate.
-        from binding.python.hem_pi_files import private_path
+        from binding.python.integrations.pi.hem_pi_files import private_path
         from binding.python.hem_common import InvalidInput
         with self.assertRaisesRegex(InvalidInput, 'unsafe managed directory'):
             private_path(runner.run)
@@ -456,7 +456,7 @@ class RunnerTest(unittest.TestCase):
         private_path(runner.runtime / 'model/pi-agent', create=True)
         runner.current = 'installed-cpu'
         program = ('import os; from pathlib import Path; '
-                   'from binding.python.hem_pi_files import private_path; '
+                   'from binding.python.integrations.pi.hem_pi_files import private_path; '
                    'assert os.environ["HF_HUB_OFFLINE"] == "1"; '
                    'private_path(Path(os.environ["LOOM_SERVE_DIR"]),create=True); '
                    'private_path(Path(os.environ["TMPDIR"])); '

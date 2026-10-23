@@ -59,7 +59,7 @@ def _validate_schema(connection, version, *, deadline=None):
             Registry._read(connection, table, tuple(key))
     check()
     if version == 2:
-        from .hem_pi_state import _read_target
+        from .integrations.pi.hem_pi_state import _read_target
         _read_target(connection)
         check()
 

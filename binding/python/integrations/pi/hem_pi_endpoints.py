@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import hem_display
-from .hem_common import HemError, InvalidInput
+from ... import hem_display
+from ...hem_common import HemError, InvalidInput
 from .hem_pi_contracts import ENDPOINT_PATH, ENDPOINT_SCHEMA_VERSION, NATIVE_PROFILE, provider_id
 from .hem_pi_state import get_target, integration_lock, target_lock
 
@@ -133,5 +133,5 @@ def update_result(registry, deadline, payload):
         payload.update(pi_update='failed', pi_error=str(error),
                        pi_repair='loom-control pi configure')
         hem_display.emit(f'Pi endpoint update failed: {error}; native result unchanged. Repair: loom-control pi configure')
-    from .hem_clients_endpoints import update_result as update_clients
+    from ...hem_clients_endpoints import update_result as update_clients
     return update_clients(registry, deadline, payload)

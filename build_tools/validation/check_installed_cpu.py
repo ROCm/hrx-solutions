@@ -65,6 +65,18 @@ OPENWEBUI_PYTHON_PATHS = (
     'integrations/openwebui/hem_openwebui_wire.py',
 )
 
+PI_PYTHON_PATHS = (
+    'integrations/__init__.py',
+    'integrations/pi/__init__.py',
+    'integrations/pi/hem_pi.py',
+    'integrations/pi/hem_pi_assets.py',
+    'integrations/pi/hem_pi_contracts.py',
+    'integrations/pi/hem_pi_endpoints.py',
+    'integrations/pi/hem_pi_files.py',
+    'integrations/pi/hem_pi_state.py',
+)
+
+
 MODEL_PYTHON_PATHS = (
     'models/__init__.py',
     'models/curated_catalog.py',
@@ -108,6 +120,12 @@ def verify_wheel_payload(wheel, package):
     """Prove installed source, catalog and native bytes came from this exact wheel."""
     checked = {}
     with zipfile.ZipFile(wheel) as archive:
+        for relative in PI_PYTHON_PATHS:
+            name = 'hrx_solutions/' + relative
+            members = [info for info in archive.infolist() if info.filename == name]
+            assert (len(members) == 1 and not members[0].is_dir()
+                    and stat.S_IFMT(members[0].external_attr >> 16) in (0, stat.S_IFREG)), f'missing or malformed Pi payload: {name}'
+            assert not (package / relative).is_symlink(), f'installed Pi payload is not regular: {name}'
         for relative in (*MODEL_PYTHON_PATHS, 'pipeline_validation.py'):
             name = 'hrx_solutions/' + relative
             members = [info for info in archive.infolist() if info.filename == name]

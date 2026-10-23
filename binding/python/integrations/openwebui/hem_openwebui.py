@@ -20,16 +20,16 @@ from ...hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutc
 from .hem_openwebui_http import QUALIFIED_VERSIONS, WebUIClient, canonical_target
 from .hem_openwebui_state import decode_document, desired_connections, ownership_path, plan_change
 from ...hem_clients_endpoints import ensure_endpoints, project_endpoints, read_endpoints
-from ...hem_pi_state import integration_lock, passive_snapshot
+from ..pi.hem_pi_state import integration_lock, passive_snapshot
 from ...hem_state import Registry, _name
-from ...hem_pi_contracts import provider_id
+from ..pi.hem_pi_contracts import provider_id
 from ... import hem_display
 from ... import hem_operation_targets as operation_targets
 from . import hem_openwebui_stt as stt_policy
 from . import hem_openwebui_state as state
 from .hem_openwebui_wire import validate_audio, strict_equal as same
 from .hem_openwebui_receipts import (CLEAR, fail, projection, desired, create_body, comparable, created_row)
-from ... import hem_pi_files as files
+from ..pi import hem_pi_files as files
 
 
 class OpenWebUIResult(dict):

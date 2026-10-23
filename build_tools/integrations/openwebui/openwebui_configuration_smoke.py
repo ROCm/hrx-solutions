@@ -206,7 +206,7 @@ class ConfigurationGate:
         self.gate.save()
 
     def activate(self, namespace):
-        from hrx_solutions.hem_pi_contracts import provider_id
+        from hrx_solutions.integrations.pi.hem_pi_contracts import provider_id
         server = self.gate.servers[namespace][0]
         answer = self.gate.command(namespace, 'instance', 'start', 'small', '--name', 'shared-08b',
             '--server', server, '--pipeline', 'qwen-08b')

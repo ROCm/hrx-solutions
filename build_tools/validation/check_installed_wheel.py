@@ -119,6 +119,20 @@ for relative in (
     installed = Path(module.__file__).resolve()
     assert installed.is_relative_to(package_root)
     assert installed == (package_root / relative).resolve()
+for name in (
+    'integrations',
+    'integrations.pi',
+    'integrations.pi.hem_pi',
+    'integrations.pi.hem_pi_assets',
+    'integrations.pi.hem_pi_contracts',
+    'integrations.pi.hem_pi_endpoints',
+    'integrations.pi.hem_pi_files',
+    'integrations.pi.hem_pi_state',
+):
+    module = importlib.import_module("hrx_solutions." + name)
+    relative = name.replace(".", "/")
+    relative += "/__init__.py" if name in ("integrations", "integrations.pi") else ".py"
+    assert Path(module.__file__).resolve() == package_root / relative
 entrypoints = {entry.name: entry.value for entry in
                importlib.metadata.distribution("hrx-solutions").entry_points
                if entry.group == "console_scripts"}

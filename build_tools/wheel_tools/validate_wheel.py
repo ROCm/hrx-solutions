@@ -41,9 +41,7 @@ HEM_MODULES = (
     "hem_integrations", "hem_client_documents",
     "hem_bootstrap", "hem_cli", "hem_common",
     "hem_display", "hem_http", "hem_instances", "hem_operation_targets", "hem_process",
-    "hem_shutdown", "hem_state", "hem_pi_assets",
-    "hem_pi_contracts", "hem_pi", "hem_pi_endpoints",
-    "hem_pi_files", "hem_pi_state",
+    "hem_shutdown", "hem_state", 
 )
 MODEL_MODULES = (
     'curated_catalog',
@@ -99,6 +97,18 @@ OPENWEBUI_PYTHON_PATHS = (
     'integrations/openwebui/hem_openwebui_stt.py',
     'integrations/openwebui/hem_openwebui_receipts.py',
     'integrations/openwebui/hem_openwebui_wire.py',
+)
+
+
+PI_PYTHON_FILES = (
+    'integrations/__init__.py',
+    'integrations/pi/__init__.py',
+    'integrations/pi/hem_pi.py',
+    'integrations/pi/hem_pi_assets.py',
+    'integrations/pi/hem_pi_contracts.py',
+    'integrations/pi/hem_pi_endpoints.py',
+    'integrations/pi/hem_pi_files.py',
+    'integrations/pi/hem_pi_state.py',
 )
 PI_ASSETS = ("index.ts", "discovery.ts", "budgets.ts", "stream.ts",
              "profile.json", "package.json")
@@ -167,6 +177,19 @@ def validate_client_sdist(path: Path) -> None:
             expected = (REPO_ROOT / "binding/python" / name).read_bytes()
             if matches[0].size != len(expected) or archive.extractfile(matches[0]).read() != expected:
                 raise RuntimeError("sdist client asset differs from reviewed source: " + name)
+
+
+def validate_pi_python_sdist(path: Path) -> None:
+    """The complete Pi Python package stays beside the unchanged root resources."""
+    with tarfile.open(path) as archive:
+        for name in PI_PYTHON_FILES:
+            matches = [member for member in archive.getmembers()
+                       if member.name.endswith('/binding/python/' + name)]
+            if len(matches) != 1 or not matches[0].isfile():
+                raise RuntimeError('sdist is missing or duplicates Pi Python source: ' + name)
+            expected = (REPO_ROOT / 'binding/python' / name).read_bytes()
+            if matches[0].size != len(expected) or archive.extractfile(matches[0]).read() != expected:
+                raise RuntimeError('sdist Pi Python source differs from reviewed source: ' + name)
 
 
 def validate_models_sdist(path: Path) -> None:
@@ -294,6 +317,7 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         required_files.update(PACKAGE_PREFIX + name for name in CLI_FILES)
         required_files.update(PACKAGE_PREFIX + "pi_extension/" + name for name in PI_ASSETS)
         required_files.update(PACKAGE_PREFIX + name for name in (*CLIENT_ASSETS, *TUI_MODULES))
+        required_files.update(PACKAGE_PREFIX + name for name in PI_PYTHON_FILES)
         required_files.update(target.split(":")[0].replace(".", "/") + ".py"
                               for target in REQUIRED_ENTRY_POINTS.values())
         for architecture in ("qwen_27b", "qwen_08b"):
@@ -319,6 +343,14 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             expected = (REPO_ROOT / "binding/python" / name).read_bytes()
             if wheel.namelist().count(member) != 1 or wheel.read(member) != expected:
                 raise RuntimeError("wheel CLI module duplicates or differs from reviewed source: " + member)
+        for name in PI_PYTHON_FILES:
+            member = PACKAGE_PREFIX + name
+            matches = [info for info in wheel.infolist() if info.filename == member]
+            expected = (REPO_ROOT / 'binding/python' / name).read_bytes()
+            if (len(matches) != 1 or matches[0].is_dir()
+                    or stat.S_IFMT(matches[0].external_attr >> 16) not in (0, stat.S_IFREG)
+                    or wheel.read(matches[0]) != expected):
+                raise RuntimeError('wheel Pi Python source duplicates or differs from reviewed source: ' + member)
 
         for relative in OMP_PYTHON_PATHS:
             member = PACKAGE_PREFIX + relative
@@ -438,6 +470,7 @@ def main() -> int:
     count, size = validate_wheel(args.wheel)
     if args.sdist:
         validate_pi_sdist(args.sdist)
+        validate_pi_python_sdist(args.sdist)
         validate_client_sdist(args.sdist)
         validate_models_sdist(args.sdist)
         validate_cli_sdist(args.sdist)

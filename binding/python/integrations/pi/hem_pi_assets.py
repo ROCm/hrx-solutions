@@ -14,7 +14,7 @@ ASSET_NAMES = ("index.ts", "discovery.ts", "budgets.ts", "stream.ts",
 
 
 def bundled_assets() -> Dict[str, bytes]:
-    resource = files(__package__).joinpath("pi_extension")
+    resource = files(__package__.rsplit(".", 2)[0]).joinpath("pi_extension")
     return {EXTENSION_PATH + "/" + name: resource.joinpath(name).read_bytes()
             for name in ASSET_NAMES}
 

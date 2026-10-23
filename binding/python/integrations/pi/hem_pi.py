@@ -19,8 +19,8 @@ from pathlib import Path
 import stat
 import uuid
 
-from .hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
-from . import hem_display
+from ...hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
+from ... import hem_display
 from .hem_pi_contracts import NODE_MIN_VERSION
 from .hem_pi_endpoints import project_endpoints, _origin
 from .hem_pi_assets import bundled_assets, asset_digests
@@ -29,7 +29,7 @@ from .hem_pi_contracts import (PiResult, MANIFEST_PATH, ENDPOINT_PATH,
     NATIVE_PROFILE, NATIVE_COMMIT, PI_PACKAGE, PI_VERSIONS)
 from .hem_pi_state import (passive_snapshot, integration_lock, target_lock,
     get_target, set_target, clear_target)
-from .hem_state import Registry
+from ...hem_state import Registry
 from . import hem_pi_files as files
 
 
@@ -230,7 +230,7 @@ def _endpoint(data, root, identity):
             raise InvalidInput("foreign or incompatible Pi endpoint document")
         # Reuse the shared row contract, accepting only current or one known
         # prior owned profile while preserving this Pi reservation envelope.
-        from .hem_clients_endpoints import validate_endpoints, OWNER
+        from ...hem_clients_endpoints import validate_endpoints, OWNER
         validate_endpoints(dict(schema_version=1, owner=OWNER, hem_root=str(root),
                                 servers=value["servers"]), root)
 

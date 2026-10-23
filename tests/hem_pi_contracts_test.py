@@ -16,7 +16,7 @@ from unittest.mock import patch
 from binding.python import hem_cli
 from binding.python.cli import hem_pi_cli
 from binding.python.hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
-from binding.python.hem_pi_contracts import PiResult, provider_id
+from binding.python.integrations.pi.hem_pi_contracts import PiResult, provider_id
 
 
 class PiContractTest(unittest.TestCase):

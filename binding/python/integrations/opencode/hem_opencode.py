@@ -21,10 +21,10 @@ import subprocess
 from ... import hem_display
 from ...hem_client_documents import MAX_BYTES, decode_document, canonical_uuid as _uuid
 from ...hem_clients_endpoints import ensure_endpoints, project_endpoints, read_endpoints
-from ...hem_pi_state import passive_snapshot
+from ..pi.hem_pi_state import passive_snapshot
 
 from ...hem_common import HemError, InvalidInput, UncertainOutcome, DeadlineExpired, result
-from ...hem_pi_files import (atomic_replace, encoded, private_path, read_owned,
+from ..pi.hem_pi_files import (atomic_replace, encoded, private_path, read_owned,
                            remove_owned, staged_path, sync_dir, validate_stage)
 from ...hem_state import Registry, ResourceLock
 

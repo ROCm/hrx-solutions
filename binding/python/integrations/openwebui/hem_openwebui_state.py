@@ -15,7 +15,7 @@ from pathlib import Path
 from .hem_openwebui_wire import (MAX_BYTES, canonical_target, ownership_error as _fail,
     json_bytes, decode_json, strict_equal as _strict, validate_config)
 from .hem_openwebui_receipts import validate_record, _name
-from ...hem_pi_contracts import NATIVE_PROFILE, READABLE_NATIVE_PROFILES, provider_id
+from ..pi.hem_pi_contracts import NATIVE_PROFILE, READABLE_NATIVE_PROFILES, provider_id
 
 OWNER = "loom-control-openwebui"
 SCHEMA_VERSION = 1

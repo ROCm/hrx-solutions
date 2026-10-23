@@ -9,7 +9,7 @@ import hashlib
 import re
 from pathlib import Path
 from ...hem_common import InvalidInput
-from ...hem_pi_files import read_owned
+from ..pi.hem_pi_files import read_owned
 
 
 def scan(text):

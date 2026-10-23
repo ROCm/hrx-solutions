@@ -9,12 +9,12 @@ from unittest.mock import patch
 import uuid
 
 PACKAGE = os.environ.get('HEM_TEST_PACKAGE', 'binding.python')
-endpoints = importlib.import_module(PACKAGE + '.hem_pi_endpoints')
-contracts = importlib.import_module(PACKAGE + '.hem_pi_contracts')
-state = importlib.import_module(PACKAGE + '.hem_pi_state')
+endpoints = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_endpoints')
+contracts = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_contracts')
+state = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_state')
 Registry = importlib.import_module(PACKAGE + '.hem_state').Registry
 common = importlib.import_module(PACKAGE + '.hem_common')
-assets_module = importlib.import_module(PACKAGE + '.hem_pi_assets')
+assets_module = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_assets')
 from tests import hem_server_cli_test as fixtures
 
 
@@ -51,7 +51,7 @@ class ProjectionTest(unittest.TestCase):
         self.assertEqual(document['servers'][0]['server'],servers[-1]['id'])
 
     def test_exact_serialized_reader_boundary_includes_escapes_and_newline(self):
-        files=importlib.import_module(PACKAGE+'.hem_pi_files')
+        files=importlib.import_module(PACKAGE+'.integrations.pi.hem_pi_files')
         target=dict(integration_id=str(uuid.uuid4()))
         # Find a large valid name just below the byte limit. A few extra root
         # characters then give an exact one-MiB document without filesystem I/O.
@@ -192,7 +192,7 @@ class PublicationTest(unittest.TestCase):
         import subprocess
         import sys
         self.configured()
-        code=(f'from {PACKAGE}.hem_pi_endpoints import publish_endpoints; '
+        code=(f'from {PACKAGE}.integrations.pi.hem_pi_endpoints import publish_endpoints; '
               f'from {PACKAGE}.hem_common import Deadline; '
               f'from {PACKAGE}.hem_state import Registry; '
               'import sys; r=Registry(sys.argv[1],deadline=Deadline.after(2)); '
@@ -225,7 +225,7 @@ class LifecyclePublicationTest(fixtures.ServerCliTest):
         self.launcher[2]=self.launcher[2].replace('raise SystemExit',code+'; raise SystemExit')
 
     def test_prelaunch_failure_does_not_spawn_or_reserve(self):
-        self.inject(f'from {PACKAGE} import hem_pi_endpoints; '
+        self.inject(f'from {PACKAGE}.integrations.pi import hem_pi_endpoints; '
                     "hem_pi_endpoints.publish_endpoints=lambda *a: (_ for _ in ()).throw(hem_pi_endpoints.HemError('publish failed'))")
         payload,_=self.invoke('start','--name','pi-prelaunch','--device','task','--listen',
                               f'127.0.0.1:{fixtures.available_port()}',expected=1)
@@ -235,8 +235,16 @@ class LifecyclePublicationTest(fixtures.ServerCliTest):
         self.assertFalse(payload['completed'])
 
     def test_secondary_failure_keeps_start_status_reuse_shutdown_success(self):
+        import sys
+        # Keep the real venv while deliberately logging an executable path that
+        # contains 'retry'; that path is not a user-facing retry instruction.
+        retry_venv = self.root / 'retry-venv'
+        retry_venv.symlink_to(Path(sys.prefix), target_is_directory=True)
+        self.launcher[0] = str(retry_venv / 'bin' / Path(sys.executable).name)
+        self.inject('import pathlib; '
+                    f'assert pathlib.Path(sys.prefix).resolve()==pathlib.Path({sys.prefix!r}).resolve()')
         # Pass mandatory first publication; fail only subsequent start repair.
-        self.inject(f'from {PACKAGE} import hem_pi_endpoints; '
+        self.inject(f'from {PACKAGE}.integrations.pi import hem_pi_endpoints; '
                     "counter=[0]; "
                     "exec(\"def publish(*args):\\n counter[0]+=1\\n if counter[0]>1: raise hem_pi_endpoints.HemError('secondary failed')\\n return dict(changed=False,new_providers=[],pi_update='unchanged')\"); "
                     "hem_pi_endpoints.publish_endpoints=publish")
@@ -252,20 +260,26 @@ class LifecyclePublicationTest(fixtures.ServerCliTest):
             result,stderr=self.invoke(*args)
             self.assertTrue(result['completed'])
             self.assertEqual(result['pi_update'],'failed')
-            self.assertNotIn('retry',stderr)
+            warnings = [line for line in stderr.splitlines()
+                        if line.startswith('Pi endpoint update failed:')]
+            self.assertEqual(warnings, ['Pi endpoint update failed: secondary failed; '
+                                       'native result unchanged. Repair: loom-control pi configure'])
+            self.assertNotRegex(stderr, r'(?im)^\s*(?:#\s*)?retry(?:\s|:)')
+            if args[0] == 'shutdown':
+                self.assertIn(self.launcher[0], stderr)
         self.assertIsNone(Registry(self.state).get_server('one')['process'])
 
     def test_real_saved_projection_precedes_spawn_and_survives_shutdown(self):
         # Join the actual installer and projector; only payload selection and
         # a pre-spawn assertion are injected. Native lifecycle stays real.
-        installer=importlib.import_module(PACKAGE+'.hem_pi')
+        installer=importlib.import_module(PACKAGE+'.integrations.pi.hem_pi')
         with patch.object(installer, 'inspect_runtime', return_value={}):
             self.assertTrue(installer.configure_pi(self.state,self.root/'pi',common.Deadline.after())['configured'])
         projection=self.state/contracts.ENDPOINT_PATH
         assertion=("def checked_spawn(*a, **kw):\n import json\n from pathlib import Path\n "
                    f"document=json.loads(Path({str(projection)!r}).read_text())\n "
                    "assert document['servers'][0]['server']=='one'\n return original_popen(*a,**kw)")
-        self.inject(f'from {PACKAGE} import hem_pi_endpoints; '
+        self.inject(f'from {PACKAGE}.integrations.pi import hem_pi_endpoints; '
                     'original_popen=hem_server_cli.ProcessManager.func.__init__.__globals__["subprocess"].Popen; '
                     f'exec({assertion!r}); '
                     'hem_server_cli.ProcessManager.func.__init__.__globals__["subprocess"].Popen=checked_spawn')
@@ -286,11 +300,11 @@ class LifecyclePublicationTest(fixtures.ServerCliTest):
     def test_concurrent_configure_and_starts_publish_all_saved_definitions(self):
         import subprocess
         import sys
-        installer=importlib.import_module(PACKAGE+'.hem_pi')
+        installer=importlib.import_module(PACKAGE+'.integrations.pi.hem_pi')
         target=self.root/'pi'
         with patch.object(installer, 'inspect_runtime', return_value={}):
             installer.configure_pi(self.state,target,common.Deadline.after())
-        code=(f'from {PACKAGE} import hem_pi; hem_pi.inspect_runtime=lambda deadline: {{}}; '
+        code=(f'from {PACKAGE}.integrations.pi import hem_pi; hem_pi.inspect_runtime=lambda deadline: {{}}; '
               'configure_pi=hem_pi.configure_pi; '
               f'from {PACKAGE}.hem_common import Deadline; '
               'import sys; from pathlib import Path; '

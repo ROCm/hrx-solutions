@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import stat
 
-from .hem_common import InvalidInput, UncertainOutcome
+from ...hem_common import InvalidInput, UncertainOutcome
 from .hem_pi_assets import bundled_assets, asset_digests
 from .hem_pi_contracts import (PREVIOUS_NATIVE_PROFILE, PREVIOUS_NATIVE_COMMIT, MANIFEST_PATH, ENDPOINT_PATH, INTEGRATION_VERSION,
     MANIFEST_SCHEMA_VERSION, EXTENSION_VERSION, NATIVE_PROFILE, NATIVE_COMMIT,
