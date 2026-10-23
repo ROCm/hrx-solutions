@@ -1,7 +1,12 @@
 """The delivery gate must reject stale/optimistic metadata and empty responses."""
 import argparse
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
 import tempfile
 import types
 import unittest
@@ -43,7 +48,7 @@ class AcceptanceProofTest(unittest.TestCase):
         self.assertFalse((gate.root / 'a/state/clients/endpoints.json').exists())
 
     def metadata(self, expected=None):
-        self.check.run_client = Mock(side_effect=[json.dumps(dict(models=[self.row])),json.dumps(dict(models=[self.row]))])
+        self.check.observe_models = Mock(return_value=[json.dumps(dict(models=[self.row])),json.dumps(dict(models=[self.row]))])
         return self.check.models(self.expected if expected is None else expected)
 
     def test_exact_routes_and_metadata_required(self):
@@ -77,6 +82,139 @@ class AcceptanceProofTest(unittest.TestCase):
         child.terminate.assert_called_once(); child.wait.assert_called_once_with(timeout=10)
         self.assertIsNone(self.check.child)
         self.assertFalse(self.check.evidence['client_cleanup'][0]['identity_verified'])
+
+    def observation_scripts(self, first, second):
+        self.check.project.mkdir()
+        self.check.bun = Path(sys.executable)
+        self.check.client = self.check.gate.root / 'cli.py'
+        self.check.client.write_text(first)
+        probe = self.check.gate.args.source / 'tests/omp_configuration_probe.mjs'
+        probe.parent.mkdir()
+        probe.write_text(second)
+        module = types.ModuleType('hrx_solutions.hem_process')
+        module.identity = lambda pid: pid
+        def exited(pid):
+            try: os.kill(pid, 0)
+            except ProcessLookupError: return True
+            return False
+        module._confirmed_exit = exited
+        return patch.dict('sys.modules', {'hrx_solutions.hem_process': module})
+
+    def assert_pair_retired(self):
+        self.assertIsNone(self.check.child)
+        cleanup = self.check.evidence['client_cleanup']
+        self.assertEqual(len(cleanup), 2)
+        self.assertEqual(len({row['pid'] for row in cleanup}), 2)
+        self.assertTrue(all(row['identity_verified'] and row['processes_exited'] and not row['forced']
+                            for row in cleanup))
+
+    def test_pair_starts_both_before_join_and_preserves_distinct_output(self):
+        # A serial implementation times out: each public host waits for the
+        # other to start, then emits its independent output.
+        def script(own, other):
+            return ("from pathlib import Path\nimport time\n"
+                    f"Path('{own}').touch()\n"
+                    f"while not Path('{other}').exists(): time.sleep(.01)\n"
+                    f"print('{own}')\n")
+        with self.observation_scripts(script('cli', 'probe'), script('probe', 'cli')):
+            self.assertEqual(self.check.observe_models(timeout=2), ['cli\n', 'probe\n'])
+        self.assert_pair_retired()
+        self.assertEqual([row['probe'] for row in self.check.evidence['commands']], [False, True])
+        self.assertEqual(len(self.check.evidence['observation_pairs']), 1)
+
+    def test_either_child_failure_retires_running_sibling(self):
+        for failing in (0, 1):
+            with self.subTest(failing=failing):
+                scripts = ['import time; time.sleep(30)', 'import time; time.sleep(30)']
+                scripts[failing] = 'raise SystemExit(7)'
+                with self.observation_scripts(*scripts):
+                    with self.assertRaisesRegex(AssertionError, 'OMP observation failed'):
+                        self.check.observe_models(timeout=2)
+                self.assert_pair_retired()
+                self.check.project.rmdir()
+                self.check.evidence['client_cleanup'].clear()
+                (self.check.gate.root / 'tests/omp_configuration_probe.mjs').unlink()
+                (self.check.gate.root / 'tests').rmdir()
+
+    def test_pair_timeout_and_cancellation_retire_both(self):
+        with self.observation_scripts('import time; time.sleep(30)', 'import time; time.sleep(30)'):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.check.observe_models(timeout=.1)
+            self.assert_pair_retired()
+
+            self.check.evidence['client_cleanup'].clear()
+            sleep = time.sleep
+            interrupted = False
+            def cancel_once(seconds):
+                nonlocal interrupted
+                if not interrupted:
+                    interrupted = True
+                    raise KeyboardInterrupt
+                sleep(seconds)
+            with patch('build_tools.integrations.omp.omp_configuration_smoke.time.sleep', side_effect=cancel_once):
+                with self.assertRaises(KeyboardInterrupt): self.check.observe_models(timeout=2)
+            self.assert_pair_retired()
+
+
+    def test_second_identity_failure_retires_both_owned_children(self):
+        with self.observation_scripts('import time; time.sleep(30)', 'import time; time.sleep(30)'):
+            module = sys.modules['hrx_solutions.hem_process']
+            module.identity = Mock(side_effect=[123, RuntimeError('second identity unavailable')])
+            module._confirmed_exit = Mock(return_value=True)
+            with self.assertRaisesRegex(RuntimeError, 'second identity unavailable'):
+                self.check.observe_models(timeout=2)
+        self.assertIsNone(self.check.child)
+        cleanup = self.check.evidence['client_cleanup']
+        self.assertEqual(len(cleanup), 2)
+        self.assertEqual([row['identity_verified'] for row in cleanup], [True, False])
+        self.assertTrue(all(row['processes_exited'] and not row['forced'] for row in cleanup))
+
+    def test_launch_boundary_cancellation_publishes_and_retires_child(self):
+        popen = subprocess.Popen
+        original_mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
+        expected_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        try:
+            for cancel_at in (1, 2):
+                with self.subTest(cancel_at=cancel_at), self.observation_scripts(
+                        'import time; time.sleep(30)', 'import time; time.sleep(30)'):
+                    children = []
+                    def launch(*args, **kwargs):
+                        child = popen(*args, **kwargs)
+                        children.append(child)
+                        self.assertTrue({signal.SIGINT, signal.SIGTERM}.issubset(
+                            signal.pthread_sigmask(signal.SIG_BLOCK, set())))
+                        if len(children) == cancel_at:
+                            # The subprocess exists but Popen has not returned
+                            # to its caller: cancellation must remain pending.
+                            os.kill(os.getpid(), signal.SIGINT)
+                            self.assertIn(signal.SIGINT, signal.sigpending())
+                        return child
+                    with patch('build_tools.integrations.omp.omp_configuration_smoke.subprocess.Popen', side_effect=launch):
+                        with self.assertRaises(KeyboardInterrupt): self.check.observe_models(timeout=2)
+                    self.assertEqual(len(children), cancel_at)
+                    self.assertTrue(all(child.poll() is not None for child in children))
+                    self.assertEqual(len(self.check.evidence['client_cleanup']), cancel_at)
+                    self.assertIsNone(self.check.child)
+                    self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, set()), expected_mask)
+                self.check.project.rmdir()
+                self.check.evidence['client_cleanup'].clear()
+                (self.check.gate.root / 'tests/omp_configuration_probe.mjs').unlink()
+                (self.check.gate.root / 'tests').rmdir()
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+
+    def test_children_restore_exact_original_signal_mask(self):
+        original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+        try:
+            expected = sorted(int(value) for value in signal.pthread_sigmask(signal.SIG_BLOCK, set()))
+            script = 'import json,signal; print(json.dumps(sorted(int(x) for x in signal.pthread_sigmask(signal.SIG_BLOCK,set()))))'
+            with self.observation_scripts(script, script):
+                output = self.check.observe_models(timeout=2)
+            self.assertEqual([json.loads(text) for text in output], [expected, expected])
+            self.assertEqual(sorted(int(value) for value in signal.pthread_sigmask(signal.SIG_BLOCK, set())), expected)
+            self.assert_pair_retired()
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
 
     def test_configuration_snapshot_excludes_only_released_vendor_cache_basenames(self):
         self.check.target.mkdir()

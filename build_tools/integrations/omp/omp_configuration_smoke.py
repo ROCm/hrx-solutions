@@ -4,9 +4,11 @@ Only public configure writes the adapter/YAML. Genuine OMP startup, explicit
 refresh and short CLI requests exercise those unchanged generated files.
 """
 import hashlib
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -112,13 +114,85 @@ class ConfigurationGate:
         return self.gate.command('a', 'omp', 'configure', '--omp-dir', str(self.target),
             *args, env_overrides=self.env, **kwargs)
 
+    def observe_models(self, timeout=15):
+        """Join two independent fresh hosts before any native lifecycle change.
+
+        The probe owns separate auth/model databases and refreshes online; it
+        consumes neither the CLI cache nor its output. Configured YAML already
+        exists, so neither registry performs a legacy JSON migration. Files
+        rather than pipes keep either child from blocking on undrained output.
+        """
+        from hrx_solutions.hem_process import identity
+        began = time.monotonic()
+        deadline = began + timeout
+        number = len(self.evidence['commands'])
+        specs = [(self.client, ('models', 'refresh', '--json'), False),
+                 (self.gate.args.source / 'tests/omp_configuration_probe.mjs', (), True)]
+        children = []
+        with ExitStack() as streams:
+            try:
+                for offset, (entry, args, probe) in enumerate(specs):
+                    paths = [self.gate.root / f'omp-{number+offset:02}.{suffix}'
+                             for suffix in ('stdout', 'stderr')]
+                    outputs = [streams.enter_context(path.open('w')) for path in paths]
+                    started = time.monotonic()
+                    # Publish ownership before a pending cancellation can run.
+                    # Children retain the caller's original signal mask.
+                    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+                    try:
+                        child = subprocess.Popen([str(self.bun), str(entry), *args], cwd=self.project,
+                            env=self.env, stdin=subprocess.DEVNULL, stdout=outputs[0], stderr=outputs[1], text=True,
+                            preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, old_mask))
+                        row = dict(child=child, identity=None, paths=paths, args=args, probe=probe,
+                                   started=started, completed=None)
+                        children.append(row)
+                    finally:
+                        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+                    row['identity'] = identity(child.pid)
+                while True:
+                    codes = [row['child'].poll() for row in children]
+                    for row, code in zip(children, codes):
+                        if code is not None and row['completed'] is None:
+                            row['completed'] = time.monotonic()
+                    if any(code is not None and code != 0 for code in codes):
+                        raise AssertionError(('OMP observation failed', codes))
+                    if all(code is not None for code in codes):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired('OMP observation pair', timeout)
+                    time.sleep(0.01)
+            finally:
+                original = sys.exc_info()[1]
+                errors = []
+                for row in children:
+                    self.child, self.identity = row['child'], row['identity']
+                    try:
+                        self.stop_client()
+                    except Exception as error:
+                        errors.append(error)
+                for row in children:
+                    self.evidence['commands'].append(dict(args=row['args'], probe=row['probe'],
+                        exit=row['child'].poll(), seconds=(row['completed'] or time.monotonic())-row['started'],
+                        observation_pair=number))
+                self.evidence.setdefault('observation_pairs', []).append(dict(
+                    commands=list(range(number, number+len(children))), seconds=time.monotonic()-began))
+                self.save()
+                if errors:
+                    self.evidence['cleanup_error'] = repr(errors)
+                    self.save()
+                    if original is None:
+                        raise errors[0]
+                    print('OMP observation cleanup unresolved: ' + repr(errors), file=sys.stderr)
+        return [row['paths'][0].read_text() for row in children]
+
     def models(self, expected):
-        # Explicit public refresh proves the user-facing action; a new host
-        # then proves the documented restart consumes current production data.
-        listing = json.loads(self.run_client('models', 'refresh', '--json'))
+        # Public refresh and a separate fresh host observe the same quiescent
+        # native state independently; both must exit before the next mutation.
+        listing_text, normalized_text = self.observe_models()
+        listing = json.loads(listing_text)
         rows = [row for row in listing['models'] if row['provider'].startswith('loom-hem-')]
         assert {row['provider']+'/'+row['id'] for row in rows} == set(expected), rows
-        normalized = json.loads(self.run_client(probe=True))['models']
+        normalized = json.loads(normalized_text)['models']
         assert {row['provider']+'/'+row['id'] for row in normalized} == set(expected), normalized
         for row in normalized:
             native = expected[row['provider']+'/'+row['id']]
