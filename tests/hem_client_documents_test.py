@@ -6,7 +6,7 @@ import sys
 import unittest
 import uuid
 
-from binding.python import hem_client_documents
+from binding.python.integrations import hem_client_documents
 from binding.python.integrations.opencode import hem_opencode
 from binding.python.integrations.omp import hem_omp
 from binding.python.hem_common import InvalidInput
@@ -67,9 +67,9 @@ class ClientDocumentTest(unittest.TestCase):
                     self.assertFalse(owner._uuid(value))
 
     def test_pure_decoder_import_does_not_load_operational_owners(self):
-        code=('import sys; from binding.python import hem_client_documents as module; '
-              'prefix=module.__package__; '
+        code=('import sys; from binding.python.integrations import hem_client_documents as module; '
+              'prefix=module.__package__.rsplit(".",1)[0]; '
               'assert not any(prefix+"."+name in sys.modules for name in '
-              '("hem_state","integrations.omp.hem_omp","integrations.opencode.hem_opencode","hem_common","hem_http","hem_clients_endpoints")); '
+              '("hem_state","integrations.omp.hem_omp","integrations.opencode.hem_opencode","hem_common","hem_http","integrations.hem_clients_endpoints")); '
               'assert module.decode_document(b"{}") == {}')
         subprocess.run([sys.executable,'-c',code],check=True,timeout=5)

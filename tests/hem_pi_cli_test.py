@@ -388,7 +388,7 @@ class PiCliTest(unittest.TestCase):
         self.assertEqual(result["runtime"]["version"], "1.3.0")
 
     def test_fixed_dispatch_preserves_explicit_namespace_mode_and_deadline(self):
-        from binding.python.hem_integrations import configure_integration
+        from binding.python.integrations.hem_integrations import configure_integration
         deadline = Deadline.after()
         for mode in ("configure", "check", "disable"):
             with patch.object(hem_pi, "configure_pi", return_value={}) as owner:

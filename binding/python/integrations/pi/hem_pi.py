@@ -230,7 +230,7 @@ def _endpoint(data, root, identity):
             raise InvalidInput("foreign or incompatible Pi endpoint document")
         # Reuse the shared row contract, accepting only current or one known
         # prior owned profile while preserving this Pi reservation envelope.
-        from ...hem_clients_endpoints import validate_endpoints, OWNER
+        from ..hem_clients_endpoints import validate_endpoints, OWNER
         validate_endpoints(dict(schema_version=1, owner=OWNER, hem_root=str(root),
                                 servers=value["servers"]), root)
 

@@ -19,7 +19,7 @@ from contextlib import nullcontext
 from ...hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from .hem_openwebui_http import QUALIFIED_VERSIONS, WebUIClient, canonical_target
 from .hem_openwebui_state import decode_document, desired_connections, ownership_path, plan_change
-from ...hem_clients_endpoints import ensure_endpoints, project_endpoints, read_endpoints
+from ..hem_clients_endpoints import ensure_endpoints, project_endpoints, read_endpoints
 from ..pi.hem_pi_state import integration_lock, passive_snapshot
 from ...hem_state import Registry, _name
 from ..pi.hem_pi_contracts import provider_id

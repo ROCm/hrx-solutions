@@ -2,7 +2,7 @@
 import os
 
 from . import hem_arguments as arguments
-from ..hem_integrations import configure_integration
+from ..integrations.hem_integrations import configure_integration
 
 
 def configure(parser):

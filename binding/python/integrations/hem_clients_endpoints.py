@@ -11,11 +11,11 @@ import json
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import hem_display
-from .hem_common import HemError, InvalidInput
-from .integrations.pi.hem_pi_contracts import NATIVE_PROFILE, READABLE_NATIVE_PROFILES, provider_id
-from .integrations.pi.hem_pi_files import atomic_replace, encoded, read_owned
-from .integrations.pi.hem_pi_state import integration_lock
+from .. import hem_display
+from ..hem_common import HemError, InvalidInput
+from .pi.hem_pi_contracts import NATIVE_PROFILE, READABLE_NATIVE_PROFILES, provider_id
+from .pi.hem_pi_files import atomic_replace, encoded, read_owned
+from .pi.hem_pi_state import integration_lock
 
 ENDPOINT_PATH = "clients/endpoints.json"
 SCHEMA_VERSION = 1

@@ -433,7 +433,7 @@ class PackagingTest(unittest.TestCase):
                         for name in PI_ASSETS})
         members.update({'hrx_solutions/'+name:(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
                         for name in wheel_validation.CLIENT_ASSETS})
-        for name in ('pipeline_validation.py','runtime_paths.py','loom_serve.py','models/__init__.py', *(name+'.py' for name in HEM_MODULES), *('models/'+name+'.py' for name in MODEL_MODULES), *wheel_validation.CLI_FILES, *wheel_validation.OMP_PYTHON_PATHS, *wheel_validation.OPENCODE_PYTHON_PATHS, *wheel_validation.OPENWEBUI_PYTHON_PATHS, *wheel_validation.PI_PYTHON_FILES):
+        for name in ('pipeline_validation.py','runtime_paths.py','loom_serve.py','models/__init__.py', *(name+'.py' for name in HEM_MODULES), *('models/'+name+'.py' for name in MODEL_MODULES), *wheel_validation.CLI_FILES, *wheel_validation.OMP_PYTHON_PATHS, *wheel_validation.OPENCODE_PYTHON_PATHS, *wheel_validation.OPENWEBUI_PYTHON_PATHS, *wheel_validation.PI_PYTHON_FILES, *wheel_validation.SHARED_INTEGRATION_PYTHON_PATHS):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         for name in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
                      'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'):
@@ -685,6 +685,61 @@ class PackagingTest(unittest.TestCase):
                     validate_wheel(wheel)
                 self.assertIn(target, str(raised.exception))
 
+    def test_sdist_requires_each_exact_regular_shared_integration_source_once(self):
+        names = ('integrations/__init__.py', 'integrations/hem_integrations.py',
+                 'integrations/hem_client_documents.py', 'integrations/hem_clients_endpoints.py')
+        for target in names:
+            for failure in (None, 'missing', 'changed', 'symlink', 'duplicate'):
+                path = self.root / 'shared-integrations-source.tar.gz'
+                with tarfile.open(path, 'w:gz') as archive:
+                    for name in names:
+                        data = (packaging.REPO_ROOT / 'binding/python' / name).read_bytes()
+                        if name == target and failure == 'missing':
+                            continue
+                        if name == target and failure == 'changed':
+                            data += b'\n# changed source'
+                        member = tarfile.TarInfo('hrx-solutions/binding/python/' + name)
+                        member.size = len(data)
+                        if name == target and failure == 'symlink':
+                            member.type = tarfile.SYMTYPE
+                            member.linkname = '/unreviewed/' + name
+                        archive.addfile(member, io.BytesIO(data))
+                        if name == target and failure == 'duplicate':
+                            archive.addfile(member, io.BytesIO(data))
+                with self.subTest(target=target, failure=failure):
+                    if failure:
+                        with self.assertRaisesRegex(RuntimeError, 'shared integration source'):
+                            wheel_validation.validate_shared_integrations_sdist(path)
+                    else:
+                        wheel_validation.validate_shared_integrations_sdist(path)
+
+
+    def test_wheel_requires_each_exact_regular_shared_integration_source_once(self):
+        import warnings
+        for target in ('integrations/__init__.py', 'integrations/hem_integrations.py',
+                       'integrations/hem_client_documents.py', 'integrations/hem_clients_endpoints.py'):
+            for failure in ('missing', 'changed', 'duplicate', 'symlink', 'directory'):
+                wheel = self.wheel()
+                target_path = 'hrx_solutions/' + target
+                with zipfile.ZipFile(wheel) as archive:
+                    members = {name: archive.read(name) for name in archive.namelist()}
+                with zipfile.ZipFile(wheel, 'w') as archive:
+                    for name, data in members.items():
+                        if name == target_path and failure == 'missing':
+                            continue
+                        member = zipfile.ZipInfo(name)
+                        if name == target_path and failure in ('symlink', 'directory'):
+                            member.external_attr = (0o120777 if failure == 'symlink' else 0o040777) << 16
+                        archive.writestr(member, data + b'changed' if name == target_path and failure == 'changed' else data)
+                        if name == target_path and failure == 'duplicate':
+                            with warnings.catch_warnings():
+                                warnings.simplefilter('ignore', UserWarning)
+                                archive.writestr(member, data)
+                owner = 'Pi Python' if target == 'integrations/__init__.py' else 'shared integration'
+                with self.subTest(target=target, failure=failure), self.assertRaisesRegex(RuntimeError, owner + ' source|missing setup assets'):
+                    validate_wheel(wheel)
+
+
     def test_sdist_requires_each_exact_regular_model_source_once(self):
         names = (
             'models/__init__.py',
@@ -888,6 +943,8 @@ class PackagingTest(unittest.TestCase):
         expected.update(('integrations/__init__.py', 'integrations/opencode/__init__.py',
                          'integrations/opencode/hem_opencode.py'))
         expected.update(('integrations/__init__.py', 'integrations/openwebui/__init__.py', 'integrations/openwebui/hem_openwebui.py', 'integrations/openwebui/hem_openwebui_http.py', 'integrations/openwebui/hem_openwebui_state.py', 'integrations/openwebui/hem_openwebui_stt.py', 'integrations/openwebui/hem_openwebui_receipts.py', 'integrations/openwebui/hem_openwebui_wire.py'))
+        expected.update(('integrations/__init__.py', 'integrations/hem_integrations.py',
+                         'integrations/hem_client_documents.py', 'integrations/hem_clients_endpoints.py'))
         staged = Path(command.build_lib) / 'hrx_solutions'
         self.assertTrue(expected <= {path.relative_to(staged).as_posix()
                                      for path in staged.rglob('*.py')})

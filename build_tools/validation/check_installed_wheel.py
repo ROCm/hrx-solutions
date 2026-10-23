@@ -33,7 +33,6 @@ print(f"package: {hrx_solutions.__file__}")
 package_root = Path(hrx_solutions.__file__).resolve().parent
 package_root.relative_to(Path(sys.prefix).resolve())
 for name in (
-    "hem_integrations", "hem_client_documents",
     "hem_bootstrap", "hem_cli", "hem_common",
     "hem_display", "hem_http", "hem_instances", "hem_process",
     "hem_shutdown", "hem_state",
@@ -133,6 +132,19 @@ for name in (
     relative = name.replace(".", "/")
     relative += "/__init__.py" if name in ("integrations", "integrations.pi") else ".py"
     assert Path(module.__file__).resolve() == package_root / relative
+for relative in (
+    'integrations/__init__.py',
+    'integrations/hem_integrations.py',
+    'integrations/hem_client_documents.py',
+    'integrations/hem_clients_endpoints.py',
+):
+    parts = Path(relative).with_suffix('').parts
+    if parts[-1] == '__init__':
+        parts = parts[:-1]
+    module = importlib.import_module('.'.join(('hrx_solutions', *parts)))
+    installed = Path(module.__file__).resolve()
+    assert installed.is_relative_to(package_root)
+    assert installed == (package_root / relative).resolve()
 entrypoints = {entry.name: entry.value for entry in
                importlib.metadata.distribution("hrx-solutions").entry_points
                if entry.group == "console_scripts"}

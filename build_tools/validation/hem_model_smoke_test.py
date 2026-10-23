@@ -165,6 +165,9 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
         source = Path(__file__).resolve().parents[2] / 'binding/python'
         for name in (
             'integrations/__init__.py',
+            'integrations/hem_integrations.py',
+            'integrations/hem_client_documents.py',
+            'integrations/hem_clients_endpoints.py',
             'integrations/opencode/__init__.py',
             'integrations/opencode/hem_opencode.py',
             'integrations/omp/__init__.py',

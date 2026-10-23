@@ -41,6 +41,14 @@ CLI_FILES = (
 
 
 
+SHARED_INTEGRATION_PYTHON_PATHS = (
+    'integrations/__init__.py',
+    'integrations/hem_integrations.py',
+    'integrations/hem_client_documents.py',
+    'integrations/hem_clients_endpoints.py',
+)
+
+
 OPENCODE_PYTHON_PATHS = (
     'integrations/__init__.py',
     'integrations/opencode/__init__.py',
@@ -150,6 +158,12 @@ def verify_wheel_payload(wheel, package):
             assert (len(members) == 1 and not members[0].is_dir()
                     and stat.S_IFMT(members[0].external_attr >> 16) in (0, stat.S_IFREG)), f'missing or malformed OpenWebUI payload: {name}'
             assert not (package / relative).is_symlink(), f'installed OpenWebUI payload is not regular: {name}'
+        for relative in SHARED_INTEGRATION_PYTHON_PATHS:
+            name = 'hrx_solutions/' + relative
+            members = [info for info in archive.infolist() if info.filename == name]
+            assert (len(members) == 1 and not members[0].is_dir()
+                    and stat.S_IFMT(members[0].external_attr >> 16) in (0, stat.S_IFREG)), f'missing or malformed shared integration payload: {name}'
+            assert not (package / relative).is_symlink(), f'installed shared integration payload is not regular: {name}'
         for name in archive.namelist():
             if not name.startswith('hrx_solutions/') or name.endswith('/'):
                 continue

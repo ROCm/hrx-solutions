@@ -439,7 +439,7 @@ class STTTest(unittest.TestCase):
         self.assertFalse(any(call.endswith(('update', 'create', 'delete')) for call in self.client.calls))
 
     def test_fixed_entry_one_client_one_mutation_lock_and_no_recursion(self):
-        dispatch = importlib.import_module(PACKAGE + '.hem_integrations').configure_integration
+        dispatch = importlib.import_module(PACKAGE + '.integrations.hem_integrations').configure_integration
         deadline = common.Deadline.after()
         original, publish, lock = hem.configure_openwebui, hem.ensure_endpoints, hem.integration_lock
         held = [False]

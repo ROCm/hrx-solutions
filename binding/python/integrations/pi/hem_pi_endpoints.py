@@ -133,5 +133,5 @@ def update_result(registry, deadline, payload):
         payload.update(pi_update='failed', pi_error=str(error),
                        pi_repair='loom-control pi configure')
         hem_display.emit(f'Pi endpoint update failed: {error}; native result unchanged. Repair: loom-control pi configure')
-    from ...hem_clients_endpoints import update_result as update_clients
+    from ..hem_clients_endpoints import update_result as update_clients
     return update_clients(registry, deadline, payload)

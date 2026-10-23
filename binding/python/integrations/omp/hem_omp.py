@@ -19,9 +19,9 @@ import subprocess
 
 from ...hem_common import InvalidInput, result, HemError, DeadlineExpired, UncertainOutcome
 from ... import hem_display
-from ...hem_client_documents import MAX_BYTES, decode_document, canonical_uuid as _uuid
+from ..hem_client_documents import MAX_BYTES, decode_document, canonical_uuid as _uuid
 from ..pi.hem_pi_state import passive_snapshot
-from ...hem_clients_endpoints import project_endpoints, ensure_endpoints, read_endpoints
+from ..hem_clients_endpoints import project_endpoints, ensure_endpoints, read_endpoints
 from ...hem_state import Registry
 from ..pi.hem_pi_files import (atomic_replace, encoded, private_path, read_owned,
                            remove_owned, staged_path, sync_dir, validate_stage)

@@ -275,7 +275,7 @@ class OpenCodeCliTest(unittest.TestCase):
                 self.assertEqual({name: (directory / name).read_bytes() for name in owner.FILES}, desired)
 
     def test_dispatch_calls_complete_owner_once_and_reads_assets_once(self):
-        from binding.python.hem_integrations import configure_integration
+        from binding.python.integrations.hem_integrations import configure_integration
         with patch.object(owner, 'inspect_runtime', return_value={'qualification': 'test'}), patch.object(
                 owner, 'configure_opencode', wraps=owner.configure_opencode) as operation, patch.object(
                 owner, 'bundled_assets', wraps=owner.bundled_assets) as assets:
@@ -290,7 +290,7 @@ class OpenCodeCliTest(unittest.TestCase):
             self.assertEqual(configure_integration('opencode', self.root, Deadline.after(5), mode='disable', opencode_dir=self.target)['state'], 'disabled')
 
     def test_fixed_dispatch_preserves_namespace_target_mode_and_deadline(self):
-        from binding.python.hem_integrations import configure_integration
+        from binding.python.integrations.hem_integrations import configure_integration
         deadline = Deadline.after(5)
         for mode in ('configure', 'check', 'disable'):
             with patch.object(owner, 'configure_opencode', return_value={}) as operation:

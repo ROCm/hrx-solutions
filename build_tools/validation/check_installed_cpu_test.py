@@ -28,6 +28,9 @@ class InstalledPayloadTest(unittest.TestCase):
         source = Path(__file__).resolve().parents[2] / 'binding/python'
         for name in (
             'integrations/__init__.py',
+            'integrations/hem_integrations.py',
+            'integrations/hem_client_documents.py',
+            'integrations/hem_clients_endpoints.py',
             'integrations/opencode/__init__.py',
             'integrations/opencode/hem_opencode.py',
             'integrations/omp/__init__.py',
@@ -265,6 +268,9 @@ class InstalledPayloadTest(unittest.TestCase):
                                ('tui/fixture.py', 'hrx_solutions.tui.fixture'),
                                ('tui/__init__.py', 'hrx_solutions.tui'),
                                ('integrations/__init__.py', 'hrx_solutions.integrations'),
+                               ('integrations/hem_integrations.py', 'hrx_solutions.integrations.hem_integrations'),
+                               ('integrations/hem_client_documents.py', 'hrx_solutions.integrations.hem_client_documents'),
+                               ('integrations/hem_clients_endpoints.py', 'hrx_solutions.integrations.hem_clients_endpoints'),
                                ('integrations/opencode/__init__.py', 'hrx_solutions.integrations.opencode'),
                                ('integrations/opencode/hem_opencode.py', 'hrx_solutions.integrations.opencode.hem_opencode'),
                                ('integrations/pi/__init__.py', 'hrx_solutions.integrations.pi'),
@@ -337,6 +343,46 @@ class InstalledPayloadTest(unittest.TestCase):
                     target.unlink()
                 else:
                     target.write_bytes(original)
+
+
+    def test_shared_integrations_require_unique_regular_members_in_the_wheel(self):
+        import warnings
+        for target in self.files:
+            if target not in ('integrations/__init__.py', 'integrations/hem_integrations.py', 'integrations/hem_client_documents.py', 'integrations/hem_clients_endpoints.py'):
+                continue
+            for failure in ('missing', 'changed', 'duplicate', 'symlink', 'directory'):
+                with self.subTest(target=target, failure=failure):
+                    with zipfile.ZipFile(self.wheel, 'w') as archive:
+                        for name, data in self.files.items():
+                            if name == target and failure == 'missing':
+                                continue
+                            member = zipfile.ZipInfo('hrx_solutions/' + name)
+                            if name == target and failure in ('symlink', 'directory'):
+                                member.external_attr = (0o120777 if failure == 'symlink' else 0o040777) << 16
+                            archive.writestr(member, data + b'changed' if name == target and failure == 'changed' else data)
+                            if name == target and failure == 'duplicate':
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter('ignore', UserWarning)
+                                    archive.writestr(member, data)
+                    with self.assertRaises(AssertionError):
+                        gate.verify_wheel_payload(self.wheel, self.package)
+
+
+    def test_shared_integrations_refuse_installed_symlinks_even_with_identical_bytes(self):
+        for name in self.files:
+            if name not in ('integrations/__init__.py', 'integrations/hem_integrations.py', 'integrations/hem_client_documents.py', 'integrations/hem_clients_endpoints.py'):
+                continue
+            with self.subTest(name=name):
+                target = self.package / name
+                backup = target.with_suffix('.owned-copy')
+                target.rename(backup)
+                target.symlink_to(backup)
+                try:
+                    with self.assertRaisesRegex(AssertionError, 'not regular'):
+                        gate.verify_wheel_payload(self.wheel, self.package)
+                finally:
+                    target.unlink()
+                    backup.rename(target)
 
 
 class FixtureAdmissionTest(unittest.TestCase):

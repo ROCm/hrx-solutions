@@ -141,7 +141,7 @@ class OMPCliTest(unittest.TestCase):
         self.assertEqual((self.target/'models.yml').read_text(),'providers:\n  local: {auth: none}\n')
 
     def test_fixed_dispatch_keeps_explicit_omp_namespace_and_deadline(self):
-        from binding.python.hem_integrations import configure_integration
+        from binding.python.integrations.hem_integrations import configure_integration
         deadline=Deadline.after()
         for mode in ('configure','check','disable'):
             with patch.object(owner,'configure_omp',return_value={}) as operation:

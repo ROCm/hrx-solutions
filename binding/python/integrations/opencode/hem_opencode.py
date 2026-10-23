@@ -19,8 +19,8 @@ import stat
 import subprocess
 
 from ... import hem_display
-from ...hem_client_documents import MAX_BYTES, decode_document, canonical_uuid as _uuid
-from ...hem_clients_endpoints import ensure_endpoints, project_endpoints, read_endpoints
+from ..hem_client_documents import MAX_BYTES, decode_document, canonical_uuid as _uuid
+from ..hem_clients_endpoints import ensure_endpoints, project_endpoints, read_endpoints
 from ..pi.hem_pi_state import passive_snapshot
 
 from ...hem_common import HemError, InvalidInput, UncertainOutcome, DeadlineExpired, result

@@ -172,7 +172,7 @@ class CoordinatorTest(unittest.TestCase):
         self.assertFalse(absent.exists())
 
     def test_fixed_dispatch_preserves_webui_options_and_budget(self):
-        dispatch = importlib.import_module(PACKAGE + '.hem_integrations').configure_integration
+        dispatch = importlib.import_module(PACKAGE + '.integrations.hem_integrations').configure_integration
         deadline = common.Deadline.after()
         for mode in ('configure', 'check', 'disable'):
             with patch.object(hem, 'configure_openwebui', return_value={}) as entry:
