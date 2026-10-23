@@ -433,7 +433,7 @@ class PackagingTest(unittest.TestCase):
                         for name in PI_ASSETS})
         members.update({'hrx_solutions/'+name:(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
                         for name in wheel_validation.CLIENT_ASSETS})
-        for name in ('pipeline_validation.py','runtime_paths.py','loom_serve.py','models/__init__.py', *(name+'.py' for name in HEM_MODULES), *('models/'+name+'.py' for name in MODEL_MODULES), *wheel_validation.CLI_FILES):
+        for name in ('pipeline_validation.py','runtime_paths.py','loom_serve.py','models/__init__.py', *(name+'.py' for name in HEM_MODULES), *('models/'+name+'.py' for name in MODEL_MODULES), *wheel_validation.CLI_FILES, *wheel_validation.OMP_PYTHON_PATHS):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         for name in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
                      'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'):
@@ -453,7 +453,8 @@ class PackagingTest(unittest.TestCase):
         return wheel
 
     def test_client_resources_materialize_one_authored_companion(self):
-        from binding.python import hem_omp, hem_opencode
+        from binding.python import hem_opencode
+        from binding.python.integrations.omp import hem_omp
         for directory,installer in (('omp_extension',hem_omp),('opencode_plugin',hem_opencode)):
             expected={name.removeprefix(directory+'/') for name in wheel_validation.CLIENT_ASSETS
                       if name.startswith(directory+'/')} | {'native_protocol.ts'}
@@ -517,6 +518,58 @@ class PackagingTest(unittest.TestCase):
                                 validator(path)
                         else:
                             validator(path)
+
+    def test_sdist_requires_each_exact_regular_omp_source_once(self):
+        names = ('integrations/__init__.py', 'integrations/omp/__init__.py',
+                 'integrations/omp/hem_omp.py', 'integrations/omp/hem_omp_yaml.py')
+        for target in names:
+            for failure in (None, 'missing', 'changed', 'symlink', 'duplicate'):
+                path = self.root / 'omp-source.tar.gz'
+                with tarfile.open(path, 'w:gz') as archive:
+                    for name in names:
+                        data = (packaging.REPO_ROOT / 'binding/python' / name).read_bytes()
+                        if name == target and failure == 'missing':
+                            continue
+                        if name == target and failure == 'changed':
+                            data += b'\n# changed source'
+                        member = tarfile.TarInfo('hrx-solutions/binding/python/' + name)
+                        member.size = len(data)
+                        if name == target and failure == 'symlink':
+                            member.type = tarfile.SYMTYPE
+                            member.linkname = '/unreviewed/' + name
+                        archive.addfile(member, io.BytesIO(data))
+                        if name == target and failure == 'duplicate':
+                            archive.addfile(member, io.BytesIO(data))
+                with self.subTest(target=target, failure=failure):
+                    if failure:
+                        with self.assertRaisesRegex(RuntimeError, 'OMP source'):
+                            wheel_validation.validate_omp_sdist(path)
+                    else:
+                        wheel_validation.validate_omp_sdist(path)
+
+    def test_wheel_requires_each_exact_regular_omp_source_once(self):
+        import warnings
+        for target in ('integrations/__init__.py', 'integrations/omp/__init__.py',
+                       'integrations/omp/hem_omp.py', 'integrations/omp/hem_omp_yaml.py'):
+            for failure in ('missing', 'changed', 'duplicate', 'symlink', 'directory'):
+                wheel = self.wheel()
+                target_path = 'hrx_solutions/' + target
+                with zipfile.ZipFile(wheel) as archive:
+                    members = {name: archive.read(name) for name in archive.namelist()}
+                with zipfile.ZipFile(wheel, 'w') as archive:
+                    for name, data in members.items():
+                        if name == target_path and failure == 'missing':
+                            continue
+                        member = zipfile.ZipInfo(name)
+                        if name == target_path and failure in ('symlink', 'directory'):
+                            member.external_attr = (0o120777 if failure == 'symlink' else 0o040777) << 16
+                        archive.writestr(member, data + b'changed' if name == target_path and failure == 'changed' else data)
+                        if name == target_path and failure == 'duplicate':
+                            with warnings.catch_warnings():
+                                warnings.simplefilter('ignore', UserWarning)
+                                archive.writestr(member, data)
+                with self.subTest(target=target, failure=failure), self.assertRaisesRegex(RuntimeError, 'OMP source|missing setup assets'):
+                    validate_wheel(wheel)
 
     def test_sdist_requires_each_exact_regular_model_source_once(self):
         names = (
@@ -648,6 +701,8 @@ class PackagingTest(unittest.TestCase):
         expected = {'models/__init__.py', *('models/'+name+'.py' for name in MODEL_MODULES),
                     *wheel_validation.CLI_FILES, *('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
                      'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py')}
+        expected.update(('integrations/__init__.py', 'integrations/omp/__init__.py',
+                         'integrations/omp/hem_omp.py', 'integrations/omp/hem_omp_yaml.py'))
         staged = Path(command.build_lib) / 'hrx_solutions'
         self.assertTrue(expected <= {path.relative_to(staged).as_posix()
                                      for path in staged.rglob('*.py')})

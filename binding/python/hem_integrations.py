@@ -11,7 +11,7 @@ def configure_integration(integration, root, deadline, *, mode="configure", pi_d
         from .hem_pi import configure_pi
         return configure_pi(root, pi_dir, deadline, check=mode == "check", disable=mode == "disable")
     if integration == "omp":
-        from .hem_omp import configure_omp
+        from .integrations.omp.hem_omp import configure_omp
         return configure_omp(root, omp_dir, deadline, check=mode == "check", disable=mode == "disable")
     if integration == "opencode":
         from .hem_opencode import configure_opencode

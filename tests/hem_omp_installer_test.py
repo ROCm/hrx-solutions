@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_omp as installer
-from binding.python.hem_omp_yaml import scan
+from binding.python.integrations.omp import hem_omp as installer
+from binding.python.integrations.omp.hem_omp_yaml import scan
 from binding.python.hem_common import Deadline, InvalidInput
 
 

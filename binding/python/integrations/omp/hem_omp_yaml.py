@@ -8,8 +8,8 @@ import base64
 import hashlib
 import re
 from pathlib import Path
-from .hem_common import InvalidInput
-from .hem_pi_files import read_owned
+from ...hem_common import InvalidInput
+from ...hem_pi_files import read_owned
 
 
 def scan(text):

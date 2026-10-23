@@ -7,8 +7,9 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from binding.python import hem_cli, hem_omp as owner
+from binding.python import hem_cli
 from binding.python.cli import hem_omp_cli as cli
+from binding.python.integrations.omp import hem_omp as owner
 from binding.python.hem_common import Deadline, InvalidInput
 from binding.python.hem_state import Registry
 

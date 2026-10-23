@@ -40,6 +40,14 @@ CLI_FILES = (
 )
 
 
+
+OMP_PYTHON_PATHS = (
+    'integrations/__init__.py',
+    'integrations/omp/__init__.py',
+    'integrations/omp/hem_omp.py',
+    'integrations/omp/hem_omp_yaml.py',
+)
+
 MODEL_PYTHON_PATHS = (
     'models/__init__.py',
     'models/curated_catalog.py',
@@ -89,6 +97,12 @@ def verify_wheel_payload(wheel, package):
             assert (len(members) == 1 and not members[0].is_dir()
                     and stat.S_IFMT(members[0].external_attr >> 16) in (0, stat.S_IFREG)), f'missing or malformed model payload: {name}'
             assert not (package / relative).is_symlink(), f'installed model payload is not regular: {name}'
+        for relative in OMP_PYTHON_PATHS:
+            name = 'hrx_solutions/' + relative
+            members = [info for info in archive.infolist() if info.filename == name]
+            assert (len(members) == 1 and not members[0].is_dir()
+                    and stat.S_IFMT(members[0].external_attr >> 16) in (0, stat.S_IFREG)), f'missing or malformed OMP payload: {name}'
+            assert not (package / relative).is_symlink(), f'installed OMP payload is not regular: {name}'
         for name in archive.namelist():
             if not name.startswith('hrx_solutions/') or name.endswith('/'):
                 continue

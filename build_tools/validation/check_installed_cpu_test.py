@@ -27,6 +27,10 @@ class InstalledPayloadTest(unittest.TestCase):
                       'loom-pipeline/qwen/control.loom': b'catalog fixture'}
         source = Path(__file__).resolve().parents[2] / 'binding/python'
         for name in (
+            'integrations/__init__.py',
+            'integrations/omp/__init__.py',
+            'integrations/omp/hem_omp.py',
+            'integrations/omp/hem_omp_yaml.py',
             'models/__init__.py',
             'models/curated_catalog.py',
             'models/gguf.py',
@@ -98,6 +102,44 @@ class InstalledPayloadTest(unittest.TestCase):
     def test_models_refuse_installed_symlinks_even_with_identical_bytes(self):
         for name in self.files:
             if not name.startswith('models/'):
+                continue
+            with self.subTest(name=name):
+                target = self.package / name
+                backup = target.with_suffix('.owned-copy')
+                target.rename(backup)
+                target.symlink_to(backup)
+                try:
+                    with self.assertRaisesRegex(AssertionError, 'not regular'):
+                        gate.verify_wheel_payload(self.wheel, self.package)
+                finally:
+                    target.unlink()
+                    backup.rename(target)
+
+    def test_omp_require_unique_regular_members_in_the_wheel(self):
+        import warnings
+        for target in self.files:
+            if not target.startswith('integrations/'):
+                continue
+            for failure in ('missing', 'changed', 'duplicate', 'symlink', 'directory'):
+                with self.subTest(target=target, failure=failure):
+                    with zipfile.ZipFile(self.wheel, 'w') as archive:
+                        for name, data in self.files.items():
+                            if name == target and failure == 'missing':
+                                continue
+                            member = zipfile.ZipInfo('hrx_solutions/' + name)
+                            if name == target and failure in ('symlink', 'directory'):
+                                member.external_attr = (0o120777 if failure == 'symlink' else 0o040777) << 16
+                            archive.writestr(member, data + b'changed' if name == target and failure == 'changed' else data)
+                            if name == target and failure == 'duplicate':
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter('ignore', UserWarning)
+                                    archive.writestr(member, data)
+                    with self.assertRaises(AssertionError):
+                        gate.verify_wheel_payload(self.wheel, self.package)
+
+    def test_omp_refuse_installed_symlinks_even_with_identical_bytes(self):
+        for name in self.files:
+            if not name.startswith('integrations/'):
                 continue
             with self.subTest(name=name):
                 target = self.package / name

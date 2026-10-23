@@ -17,15 +17,15 @@ import shlex
 import shutil
 import subprocess
 
-from .hem_common import InvalidInput, result, HemError, DeadlineExpired, UncertainOutcome
-from . import hem_display
-from .hem_client_documents import MAX_BYTES, decode_document, canonical_uuid as _uuid
-from .hem_pi_state import passive_snapshot
-from .hem_clients_endpoints import project_endpoints, ensure_endpoints, read_endpoints
-from .hem_state import Registry
-from .hem_pi_files import (atomic_replace, encoded, private_path, read_owned,
+from ...hem_common import InvalidInput, result, HemError, DeadlineExpired, UncertainOutcome
+from ... import hem_display
+from ...hem_client_documents import MAX_BYTES, decode_document, canonical_uuid as _uuid
+from ...hem_pi_state import passive_snapshot
+from ...hem_clients_endpoints import project_endpoints, ensure_endpoints, read_endpoints
+from ...hem_state import Registry
+from ...hem_pi_files import (atomic_replace, encoded, private_path, read_owned,
                            remove_owned, staged_path, sync_dir, validate_stage)
-from .hem_state import ResourceLock
+from ...hem_state import ResourceLock
 from .hem_omp_yaml import scan, selected_file, edit_plan
 
 ASSETS = ("index.ts", "discovery.ts", "native_protocol.ts", "installation.ts", "activation.ts", "stream.ts", "profile.json", "package.json")
@@ -118,8 +118,9 @@ class OMPResult(dict):
 
 
 def bundled_assets():
-    resource = files(__package__).joinpath("omp_extension")
-    return {name: (files(__package__).joinpath(name) if name == "native_protocol.ts" else resource.joinpath(name)).read_bytes()
+    package = files(__package__.rsplit(".", 2)[0])
+    resource = package.joinpath("omp_extension")
+    return {name: (package.joinpath(name) if name == "native_protocol.ts" else resource.joinpath(name)).read_bytes()
             for name in ASSETS}
 
 

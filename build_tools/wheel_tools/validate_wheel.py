@@ -76,6 +76,14 @@ CLI_FILES = (
 TUI_MODULES = ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
                      'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py')
 
+
+
+OMP_PYTHON_PATHS = (
+    'integrations/__init__.py',
+    'integrations/omp/__init__.py',
+    'integrations/omp/hem_omp.py',
+    'integrations/omp/hem_omp_yaml.py',
+)
 PI_ASSETS = ("index.ts", "discovery.ts", "budgets.ts", "stream.ts",
              "profile.json", "package.json")
 # Independent authored resource inventory; do not derive acceptance from installers.
@@ -99,6 +107,8 @@ OBSOLETE_MODULES = (
     'hem_opencode_cli',
     'hem_openwebui_cli',
 
+
+    "hem_omp", "hem_omp_yaml",
     "setup_cli", "serve_start", "connection_manager", "server_manager",
     "remote_registry", "state_store",
 )
@@ -160,6 +170,18 @@ def validate_cli_sdist(path: Path) -> None:
             if matches[0].size != len(expected) or archive.extractfile(matches[0]).read() != expected:
                 raise RuntimeError("sdist CLI module differs from reviewed source: " + name)
 
+def validate_omp_sdist(path: Path) -> None:
+    """Require the exact regular Python sources for the complete OMP package."""
+    with tarfile.open(path) as archive:
+        for relative in OMP_PYTHON_PATHS:
+            matches = [member for member in archive.getmembers()
+                       if member.name.endswith('/binding/python/' + relative)]
+            if len(matches) != 1 or not matches[0].isfile():
+                raise RuntimeError('sdist is missing or duplicates OMP source: ' + relative)
+            expected = (REPO_ROOT / 'binding/python' / relative).read_bytes()
+            if matches[0].size != len(expected) or archive.extractfile(matches[0]).read() != expected:
+                raise RuntimeError('sdist OMP source differs from reviewed source: ' + relative)
+
 
 def validate_wheel(path: Path) -> tuple[int, int]:
     duplicates: dict[str, list[str]] = defaultdict(list)
@@ -216,6 +238,7 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             PACKAGE_PREFIX + "runtime_paths.py",
         }
         required_files.update(PACKAGE_PREFIX + name + ".py" for name in HEM_MODULES)
+        required_files.update(PACKAGE_PREFIX + name for name in OMP_PYTHON_PATHS)
         required_files.add(PACKAGE_PREFIX + "models/__init__.py")
         required_files.update(PACKAGE_PREFIX + "models/" + name + ".py" for name in MODEL_MODULES)
         required_files.update(PACKAGE_PREFIX + name for name in CLI_FILES)
@@ -246,6 +269,15 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             expected = (REPO_ROOT / "binding/python" / name).read_bytes()
             if wheel.namelist().count(member) != 1 or wheel.read(member) != expected:
                 raise RuntimeError("wheel CLI module duplicates or differs from reviewed source: " + member)
+
+        for relative in OMP_PYTHON_PATHS:
+            member = PACKAGE_PREFIX + relative
+            matches = [info for info in wheel.infolist() if info.filename == member]
+            expected = (REPO_ROOT / 'binding/python' / relative).read_bytes()
+            if (len(matches) != 1 or matches[0].is_dir()
+                    or stat.S_IFMT(matches[0].external_attr >> 16) not in (0, stat.S_IFREG)
+                    or wheel.read(matches[0]) != expected):
+                raise RuntimeError('wheel OMP source duplicates or differs from reviewed source: ' + member)
 
         for name in PI_ASSETS:
             member = PACKAGE_PREFIX + "pi_extension/" + name
@@ -341,6 +373,8 @@ def main() -> int:
         validate_client_sdist(args.sdist)
         validate_models_sdist(args.sdist)
         validate_cli_sdist(args.sdist)
+
+        validate_omp_sdist(args.sdist)
         with tarfile.open(args.sdist) as source_archive:
             moonshine_catalog.validate_source_archive(source_archive, REPO_ROOT)
     print(f"Validated {args.wheel}: {count} native libraries, {size} bytes")

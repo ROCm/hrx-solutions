@@ -75,6 +75,21 @@ for name in (
 for name in ('__init__', 'hem_tui', 'hem_tui_details', 'hem_tui_logs', 'hem_tui_provider'):
     module = importlib.import_module('hrx_solutions.tui' + ('' if name == '__init__' else '.' + name))
     assert Path(module.__file__).resolve() == package_root / 'tui' / (name + '.py')
+
+
+for relative in (
+    'integrations/__init__.py',
+    'integrations/omp/__init__.py',
+    'integrations/omp/hem_omp.py',
+    'integrations/omp/hem_omp_yaml.py',
+):
+    parts = Path(relative).with_suffix('').parts
+    if parts[-1] == '__init__':
+        parts = parts[:-1]
+    module = importlib.import_module('.'.join(('hrx_solutions', *parts)))
+    installed = Path(module.__file__).resolve()
+    assert installed.is_relative_to(package_root)
+    assert installed == (package_root / relative).resolve()
 entrypoints = {entry.name: entry.value for entry in
                importlib.metadata.distribution("hrx-solutions").entry_points
                if entry.group == "console_scripts"}

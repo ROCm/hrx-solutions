@@ -164,6 +164,10 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
                     'loom-pipeline/fixture/pipeline.loombc':b'LOOM fixture'}
         source = Path(__file__).resolve().parents[2] / 'binding/python'
         for name in (
+            'integrations/__init__.py',
+            'integrations/omp/__init__.py',
+            'integrations/omp/hem_omp.py',
+            'integrations/omp/hem_omp_yaml.py',
             'models/__init__.py',
             'models/curated_catalog.py',
             'models/gguf.py',
