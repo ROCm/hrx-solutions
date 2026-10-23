@@ -58,8 +58,10 @@ class JoinFixture:
         self.package = self.root / 'hrx_solutions'
         checkout = Path(__file__).resolve().parents[1]
         self.package.mkdir()
-        for source in (checkout / 'binding/python').glob('*.py'):
-            shutil.copy2(source, self.package / source.name)
+        for source in (checkout / 'binding/python').rglob('*.py'):
+            destination = self.package / source.relative_to(checkout / 'binding/python')
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
         shutil.copytree(checkout / 'loom-pipeline', self.package / 'loom-pipeline')
         install_lifecycle_profile(self.package / 'loom-pipeline')
         (self.package / '_native/bin').mkdir(parents=True)
@@ -71,7 +73,7 @@ class JoinFixture:
         self.environment.pop('PYTHONHOME', None)
         digest = hashlib.sha256(b'{"model":{"fixture":true}}').hexdigest()
         self.script = (
-            'from hrx_solutions import hem_cli, hem_config; '
+            'from hrx_solutions import hem_cli; from hrx_solutions.models import hem_config; '
             'original=hem_config.load_profile; '
             f'hem_config.load_profile=lambda catalog: dict(original(catalog), tokenizer_canonical_sha256={digest!r}); '
             'raise SystemExit(hem_cli.main())')

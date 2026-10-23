@@ -7,7 +7,7 @@ from unittest.mock import patch
 import zipfile
 
 from build_tools.model_tools import moonshine_preparer as preparer
-from binding.python import moonshine_preparation
+from binding.python.models import moonshine_preparation
 
 
 class MoonshinePreparerTest(unittest.TestCase):

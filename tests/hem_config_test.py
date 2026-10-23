@@ -9,10 +9,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_config as config, hem_cli
-from binding.python.gguf import inspect_gguf_set
+from binding.python import hem_cli
+from binding.python.models import hem_config as config
+from binding.python.models.gguf import inspect_gguf_set
 from binding.python.hem_common import Deadline, DeadlineExpired, InvalidInput
-from binding.python.model_store import ModelFiles
+from binding.python.models.model_store import ModelFiles
 from tests.gguf_fixtures import expected_tensors, lifecycle_profile, profile, write_matching_gguf
 
 

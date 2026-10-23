@@ -12,7 +12,7 @@ import sys
 import tempfile
 import threading
 
-from .hem_common import HemError
+from ..hem_common import HemError
 from . import model_download
 from .model_store import NamedAsset, PreparationResult, prepared_outputs, readable_file, ModelImportError
 from .moonshine_preparer_identity import FILES as TOOL_FILES, RELATIVE, REVISION
@@ -25,7 +25,7 @@ GUIDANCE = ('Moonshine acquisition requires Control running on Python >=3.12 wit
 
 
 def tool_directory():
-    return Path(__file__).resolve().parent / '_native' / RELATIVE
+    return Path(__file__).resolve().parents[1] / '_native' / RELATIVE
 
 
 def environment():

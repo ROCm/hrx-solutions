@@ -11,9 +11,10 @@ from pathlib import Path
 import shutil
 import tempfile
 
-from . import curated_catalog, hem_config, hem_display, model_download
+from . import curated_catalog, hem_config, model_download
+from .. import hem_display
 from .gguf import inspect_gguf_set
-from .hem_common import Deadline, HemError, InvalidInput
+from ..hem_common import Deadline, HemError, InvalidInput
 from .model_store import (AcquisitionInput, RuntimeMapping, PreparationAttempt,
     CatalogAssets, ModelFiles, ModelImportError, mapped_assets, prepared_outputs,
     readable_file, validate_model_id)

@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 from .hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from .hem_http import primary_parameters, registration
-from .hem_model_operations import OperationProfile, operation_profile
+from .models.hem_model_operations import OperationProfile, operation_profile
 from .hem_process import ProcessManager, observe_server, require_build
 from .hem_state import _name
 

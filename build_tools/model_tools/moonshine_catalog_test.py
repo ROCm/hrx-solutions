@@ -11,7 +11,7 @@ from unittest.mock import patch
 import zipfile
 
 from build_tools.model_tools import moonshine_catalog as catalog, loom_catalog
-from binding.python import curated_catalog
+from binding.python.models import curated_catalog
 from binding.python.hem_common import InvalidInput
 
 REPOSITORY = Path(__file__).resolve().parents[2]

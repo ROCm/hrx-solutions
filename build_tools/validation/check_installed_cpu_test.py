@@ -25,6 +25,23 @@ class InstalledPayloadTest(unittest.TestCase):
         self.package.mkdir()
         self.files = {'__init__.py': b'', '_native/bin/loom-serve': b'ELF fixture',
                       'loom-pipeline/qwen/control.loom': b'catalog fixture'}
+        source = Path(__file__).resolve().parents[2] / 'binding/python'
+        for name in (
+            'models/__init__.py',
+            'models/curated_catalog.py',
+            'models/gguf.py',
+            'models/hem_config.py',
+            'models/hem_models.py',
+            'models/hem_model_operations.py',
+            'models/model_download.py',
+            'models/model_store.py',
+            'models/moonshine_preparation.py',
+            'models/moonshine_preparer_identity.py',
+            'models/pipeline_validation.py',
+            'models/qwen_validation.py',
+            'pipeline_validation.py',
+):
+            self.files[name] = (source / name).read_bytes()
         self.wheel = self.root / 'fixture.whl'
         with zipfile.ZipFile(self.wheel, 'w') as archive:
             for name, content in self.files.items():
@@ -50,6 +67,44 @@ class InstalledPayloadTest(unittest.TestCase):
                     gate.verify_wheel_payload(self.wheel, self.package)
                 target.write_bytes(self.files[name])
 
+    def test_models_require_unique_regular_members_in_the_wheel(self):
+        import warnings
+        for target in self.files:
+            if not target.startswith('models/'):
+                continue
+            for failure in ('missing', 'changed', 'duplicate', 'symlink', 'directory'):
+                with self.subTest(target=target, failure=failure):
+                    with zipfile.ZipFile(self.wheel, 'w') as archive:
+                        for name, data in self.files.items():
+                            if name == target and failure == 'missing':
+                                continue
+                            member = zipfile.ZipInfo('hrx_solutions/' + name)
+                            if name == target and failure in ('symlink', 'directory'):
+                                member.external_attr = (0o120777 if failure == 'symlink' else 0o040777) << 16
+                            archive.writestr(member, data + b'changed' if name == target and failure == 'changed' else data)
+                            if name == target and failure == 'duplicate':
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter('ignore', UserWarning)
+                                    archive.writestr(member, data)
+                    with self.assertRaises(AssertionError):
+                        gate.verify_wheel_payload(self.wheel, self.package)
+
+    def test_models_refuse_installed_symlinks_even_with_identical_bytes(self):
+        for name in self.files:
+            if not name.startswith('models/'):
+                continue
+            with self.subTest(name=name):
+                target = self.package / name
+                backup = target.with_suffix('.owned-copy')
+                target.rename(backup)
+                target.symlink_to(backup)
+                try:
+                    with self.assertRaisesRegex(AssertionError, 'not regular'):
+                        gate.verify_wheel_payload(self.wheel, self.package)
+                finally:
+                    target.unlink()
+                    backup.rename(target)
+
     def test_snapshot_ignores_only_bytecode_not_shipped_payloads(self):
         before = gate.snapshot(self.package)
         cache = self.package / '__pycache__'
@@ -61,25 +116,33 @@ class InstalledPayloadTest(unittest.TestCase):
 
     def test_source_parity_rejects_stale_code_and_checkout_imports(self):
         source = self.root / 'source/binding/python'
-        source.mkdir(parents=True)
-        (source / 'fixture.py').write_text('current = True\n')
-        installed = self.package / 'fixture.py'
-        installed.write_text('current = True\n')
-        module = types.ModuleType('hrx_solutions.fixture')
-        module.__file__ = str(installed)
-        with patch.dict(sys.modules, {module.__name__: module}):
-            checked = gate.source_parity(self.root / 'source', self.package)
-            self.assertIn('binding/python/fixture.py', checked)
-            installed.write_text('stale = True\n')
-            with self.assertRaisesRegex(AssertionError, 'stale installed module'):
-                gate.source_parity(self.root / 'source', self.package)
-            module.__file__ = str(source / 'fixture.py')
-            with self.assertRaisesRegex(AssertionError, 'import escaped installed package'):
-                gate.source_parity(self.root / 'source', self.package)
+        for relative, name in (('fixture.py', 'hrx_solutions.fixture'),
+                               ('models/fixture.py', 'hrx_solutions.models.fixture'),
+                               ('models/__init__.py', 'hrx_solutions.models')):
+            with self.subTest(relative=relative):
+                authored = source / relative
+                authored.parent.mkdir(parents=True, exist_ok=True)
+                authored.write_text('current = True\n')
+                installed = self.package / relative
+                installed.parent.mkdir(parents=True, exist_ok=True)
+                installed.write_text('current = True\n')
+                module = types.ModuleType(name)
+                module.__file__ = str(installed)
+                with patch.dict(sys.modules, {name: module}):
+                    checked = gate.source_parity(self.root / 'source', self.package)
+                    self.assertIn('binding/python/' + relative, checked)
+                    installed.write_text('stale = True\n')
+                    with self.assertRaisesRegex(AssertionError, 'stale installed module'):
+                        gate.source_parity(self.root / 'source', self.package)
+                    installed.write_text('current = True\n')
+                    module.__file__ = str(authored)
+                    with self.assertRaisesRegex(AssertionError, 'import escaped installed package'):
+                        gate.source_parity(self.root / 'source', self.package)
+                authored.unlink()
 
     def test_generated_catalog_parity_rejects_stale_sources_or_modified_bytecode(self):
         from build_tools.model_tools import loom_catalog
-        from binding.python.pipeline_validation import catalog_modules
+        from binding.python.models.pipeline_validation import catalog_modules
         repository = Path(__file__).resolve().parents[2]
         source_root = self.root / 'catalog-source'
         shutil.copytree(repository / 'loom-pipeline', source_root / 'loom-pipeline', symlinks=True)
@@ -93,7 +156,7 @@ class InstalledPayloadTest(unittest.TestCase):
         with patch.object(loom_catalog, 'validate_bytecode_artifact'):
             loom_catalog.stage_bytecode_catalog(self.package / 'loom-pipeline/llm', products, inventory, decoder=Path('fixture-decoder'))
         (self.package / 'loom-pipeline/qwen/control.loom').unlink()
-        adapter = types.ModuleType('hrx_solutions.pipeline_validation')
+        adapter = types.ModuleType('hrx_solutions.models.pipeline_validation')
         adapter.catalog_modules = catalog_modules
         with patch.dict(sys.modules, {adapter.__name__:adapter}):
             self.assertIn('loom-pipeline/llm/qwen/qwen_08b/prepare.loom', gate.source_parity(source_root,self.package))

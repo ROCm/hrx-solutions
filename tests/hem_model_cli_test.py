@@ -8,7 +8,8 @@ import sys
 import tempfile
 import unittest
 
-from binding.python import hem_cli, hem_models
+from binding.python import hem_cli
+from binding.python.models import hem_models
 from tests.gguf_fixtures import lifecycle_profile, write_matching_gguf
 
 
@@ -35,7 +36,7 @@ class ModelCliTest(unittest.TestCase):
             digest = hashlib.sha256(json.dumps({'model': {'fixture': True}},
                 sort_keys=True, separators=(',', ':')).encode()).hexdigest()
             script = (
-                f'from {package} import hem_cli, hem_config; '
+                f'from {package} import hem_cli; from {package}.models import hem_config; '
                 'import json; from pathlib import Path; '
                 'original = hem_config.load_profile; '
                 f'test_profile=json.loads(Path({str(self.compatibility)!r}).read_text()); '

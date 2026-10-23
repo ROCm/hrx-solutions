@@ -17,7 +17,7 @@ import zipfile
 from build_tools.wheel_tools import python_packaging as packaging
 from build_tools.wheel_tools import validate_wheel as wheel_validation
 from build_tools.model_tools import loom_catalog, moonshine_catalog, moonshine_preparer
-from build_tools.wheel_tools.validate_wheel import HEM_MODULES, OBSOLETE_MODULES, OBSOLETE_ENTRY_POINTS, REQUIRED_ENTRY_POINTS, PI_ASSETS, validate_wheel
+from build_tools.wheel_tools.validate_wheel import HEM_MODULES, MODEL_MODULES, OBSOLETE_MODULES, OBSOLETE_ENTRY_POINTS, REQUIRED_ENTRY_POINTS, PI_ASSETS, validate_wheel
 from binding.python import hem_pi_assets, hem_pi_contracts
 import hashlib
 import json
@@ -433,7 +433,7 @@ class PackagingTest(unittest.TestCase):
                         for name in PI_ASSETS})
         members.update({'hrx_solutions/'+name:(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
                         for name in wheel_validation.CLIENT_ASSETS})
-        for name in ('moonshine_preparation.py','moonshine_preparer_identity.py','curated_catalog.py','pipeline_validation.py','runtime_paths.py','model_store.py','model_download.py','gguf.py','qwen_validation.py','loom_serve.py', *(name+'.py' for name in HEM_MODULES)):
+        for name in ('pipeline_validation.py','runtime_paths.py','loom_serve.py','models/__init__.py', *(name+'.py' for name in HEM_MODULES), *('models/'+name+'.py' for name in MODEL_MODULES)):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         version=read_package_version()
         prefix=f'hrx_solutions-{version}.dist-info/'
@@ -502,6 +502,67 @@ class PackagingTest(unittest.TestCase):
                         wheel_validation.validate_client_sdist(path)
                 else:wheel_validation.validate_client_sdist(path)
 
+    def test_sdist_requires_each_exact_regular_model_source_once(self):
+        names = (
+            'models/__init__.py',
+            'models/curated_catalog.py',
+            'models/gguf.py',
+            'models/hem_config.py',
+            'models/hem_models.py',
+            'models/hem_model_operations.py',
+            'models/model_download.py',
+            'models/model_store.py',
+            'models/moonshine_preparation.py',
+            'models/moonshine_preparer_identity.py',
+            'models/pipeline_validation.py',
+            'models/qwen_validation.py',
+            'pipeline_validation.py',
+        )
+        for target in names:
+            for failure in (None, 'missing', 'changed', 'symlink', 'duplicate'):
+                path = self.root / 'models-source.tar.gz'
+                with tarfile.open(path, 'w:gz') as archive:
+                    for name in names:
+                        data = (packaging.REPO_ROOT / 'binding/python' / name).read_bytes()
+                        if name == target and failure == 'missing':
+                            continue
+                        if name == target and failure == 'changed':
+                            data += b'\n# changed source'
+                        member = tarfile.TarInfo('hrx-solutions/binding/python/' + name)
+                        member.size = len(data)
+                        if name == target and failure == 'symlink':
+                            member.type = tarfile.SYMTYPE
+                            member.linkname = '/unreviewed/' + name
+                        archive.addfile(member, io.BytesIO(data))
+                        if name == target and failure == 'duplicate':
+                            archive.addfile(member, io.BytesIO(data))
+                with self.subTest(target=target, failure=failure):
+                    if failure:
+                        with self.assertRaisesRegex(RuntimeError, 'model source'):
+                            wheel_validation.validate_models_sdist(path)
+                    else:
+                        wheel_validation.validate_models_sdist(path)
+
+    def test_wheel_requires_exact_regular_model_source_once(self):
+        import warnings
+        for failure in ('changed', 'duplicate', 'symlink'):
+            wheel = self.wheel()
+            target = 'hrx_solutions/models/gguf.py'
+            with zipfile.ZipFile(wheel) as archive:
+                members = {name: archive.read(name) for name in archive.namelist()}
+            with zipfile.ZipFile(wheel, 'w') as archive:
+                for name, data in members.items():
+                    member = zipfile.ZipInfo(name)
+                    if name == target and failure == 'symlink':
+                        member.external_attr = 0o120777 << 16
+                    archive.writestr(member, data + b'changed' if name == target and failure == 'changed' else data)
+                    if name == target and failure == 'duplicate':
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', UserWarning)
+                            archive.writestr(member, data)
+            with self.subTest(failure=failure), self.assertRaisesRegex(RuntimeError, 'model source'):
+                validate_wheel(wheel)
+
     def test_pi_resources_match_contract_and_loader_metadata(self):
         assets = hem_pi_assets.bundled_assets()
         prefix = hem_pi_contracts.EXTENSION_PATH + '/'
@@ -554,6 +615,29 @@ class PackagingTest(unittest.TestCase):
                 else:
                     validate_pi_sdist(path)
 
+    def test_setuptools_stages_models_from_declared_packages(self):
+        from setuptools.config.pyprojecttoml import read_configuration
+        configuration = read_configuration(packaging.REPO_ROOT / 'pyproject.toml', expand=False)
+        options = configuration['tool']['setuptools']
+        distribution = packaging.BinaryDistribution({
+            'packages': options['packages'],
+            'package_dir': {name: str(packaging.REPO_ROOT / path)
+                            for name, path in options['package-dir'].items()},
+        })
+        distribution.script_name = str(packaging.REPO_ROOT / 'setup.py')
+        command = packaging.build_py(distribution)
+        command.build_lib = str(self.root / 'python-stage')
+        command.ensure_finalized()
+        command.run()
+        expected = {'models/__init__.py', *('models/'+name+'.py' for name in MODEL_MODULES)}
+        staged = Path(command.build_lib) / 'hrx_solutions'
+        self.assertTrue(expected <= {path.relative_to(staged).as_posix()
+                                     for path in staged.rglob('*.py')})
+        self.assertTrue({str(packaging.REPO_ROOT / 'binding/python' / name) for name in expected}
+                        <= set(command.get_source_files()))
+        self.assertEqual((staged / 'pipeline_validation.py').read_bytes(),
+                         (packaging.REPO_ROOT / 'binding/python/pipeline_validation.py').read_bytes())
+
     def test_wheel_contains_new_validation_assets(self):
         libraries,size=validate_wheel(self.wheel())
         self.assertEqual(libraries,2)
@@ -565,8 +649,9 @@ class PackagingTest(unittest.TestCase):
             self.assertFalse(any(name.endswith('sources.txt') for name in catalog))
         with self.assertRaisesRegex(RuntimeError,'missing setup assets.*compatibility.json'):
             validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/qwen_27b/compatibility.json'))
-        with self.assertRaisesRegex(RuntimeError,'missing setup assets.*gguf.py'):
-            validate_wheel(self.wheel(missing='hrx_solutions/gguf.py'))
+        for name in ('__init__', *MODEL_MODULES):
+            with self.subTest(module=name), self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
+                validate_wheel(self.wheel(missing='hrx_solutions/models/'+name+'.py'))
 
     def test_wheel_requires_both_architecture_catalogs(self):
         for filename in ('pipeline.loombc', 'pipeline.json', 'compatibility.json'):

@@ -15,7 +15,8 @@ import tempfile
 import time
 import unittest
 
-from binding.python import hem_config, hem_process, hem_state
+from binding.python import hem_process, hem_state
+from binding.python.models import hem_config
 from binding.python.hem_common import Deadline
 from binding.python.hem_http import NativeClient
 from tests.gguf_fixtures import install_lifecycle_profile, lifecycle_profile, write_matching_gguf
@@ -75,12 +76,12 @@ class InstanceCliTest(unittest.TestCase):
         self.tokenizer.write_text('{"model":{"fixture":true}}')
         digest = hashlib.sha256(json.dumps({'model':{'fixture':True}}, sort_keys=True,
                                           separators=(',', ':')).encode()).hexdigest()
-        package = hem_config.__package__
+        package = hem_config.__package__.rsplit('.', 1)[0]
         script = (
             'import functools,sys; '
-            f'from {package} import hem_cli,hem_config,hem_instance_cli,hem_server_cli,pipeline_validation; '
+            f'from {package} import hem_cli,hem_instance_cli,hem_server_cli; from {package}.models import hem_config,pipeline_validation; '
             'from pathlib import Path; '
-            'pipeline_validation.__file__=str(Path(sys.argv[1])/"pipeline_validation.py"); '
+            'pipeline_validation.__file__=str(Path(sys.argv[1])/"models/pipeline_validation.py"); '
             'original=hem_config.load_profile; '
             f'hem_config.load_profile=lambda catalog:dict(original(catalog), tokenizer_canonical_sha256={digest!r}); '
             'hem_instance_cli.ProcessManager=functools.partial(hem_instance_cli.ProcessManager,package_root=sys.argv[1]); '

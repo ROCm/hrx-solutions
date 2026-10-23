@@ -8,8 +8,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import _launcher, pipeline_validation
-from binding.python.model_store import ModelFiles
+from binding.python import _launcher
+from binding.python.models import pipeline_validation
+from binding.python.models.model_store import ModelFiles
 from binding.python.pipeline_validation import validate_model
 from tests.gguf_fixtures import expected_tensors, profile, write_matching_gguf
 
@@ -33,7 +34,7 @@ class PipelineValidationTest(unittest.TestCase):
         self.contract['tokenizer_canonical_sha256']=hashlib.sha256(json.dumps(data,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
         self.tokenizer.write_text(json.dumps(data))
         (self.directory/'manifest.json').write_text(json.dumps({'model_id':'test-model'}))
-        self.profile_patch=patch('binding.python.pipeline_validation.load_profile',return_value=self.contract)
+        self.profile_patch=patch('binding.python.models.pipeline_validation.load_profile',return_value=self.contract)
         self.profile_patch.start()
         self.addCleanup(self.profile_patch.stop)
 
@@ -185,7 +186,7 @@ class PipelineValidationTest(unittest.TestCase):
             catalog.mkdir(parents=True)
             (catalog/'compatibility.json').write_text(json.dumps(profile(architecture)))
         self.select_08b_contract()
-        with patch.object(pipeline_validation, '__file__', str(package/'pipeline_validation.py')):
+        with patch.object(pipeline_validation, '__file__', str(package/'models/pipeline_validation.py')):
             selected = pipeline_validation.resolve_catalog('qwen-08b')
             self.assertEqual(selected, package/'loom-pipeline/llm/qwen/qwen_08b')
             self.assertEqual(pipeline_validation.resolve_catalog('qwen').name, 'qwen_27b')

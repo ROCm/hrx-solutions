@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import textwrap
 
-from .hem_config import SETTINGS, EXPORT_RESPONSIBILITY
+from .models.hem_config import SETTINGS, EXPORT_RESPONSIBILITY
 from .hem_common import DEFAULT_TIMEOUT
 
 RESOURCES = {

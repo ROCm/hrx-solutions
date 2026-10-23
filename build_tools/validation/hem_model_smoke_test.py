@@ -159,9 +159,26 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory();self.addCleanup(self.temporary.cleanup)
         self.root=Path(self.temporary.name)
-        self.files={'__init__.py':b'', 'model_store.py':b'current model mapping',
+        self.files={'__init__.py':b'',
                     '_native/bin/loom-serve':b'ELF fixture',
                     'loom-pipeline/fixture/pipeline.loombc':b'LOOM fixture'}
+        source = Path(__file__).resolve().parents[2] / 'binding/python'
+        for name in (
+            'models/__init__.py',
+            'models/curated_catalog.py',
+            'models/gguf.py',
+            'models/hem_config.py',
+            'models/hem_models.py',
+            'models/hem_model_operations.py',
+            'models/model_download.py',
+            'models/model_store.py',
+            'models/moonshine_preparation.py',
+            'models/moonshine_preparer_identity.py',
+            'models/pipeline_validation.py',
+            'models/qwen_validation.py',
+            'pipeline_validation.py',
+):
+            self.files[name] = (source / name).read_bytes()
         self.wheel=self.root/'fixture.whl'
         with zipfile.ZipFile(self.wheel,'w') as archive:
             for name,data in self.files.items():
@@ -212,7 +229,7 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
                 package=venv/'lib/hrx_solutions'
                 self.install(package);packages.append(package)
                 if corrupt and venv.parent.name=='b':
-                    (package/'model_store.py').write_bytes(b'stale namespace module')
+                    (package/'models/model_store.py').write_bytes(b'stale namespace module')
             return subprocess.CompletedProcess(argv,0)
         def identity(argv,**kwargs):
             venv=Path(argv[0]).parent.parent
@@ -233,7 +250,7 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
                 self.assertEqual(len(packages),1)
                 return gate
             if corrupt:
-                with self.assertRaisesRegex(AssertionError,'installed wheel mismatch: hrx_solutions/model_store.py'):
+                with self.assertRaisesRegex(AssertionError,'installed wheel mismatch: hrx_solutions/models/model_store.py'):
                     gate.setup()
             else:
                 gate.setup()
@@ -248,7 +265,7 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
         for namespace in ('a','b'):
             parity=gate.results[namespace]['installed_parity']
             self.assertEqual(set(parity),set(self.files))
-            self.assertEqual(parity['model_store.py'],hashlib.sha256(self.files['model_store.py']).hexdigest())
+            self.assertEqual(parity['models/model_store.py'],hashlib.sha256(self.files['models/model_store.py']).hexdigest())
             self.assertEqual(gate.results[namespace]['native_sha256'],
                              hashlib.sha256(self.files['_native/bin/loom-serve']).hexdigest())
 
@@ -457,7 +474,7 @@ class AcquisitionPathTest(unittest.TestCase):
                 cli.write_text(
                     '#!' + sys.executable + '\nimport json,sys\nfrom pathlib import Path\n'
                     f'sys.path.insert(0,{str(source)!r})\n'
-                    'from binding.python.model_download import _run_hf\n'
+                    'from binding.python.models.model_download import _run_hf\n'
                     'assert sys.argv[1:3]==["model","download"]\n'
                     '# Exercise the actual download subprocess primitive, without network or weights.\n'
                     '_run_hf(["hf","--help"])\n'

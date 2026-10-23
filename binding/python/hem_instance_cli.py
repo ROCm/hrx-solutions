@@ -5,7 +5,8 @@ import json
 import sys
 import time
 
-from . import hem_arguments as arguments, hem_config, hem_display, hem_models
+from . import hem_arguments as arguments, hem_display
+from .models import hem_config, hem_models
 from .hem_common import Deadline, HemError, InvalidInput, result
 from .hem_http import NativeClient, registration
 from .hem_instances import InstanceManager

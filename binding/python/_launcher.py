@@ -64,7 +64,7 @@ def exec_loom_serve() -> NoReturn:
     native_root = package_root / "_native"
     executable = native_root / "bin" / "loom-serve"
     arguments = list(sys.argv[1:])
-    from . import pipeline_validation
+    from .models import pipeline_validation
     # Native deployment documents pass through unchanged. Retain the catalog
     # invocation accepted by earlier wheels by translating its model flags.
     parser = argparse.ArgumentParser(add_help=False)

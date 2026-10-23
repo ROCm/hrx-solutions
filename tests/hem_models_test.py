@@ -9,7 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_models as models, hem_config, hem_state
+from binding.python import hem_state
+from binding.python.models import hem_models as models, hem_config
 from binding.python.hem_common import HemError, InvalidInput
 from tests.gguf_fixtures import write_gguf, write_matching_gguf, profile
 

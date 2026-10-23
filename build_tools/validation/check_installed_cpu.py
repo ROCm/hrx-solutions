@@ -17,10 +17,27 @@ import json
 import os
 from pathlib import Path
 import site
+import stat
 import sys
 import types
 import unittest
 import zipfile
+
+
+MODEL_PYTHON_PATHS = (
+    'models/__init__.py',
+    'models/curated_catalog.py',
+    'models/gguf.py',
+    'models/hem_config.py',
+    'models/hem_models.py',
+    'models/hem_model_operations.py',
+    'models/model_download.py',
+    'models/model_store.py',
+    'models/moonshine_preparation.py',
+    'models/moonshine_preparer_identity.py',
+    'models/pipeline_validation.py',
+    'models/qwen_validation.py',
+)
 
 
 HELPERS = ('gguf_fixtures', 'hem_lifecycle_fixture')
@@ -50,6 +67,12 @@ def verify_wheel_payload(wheel, package):
     """Prove installed source, catalog and native bytes came from this exact wheel."""
     checked = {}
     with zipfile.ZipFile(wheel) as archive:
+        for relative in (*MODEL_PYTHON_PATHS, 'pipeline_validation.py'):
+            name = 'hrx_solutions/' + relative
+            members = [info for info in archive.infolist() if info.filename == name]
+            assert (len(members) == 1 and not members[0].is_dir()
+                    and stat.S_IFMT(members[0].external_attr >> 16) in (0, stat.S_IFREG)), f'missing or malformed model payload: {name}'
+            assert not (package / relative).is_symlink(), f'installed model payload is not regular: {name}'
         for name in archive.namelist():
             if not name.startswith('hrx_solutions/') or name.endswith('/'):
                 continue
@@ -67,15 +90,20 @@ def verify_wheel_payload(wheel, package):
 def source_parity(source_root, package):
     """Reject a stale installed wheel before running any contracts."""
     checked = {}
-    for source in sorted((source_root / 'binding/python').glob('*.py')):
-        module = importlib.import_module('hrx_solutions.' + source.stem)
+    python_root = source_root / 'binding/python'
+    for source in sorted(python_root.rglob('*.py')):
+        relative = source.relative_to(python_root)
+        parts = relative.with_suffix('').parts
+        if parts[-1] == '__init__':
+            parts = parts[:-1]
+        module = importlib.import_module('.'.join(('hrx_solutions', *parts)))
         installed = Path(module.__file__).resolve()
-        assert installed == (package / source.name).resolve(), f'import escaped installed package: {module}'
+        assert installed == (package / relative).resolve(), f'import escaped installed package: {module}'
         assert source.read_bytes() == installed.read_bytes(), f'stale installed module: {source}'
         checked[str(source.relative_to(source_root))] = digest(source)
     authored_root = source_root / 'loom-pipeline/llm'
     if authored_root.is_dir():
-        from hrx_solutions.pipeline_validation import catalog_modules
+        from hrx_solutions.models.pipeline_validation import catalog_modules
         installed_root = package / 'loom-pipeline/llm'
         build = json.loads((installed_root / 'catalog-build.json').read_text())
         assert build.get('format') == 2, 'unsupported catalog build metadata'

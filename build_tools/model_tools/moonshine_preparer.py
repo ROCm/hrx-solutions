@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import shutil
 
-from binding.python.moonshine_preparer_identity import FILES, RELATIVE, REVISION, UPSTREAM
+from binding.python.models.moonshine_preparer_identity import FILES, RELATIVE, REVISION, UPSTREAM
 
 
 def stage(native_root, hrx_source):

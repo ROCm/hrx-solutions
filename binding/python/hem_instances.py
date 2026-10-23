@@ -12,7 +12,8 @@ import json
 from pathlib import Path
 import uuid
 
-from . import hem_config, hem_models, hem_process
+from . import hem_process
+from .models import hem_config, hem_models
 from .hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome, result
 from .hem_http import NativeClient, active_ready, primary_parameters, registration, retired
 from .hem_state import _name

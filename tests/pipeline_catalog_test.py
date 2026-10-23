@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_config, pipeline_validation
-from binding.python.model_store import ModelFiles
+from binding.python.models import hem_config, pipeline_validation
+from binding.python.models.model_store import ModelFiles
 from binding.python.hem_common import Deadline, DeadlineExpired, InvalidInput
 from binding.python import hem_process
 
@@ -25,7 +25,7 @@ class PipelineCatalogTest(unittest.TestCase):
         self.weights, self.tokenizer = self.root / 'weights.gguf', self.root / 'tokenizer.json'
         self.weights.write_bytes(b'fixture')
         self.tokenizer.write_text('{}')
-        location = patch.object(pipeline_validation, '__file__', str(self.root / 'binding/python/pipeline_validation.py'))
+        location = patch.object(pipeline_validation, '__file__', str(self.root / 'binding/python/models/pipeline_validation.py'))
         location.start()
         self.addCleanup(location.stop)
 
@@ -66,7 +66,7 @@ class PipelineCatalogTest(unittest.TestCase):
         self.assertNotEqual(first.catalog_identity, second.catalog_identity)
         installed = self.root / 'installed'
         shutil.copytree(root, installed / 'loom-pipeline')
-        with patch.object(pipeline_validation, '__file__', str(installed / 'pipeline_validation.py')):
+        with patch.object(pipeline_validation, '__file__', str(installed / 'models/pipeline_validation.py')):
             copied = self.resolved()
         self.assertEqual(copied.catalog, installed / 'loom-pipeline/llm/qwen/qwen_08b')
         self.assertEqual(copied.catalog_identity, second.catalog_identity)

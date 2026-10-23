@@ -11,11 +11,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import curated_catalog as catalogs, hem_cli, hem_config, hem_models, hem_render, model_download
+from binding.python import hem_cli, hem_render
+from binding.python.models import curated_catalog as catalogs, hem_config, hem_models, model_download
 from binding.python.hem_common import Deadline, HemError, InvalidInput
 from binding.python.hem_state import Registry
-from binding.python.model_store import AcquisitionInput, RuntimeMapping, CatalogAssets, ModelImportError
-from binding.python.pipeline_validation import available_pipelines, resolve_catalog
+from binding.python.models.model_store import AcquisitionInput, RuntimeMapping, CatalogAssets, ModelImportError
+from binding.python.models.pipeline_validation import available_pipelines, resolve_catalog
 
 
 class CuratedAssetsTest(unittest.TestCase):
@@ -25,7 +26,7 @@ class CuratedAssetsTest(unittest.TestCase):
         self.root = Path(temporary.name)
         self.catalog = self.root / 'package/loom-pipeline/recognition/fixture'
         self.catalog.mkdir(parents=True)
-        self.module_file = self.root / 'package/binding/python/curated_catalog.py'
+        self.module_file = self.root / 'package/binding/python/models/curated_catalog.py'
         self.module_file.parent.mkdir(parents=True)
         self.input = self.root / 'input'
         self.input.mkdir()
@@ -65,7 +66,7 @@ class CuratedAssetsTest(unittest.TestCase):
         installed = self.root / 'installed/hrx_solutions'
         installed.mkdir(parents=True)
         (installed / 'loom-pipeline').symlink_to(self.root / 'package/loom-pipeline', target_is_directory=True)
-        with patch.object(catalogs, '__file__', str(installed / 'curated_catalog.py')):
+        with patch.object(catalogs, '__file__', str(installed / 'models/curated_catalog.py')):
             self.assertEqual(resolve_catalog('fixture'), self.catalog)
 
     def test_copy_repeated_roles_optional_presence_and_retry(self):

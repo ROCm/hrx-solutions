@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import struct
 
-from binding.python.gguf import tensor_size
+from binding.python.models.gguf import tensor_size
 
 PROFILE_PATH = Path(__file__).resolve().parents[1] / 'loom-pipeline/llm/qwen/qwen_27b/compatibility.json'
 
@@ -97,7 +97,7 @@ def write_matching_gguf(path, *, contract=None, changes=None, missing=(), extra=
     for key,entry in contract['metadata_arrays'].items():
         repeated='' if entry['type']==8 else 0
         metadata.append((key,9,(entry['type'],[repeated]*entry['count'])))
-    from binding.python.gguf import GGML_TYPES
+    from binding.python.models.gguf import GGML_TYPES
     types={value[0]:key for key,value in GGML_TYPES.items()}
     tensors=[]
     offset=0

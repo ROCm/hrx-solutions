@@ -6,8 +6,8 @@ import re
 import tempfile
 import unittest
 
-from binding.python.gguf import ArrayInfo, GGML_TYPES, GGUF, Metadata, Tensor, tensor_size
-from binding.python.qwen_validation import compare_gguf, compare_tokenizer, expected_tensors
+from binding.python.models.gguf import ArrayInfo, GGML_TYPES, GGUF, Metadata, Tensor, tensor_size
+from binding.python.models.qwen_validation import compare_gguf, compare_tokenizer, expected_tensors
 from tests.gguf_fixtures import PROFILE_PATH, profile
 
 

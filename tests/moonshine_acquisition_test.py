@@ -14,10 +14,11 @@ from copy import deepcopy
 from dataclasses import replace
 from unittest.mock import patch
 
-from binding.python import hem_cli, hem_instance_cli, hem_models, model_download, moonshine_preparation as preparation
+from binding.python import hem_cli, hem_instance_cli
+from binding.python.models import hem_models, model_download, moonshine_preparation as preparation
 from binding.python.hem_common import Deadline, HemError
 from binding.python.hem_state import Registry
-from binding.python.model_store import NamedAsset, PreparationResult, RuntimeMapping
+from binding.python.models.model_store import NamedAsset, PreparationResult, RuntimeMapping
 
 
 class MoonshineAcquisitionTest(unittest.TestCase):

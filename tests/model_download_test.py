@@ -6,7 +6,7 @@ import sys
 import unittest
 from unittest.mock import Mock, patch
 
-from binding.python import model_download
+from binding.python.models import model_download
 
 
 class DownloadTest(unittest.TestCase):

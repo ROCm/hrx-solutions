@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python.gguf import ArrayInfo, GGUFError, inspect_gguf, inspect_gguf_set
+from binding.python.models.gguf import ArrayInfo, GGUFError, inspect_gguf, inspect_gguf_set
 from tests.gguf_fixtures import write_gguf
 
 

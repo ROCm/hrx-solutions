@@ -8,7 +8,7 @@ import hashlib
 from pathlib import Path, PurePosixPath
 import re
 
-from .hem_common import InvalidInput
+from ..hem_common import InvalidInput
 from .model_store import CatalogAssets, NamedAsset
 
 # Working entries are admitted with their separately reviewed packaged closure.
@@ -35,7 +35,7 @@ def relative_file(value):
 
 def catalog_roots():
     """The fixed installed/source locations, not arbitrary catalog ancestors."""
-    package = Path(__file__).resolve().parent
+    package = Path(__file__).resolve().parents[1]
     return package / 'loom-pipeline', package.parents[1] / 'loom-pipeline'
 
 

@@ -9,7 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_cli, hem_display, hem_help, hem_render, hem_config, hem_server_cli
+from binding.python import hem_cli, hem_display, hem_help, hem_render, hem_server_cli
+from binding.python.models import hem_config
 from binding.python.hem_common import HemError, DeadlineExpired, UncertainOutcome
 from binding.python.hem_server_cli import ObservationResult
 

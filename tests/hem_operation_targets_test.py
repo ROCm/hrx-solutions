@@ -10,7 +10,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from binding.python import hem_model_operations as operations, hem_operation_targets as targets, hem_process, hem_state
+from binding.python import hem_operation_targets as targets, hem_process, hem_state
+from binding.python.models import hem_model_operations as operations
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.hem_state import Registry
 
@@ -75,7 +76,7 @@ class OperationTargetsTest(unittest.TestCase):
         self.registry.update_server('studio', changes, expected_token=row['launch_token'], expected_revision=row['revision'])
 
     def test_profiles_are_inert_and_finite(self):
-        code = "from binding.python import hem_model_operations; import sys; assert not any(name.endswith(('hem_state', 'hem_config', 'hem_models', 'hem_openwebui')) for name in sys.modules)"
+        code = "from binding.python.models import hem_model_operations; import sys; assert not any(name.endswith(('hem_state', 'hem_config', 'hem_models', 'hem_openwebui')) for name in sys.modules)"
         subprocess.run([sys.executable, '-c', code], check=True)
         with self.assertRaises(ValueError):operations.operation_profile('synthesis')
         with self.assertRaises(FrozenInstanceError):operations.CHAT.endpoint = '/elsewhere'

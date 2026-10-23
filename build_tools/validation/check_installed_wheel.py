@@ -34,13 +34,28 @@ package_root = Path(hrx_solutions.__file__).resolve().parent
 package_root.relative_to(Path(sys.prefix).resolve())
 for name in (
     "hem_integrations", "hem_client_documents", "hem_openwebui_wire", "hem_openwebui_receipts",
-    "hem_arguments", "hem_bootstrap", "hem_cli", "hem_common", "hem_config",
+    "hem_arguments", "hem_bootstrap", "hem_cli", "hem_common",
     "hem_display", "hem_help", "hem_http", "hem_instance_cli", "hem_instances", "hem_render",
-    "hem_model_cli", "hem_models", "hem_pipeline_cli", "hem_process",
+    "hem_model_cli", "hem_pipeline_cli", "hem_process",
     "hem_server_cli", "hem_shutdown", "hem_state",
 ):
     module = importlib.import_module("hrx_solutions." + name)
     assert Path(module.__file__).resolve().parent == package_root
+for name in (
+    'curated_catalog',
+    'gguf',
+    'hem_config',
+    'hem_models',
+    'hem_model_operations',
+    'model_download',
+    'model_store',
+    'moonshine_preparation',
+    'moonshine_preparer_identity',
+    'pipeline_validation',
+    'qwen_validation',
+):
+    module = importlib.import_module("hrx_solutions.models." + name)
+    assert Path(module.__file__).resolve().parent == package_root / "models"
 entrypoints = {entry.name: entry.value for entry in
                importlib.metadata.distribution("hrx-solutions").entry_points
                if entry.group == "console_scripts"}
@@ -61,9 +76,9 @@ provenance = verify_wheel_payload(args.wheel.resolve(strict=True), package_root)
 assert (package_root / "_native/bin/loom-serve").is_file()
 assert (package_root / "_native/share/loom-serve/LICENSE").is_file()
 assert not (package_root / "_native/bin/loom-qwen-epoch-check").exists()
-from hrx_solutions.gguf import inspect_gguf
-from hrx_solutions.qwen_validation import load_profile
-from hrx_solutions.pipeline_validation import resolve_catalog, catalog_modules
+from hrx_solutions.models.gguf import inspect_gguf
+from hrx_solutions.models.qwen_validation import load_profile
+from hrx_solutions.models.pipeline_validation import resolve_catalog, catalog_modules
 catalog_root = package_root / "loom-pipeline/llm"
 for pipeline, architecture in (("qwen", "qwen_27b"), ("qwen-08b", "qwen_08b")):
     catalog = catalog_root / "qwen" / architecture
@@ -83,7 +98,7 @@ assert (package_root / "loom-pipeline/llm/LICENSE-APACHE-2.0").is_file()
 assert not list(package_root.rglob("*.loom"))
 import struct
 import tempfile
-from hrx_solutions.pipeline_validation import ModelFiles, validate_model
+from hrx_solutions.models.pipeline_validation import ModelFiles, validate_model
 with tempfile.TemporaryDirectory() as directory:
     weights = Path(directory) / "model.gguf"
     tokenizer = Path(directory) / "tokenizer.json"

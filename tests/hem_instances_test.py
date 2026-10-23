@@ -18,7 +18,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_config, hem_instances, hem_models, hem_process, hem_state, pipeline_validation
+from binding.python import hem_instances, hem_process, hem_state
+from binding.python.models import hem_config, hem_models, pipeline_validation
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.hem_http import NativeClient
 from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
@@ -657,7 +658,7 @@ class OwnedProcessLifecycleTest(unittest.TestCase):
                 weights.write_bytes(b'CPU fixture weights')
                 tokenizer.write_text('{}')
                 with patch.object(hem_config, 'select_pipeline', return_value='qwen-08b'), \
-                     patch.object(pipeline_validation, '__file__', str(package / 'pipeline_validation.py')):
+                     patch.object(pipeline_validation, '__file__', str(package / 'models/pipeline_validation.py')):
                     hem_models.import_model(registry, 'tiny', ggufs=[weights], tokenizer=tokenizer)
                     answer = manager.start(server, 'tiny', Deadline.after(5), name='chat')
                 self.assertTrue(answer['completed'])
@@ -674,7 +675,7 @@ class OwnedProcessLifecycleTest(unittest.TestCase):
                 shutil.rmtree(package)
                 self.assertTrue((retained / modules.prepare).is_file())
                 with patch.object(hem_config, 'select_pipeline', return_value='qwen-08b'), \
-                     patch.object(pipeline_validation, '__file__', str(package / 'pipeline_validation.py')):
+                     patch.object(pipeline_validation, '__file__', str(package / 'models/pipeline_validation.py')):
                     with self.assertRaises(HemError):
                         manager.start(server, 'tiny', Deadline.after(3), name='new-alias')
                 self.assertEqual(len(registry.list_instances()), 1)

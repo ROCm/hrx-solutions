@@ -17,7 +17,7 @@ from types import MappingProxyType
 from typing import Mapping, Optional
 
 from . import curated_catalog
-from .hem_common import Deadline, HemError, InvalidInput
+from ..hem_common import Deadline, HemError, InvalidInput
 from .model_store import CatalogAssets, ModelFiles
 from .pipeline_validation import available_pipelines, catalog_modules, catalog_roots, resolve_catalog, text_definition
 from .qwen_validation import compare_profile, inspect_model, load_profile
@@ -170,7 +170,7 @@ class CatalogIdentity:
 def _catalog_snapshots(pipeline, deadline):
     # Reuse native retention's complete-root names+content identity. Models are
     # external inputs and never part of this digest.
-    from .hem_process import tree_identity
+    from ..hem_process import tree_identity
     snapshots = {}
     for candidate in catalog_roots(pipeline):
         deadline.remaining()
@@ -187,7 +187,7 @@ def _catalog_snapshots(pipeline, deadline):
 
 
 def _checked_catalog_identity(pipeline, contract, catalog, snapshots, deadline):
-    from .hem_process import tree_identity
+    from ..hem_process import tree_identity
     if not isinstance(contract, str) or not contract:
         raise InvalidInput('Checked catalog contract identity must be a nonempty string')
     try:
@@ -299,7 +299,7 @@ def resolve(model: ModelFiles, overrides: Optional[Mapping] = None,
 
 def _matching_catalog(resolved, catalog, deadline):
     """Verify the same checked root/relative program closure, without selecting."""
-    from .hem_process import tree_identity
+    from ..hem_process import tree_identity
     identity = resolved.catalog_identity
     relative = identity.relative_path
     if (identity.pipeline != resolved.pipeline or relative.is_absolute()

@@ -7,7 +7,7 @@ import shlex
 import shutil
 import textwrap
 
-from .hem_config import SETTINGS
+from .models.hem_config import SETTINGS
 from .hem_http import primary_parameters
 
 

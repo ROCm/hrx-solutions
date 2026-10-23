@@ -12,7 +12,8 @@ import sys
 import threading
 import time
 
-from . import curated_catalog, hem_display, model_store, pipeline_validation
+from . import curated_catalog, model_store, pipeline_validation
+from .. import hem_display
 from .qwen_validation import load_profile
 
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
