@@ -10,9 +10,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_cli, hem_opencode as owner
+from binding.python import hem_cli
+from binding.python.integrations.opencode import hem_opencode as owner
 from binding.python.hem_common import Deadline, InvalidInput
-from binding.python.hem_opencode import PLUGIN
+from binding.python.integrations.opencode.hem_opencode import PLUGIN
 from binding.python.hem_state import Registry
 
 

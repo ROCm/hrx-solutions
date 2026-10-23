@@ -14,7 +14,7 @@ def configure_integration(integration, root, deadline, *, mode="configure", pi_d
         from .integrations.omp.hem_omp import configure_omp
         return configure_omp(root, omp_dir, deadline, check=mode == "check", disable=mode == "disable")
     if integration == "opencode":
-        from .hem_opencode import configure_opencode
+        from .integrations.opencode.hem_opencode import configure_opencode
         return configure_opencode(root, opencode_dir, deadline, check=mode == "check", disable=mode == "disable")
     if integration == "openwebui":
         from .hem_openwebui import configure_openwebui

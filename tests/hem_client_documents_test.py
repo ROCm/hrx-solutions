@@ -6,7 +6,8 @@ import sys
 import unittest
 import uuid
 
-from binding.python import hem_client_documents, hem_opencode
+from binding.python import hem_client_documents
+from binding.python.integrations.opencode import hem_opencode
 from binding.python.integrations.omp import hem_omp
 from binding.python.hem_common import InvalidInput
 
@@ -69,6 +70,6 @@ class ClientDocumentTest(unittest.TestCase):
         code=('import sys; from binding.python import hem_client_documents as module; '
               'prefix=module.__package__; '
               'assert not any(prefix+"."+name in sys.modules for name in '
-              '("hem_state","integrations.omp.hem_omp","hem_opencode","hem_common","hem_http","hem_clients_endpoints")); '
+              '("hem_state","integrations.omp.hem_omp","integrations.opencode.hem_opencode","hem_common","hem_http","hem_clients_endpoints")); '
               'assert module.decode_document(b"{}") == {}')
         subprocess.run([sys.executable,'-c',code],check=True,timeout=5)

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_opencode as installer
+from binding.python.integrations.opencode import hem_opencode as installer
 from binding.python.hem_common import Deadline, InvalidInput
 
 

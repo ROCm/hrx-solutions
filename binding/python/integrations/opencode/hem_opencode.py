@@ -18,15 +18,15 @@ import shutil
 import stat
 import subprocess
 
-from . import hem_display
-from .hem_client_documents import MAX_BYTES, decode_document, canonical_uuid as _uuid
-from .hem_clients_endpoints import ensure_endpoints, project_endpoints, read_endpoints
-from .hem_pi_state import passive_snapshot
+from ... import hem_display
+from ...hem_client_documents import MAX_BYTES, decode_document, canonical_uuid as _uuid
+from ...hem_clients_endpoints import ensure_endpoints, project_endpoints, read_endpoints
+from ...hem_pi_state import passive_snapshot
 
-from .hem_common import HemError, InvalidInput, UncertainOutcome, DeadlineExpired, result
-from .hem_pi_files import (atomic_replace, encoded, private_path, read_owned,
+from ...hem_common import HemError, InvalidInput, UncertainOutcome, DeadlineExpired, result
+from ...hem_pi_files import (atomic_replace, encoded, private_path, read_owned,
                            remove_owned, staged_path, sync_dir, validate_stage)
-from .hem_state import Registry, ResourceLock
+from ...hem_state import Registry, ResourceLock
 
 ASSETS = ("index.ts", "discovery.ts", "native_protocol.ts", "installation.ts", "profile.json", "package.json")
 ARTIFACTS = (*ASSETS, "config.json")
@@ -94,8 +94,9 @@ class OpenCodeResult(dict):
 
 
 def bundled_assets():
-    resource = files(__package__).joinpath("opencode_plugin")
-    return {name: (files(__package__).joinpath(name) if name == "native_protocol.ts" else resource.joinpath(name)).read_bytes()
+    package = files(__package__.rsplit(".", 2)[0])
+    resource = package.joinpath("opencode_plugin")
+    return {name: (package.joinpath(name) if name == "native_protocol.ts" else resource.joinpath(name)).read_bytes()
             for name in ASSETS}
 
 

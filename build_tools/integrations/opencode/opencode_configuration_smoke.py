@@ -223,7 +223,7 @@ class ConfigurationGate:
         assert 'policy_conflicts' not in configured and 'policy_warnings' not in configured, configured
         assert 'host policy is unassessed' in configured['guidance'], configured
         installed = self.target / 'plugins/loom-control-opencode'
-        from hrx_solutions.hem_opencode import bundled_assets
+        from hrx_solutions.integrations.opencode.hem_opencode import bundled_assets
         source = gate.args.source / 'binding/python/opencode_plugin'
         for name, data in bundled_assets().items():
             assert data == (source.parent / name if name == "native_protocol.ts" else source / name).read_bytes() == (installed / name).read_bytes(), name
