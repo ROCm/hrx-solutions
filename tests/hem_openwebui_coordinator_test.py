@@ -10,7 +10,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 PACKAGE = os.environ.get('HEM_TEST_PACKAGE', 'binding.python')
 hem = importlib.import_module(PACKAGE + '.hem_openwebui')
@@ -147,6 +147,39 @@ class CoordinatorTest(unittest.TestCase):
         self.assertEqual((result.exit_code, result['configuration']), (1, 'absent'))
         self.assertEqual(self.snapshot(), before)
         self.assertFalse(absent.exists())
+
+    def test_direct_entry_resolves_environment_and_retains_safe_diagnostics(self):
+        import inspect
+        parameters = inspect.signature(hem.configure_openwebui).parameters
+        self.assertNotIn('_chat_only', parameters)
+        self.assertNotIn('_lock_held', parameters)
+        absent = self.base / 'direct-absent'
+        with patch.dict(os.environ, {'LOOM_SERVE_DIR': str(absent), 'OPENWEBUI_URL': TARGET,
+                                     'OPENWEBUI_TOKEN': TOKEN}):
+            result = hem.configure_openwebui(None, None, None, common.Deadline.after(),
+                                            check=True, client_factory=self.client.factory)
+        self.assertEqual(result['target_url'], TARGET)
+        self.assertIn('operator-required/unverified', result['prerequisites']['persistence'])
+        self.assertIn('Export/backups', result['guidance'])
+        self.assertFalse(absent.exists())
+        factory = Mock(side_effect=common.InvalidInput('rejected explicit-admin-secret'))
+        with patch.dict(os.environ, {'OPENWEBUI_TOKEN': 'different-environment-token'}):
+            with self.assertRaises(common.InvalidInput) as error:
+                hem.configure_openwebui(absent, TARGET, 'explicit-admin-secret', common.Deadline.after(),
+                                        client_factory=factory)
+        self.assertNotIn('explicit-admin-secret', str(error.exception))
+        self.assertIn('<redacted>', str(error.exception))
+        self.assertFalse(absent.exists())
+
+    def test_fixed_dispatch_preserves_webui_options_and_budget(self):
+        dispatch = importlib.import_module(PACKAGE + '.hem_integrations').configure_integration
+        deadline = common.Deadline.after()
+        for mode in ('configure', 'check', 'disable'):
+            with patch.object(hem, 'configure_openwebui', return_value={}) as entry:
+                dispatch('openwebui', self.root, deadline, mode=mode, url=TARGET, token=TOKEN,
+                         stt_server=None, stt_instance=None)
+                entry.assert_called_once_with(self.root, TARGET, TOKEN, deadline,
+                    check=mode == 'check', disable=mode == 'disable', stt_server=None, stt_instance=None)
 
     def test_detected_remote_race_aborts_before_post_pending_survives(self):
         def race(client):

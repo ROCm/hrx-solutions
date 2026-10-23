@@ -293,6 +293,51 @@ class RunnerTest(unittest.TestCase):
         runner.on_signal(signal.SIGINT, None)
         self.assertEqual(runner.interrupted, signal.SIGTERM)
 
+    def test_signal_routing_uses_active_command_metadata_instead_of_stage_name(self):
+        runner=self.runner()
+        for stage,cooperative in (('build',False),('preflight',True)):
+            with self.subTest(stage=stage,cooperative=cooperative):
+                runner.interrupted=None
+                runner.current=stage
+                child=mock.Mock(pid=4321)
+                child.poll.return_value=None
+                runner.active=(child,cooperative)
+                with mock.patch.object(os,'killpg') as group:
+                    runner.on_signal(signal.SIGTERM,None)
+                    runner.on_signal(signal.SIGINT,None)
+                if cooperative:
+                    child.send_signal.assert_called_once_with(signal.SIGTERM)
+                    group.assert_not_called()
+                else:
+                    group.assert_called_once_with(child.pid,signal.SIGTERM)
+                    child.send_signal.assert_not_called()
+
+    def test_signal_during_launch_uses_new_command_metadata_after_publication(self):
+        runner=self.runner()
+        for cooperative in (False,True):
+            with self.subTest(cooperative=cooperative):
+                runner.interrupted=None
+                runner.current='preflight'
+                (runner.run/'preflight-cleanup.json').write_text('{"status":"complete"}')
+                child=mock.Mock(pid=4321,returncode=-signal.SIGTERM)
+                child.poll.return_value=child.returncode
+                child.stdout.read1.return_value=b''
+                def launch(*args,**kwargs):
+                    runner.on_signal(signal.SIGTERM,None)
+                    return child
+                with mock.patch.object(subprocess,'Popen',side_effect=launch), \
+                     mock.patch.object(os,'killpg') as group:
+                    with self.assertRaises(local_ci.Failure) as error:
+                        runner.command(['fixture'],cwd=self.base,cooperative=cooperative)
+                self.assertEqual(error.exception.code,-signal.SIGTERM)
+                self.assertIsNone(runner.active)
+                if cooperative:
+                    child.send_signal.assert_called_once_with(signal.SIGTERM)
+                    group.assert_not_called()
+                else:
+                    group.assert_called_once_with(child.pid,signal.SIGTERM)
+                    child.send_signal.assert_not_called()
+
     def test_actual_cooperative_signal_reaps_owned_child(self):
         import threading
         import time
@@ -321,7 +366,7 @@ class RunnerTest(unittest.TestCase):
         sender.start()
         self.assertEqual(runner.execute(), 143)
         sender.join()
-        self.assertIsNone(runner.child)
+        self.assertIsNone(runner.active)
         self.assertEqual(runner.summary['cleanup']['status'], 'complete')
         self.assertEqual(runner.summary['stages']['build']['status'], 'interrupted')
         self.assertEqual(runner.summary['stages']['installed-cpu']['status'], 'not-run')

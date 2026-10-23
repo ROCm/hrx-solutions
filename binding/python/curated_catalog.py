@@ -33,10 +33,15 @@ def relative_file(value):
     return value
 
 
+def catalog_roots():
+    """The fixed installed/source locations, not arbitrary catalog ancestors."""
+    package = Path(__file__).resolve().parent
+    return package / 'loom-pipeline', package.parents[1] / 'loom-pipeline'
+
+
 def catalog_path(identifier):
     relative = relative_file(CATALOGS[identifier])
-    package = Path(__file__).resolve().parent
-    for root in (package / 'loom-pipeline', package.parents[1] / 'loom-pipeline'):
+    for root in catalog_roots():
         candidate = root / relative
         if candidate.is_dir():
             candidate.resolve(strict=True).relative_to(root.resolve(strict=True))

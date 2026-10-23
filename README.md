@@ -98,6 +98,8 @@ resource such as `loom-control instance` for guidance and configuration help.
 Guidebooks trace execution through the source and explain the design choices
 behind each solution. Start here when modifying an implementation:
 
+* [Control architecture and responsibilities](docs/solutions/loom-control.md#architecture-and-responsibilities):
+  CLI, state, preparation, serving, integrations, native execution, and builds.
 * [LLM pipelines](loom-pipeline/llm/README.md): model import and validation,
   source JIT, request flow, state ownership, kernels, and extension points.
 
@@ -156,9 +158,9 @@ bazel run --config=opt --override_module="hrx=$PWD/../hrx-system" //:loom-serve 
 
 `//:native` groups the native deliverables; `//:loom-serve` aliases the public
 HRX executable. Bazel manages dependencies directly, without `.deps/hrx`.
-The pinned module applies a narrow checked-in patch to HRX's generated-file
-rule so it matches external-repository output names. The patch leaves the
-pinned revision unchanged and allows builds without a sibling override.
+[MODULE.bazel](MODULE.bazel) selects the HRX revision with a plain `git_override`.
+It is the source of truth for the pin; this repository applies no HRX patch
+through that override.
 
 ### Python wheel build
 

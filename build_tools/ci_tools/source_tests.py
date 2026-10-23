@@ -12,7 +12,7 @@ from pathlib import Path
 import site
 import sys
 
-REQUIREMENTS = ('setuptools>=77', 'wheel>=0.45', 'packaging>=24.2',
+REQUIREMENTS = ('setuptools>=77', 'wheel>=0.45', 'packaging>=24.2', 'build>=1.2',
                 'textual>=0.47,<2')
 DISCOVERY_DIRECTORIES = ('build_tools', 'tests')
 
@@ -21,12 +21,13 @@ def verify_provenance():
     import setuptools
     import packaging
     import textual
+    import build
 
     prefix = Path(sys.prefix).resolve()
     assert sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE
     assert 'include-system-site-packages = false' in (prefix / 'pyvenv.cfg').read_text()
     assert not os.environ.get('PYTHONPATH') and not os.environ.get('PYTHONHOME')
-    modules = (setuptools, packaging, textual)
+    modules = (setuptools, packaging, textual, build)
     assert all(Path(module.__file__).resolve().is_relative_to(prefix) for module in modules)
     print(sys.executable, *(module.__file__ for module in modules))
 

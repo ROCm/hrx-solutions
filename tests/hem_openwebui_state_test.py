@@ -3,6 +3,8 @@ from copy import deepcopy
 import importlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 import unittest
@@ -50,6 +52,42 @@ def plan(current, owned, wanted, mode='configure', identity=''):
 
 
 class OwnershipTest(unittest.TestCase):
+    def test_schema_imports_and_schema2_decode_need_no_operational_modules(self):
+        # A fresh process proves imports, not just an already-warmed module cache.
+        code = """
+import importlib.abc
+import json
+import sys
+class PureOnly(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.startswith(PACKAGE + '.') and fullname.rsplit('.', 1)[-1] in (
+                'hem_openwebui_http', 'hem_openwebui_stt', 'hem_openwebui',
+                'hem_state', 'hem_pi_state', 'hem_process'):
+            raise AssertionError('operational schema dependency: ' + fullname)
+sys.meta_path.insert(0, PureOnly())
+state = __import__(PACKAGE + '.hem_openwebui_state', fromlist=['state'])
+root = '/nonexistent/owned-root'
+target = 'http://127.0.0.1:3000'
+document = state.decode_document(None, root, target)
+document.update(schema_version=2, stt=None)
+assert state.decode_document(json.dumps(document).encode(), root, target) == document
+"""
+        subprocess.run([sys.executable, '-c', 'PACKAGE = ' + repr(PACKAGE) + '\n' + code],
+                       check=True, capture_output=True, text=True)
+
+    def test_http_and_ownership_preserve_distinct_unicode_byte_limits(self):
+        transport = importlib.import_module(PACKAGE + '.hem_openwebui_http')
+        current = remote(foreign=True)
+        current['OPENAI_API_CONFIGS']['0']['opaque'] = '\u00e9' * (state.MAX_BYTES // 4)
+        # HTTP emits UTF-8 (two bytes); receipts/admission retain ASCII escapes
+        # (six bytes). Sharing admission must not collapse either size boundary.
+        self.assertIs(transport.validate_config(current), current)
+        with self.assertRaisesRegex(common.InvalidInput, 'ownership/schema'):
+            plan(current, document(), [row()])
+        self.assertEqual(transport._json_bytes({'key': '\u00e9'}), b'{"key":"\xc3\xa9"}')
+        self.assertEqual(state._encoded({'key': '\u00e9'}), b'{"key":"\\u00e9"}')
+        self.assertFalse(state._strict({'key': True}, {'key': 1}))
+
     def test_known_prior_endpoint_profile_preserves_webui_connections(self):
         PREVIOUS_NATIVE_PROFILE = contracts.PREVIOUS_NATIVE_PROFILE
         endpoints = dict(schema_version=1, owner='loom-control-clients', hem_root=str(ROOT), servers=[

@@ -4,6 +4,7 @@
 """Guard the shared source-test commands and hosted consumer contract."""
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -16,7 +17,13 @@ class SourceTestsContractTest(unittest.TestCase):
             source_tests.main(['install'])
         execute.assert_called_once_with(sys.executable, [
             sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check',
-            'setuptools>=77', 'wheel>=0.45', 'packaging>=24.2', 'textual>=0.47,<2'])
+            'setuptools>=77', 'wheel>=0.45', 'packaging>=24.2', 'build>=1.2', 'textual>=0.47,<2'])
+
+    def test_verify_rejects_build_from_outside_standalone_venv(self):
+        foreign_build = SimpleNamespace(__file__='/outside-venv/build/__init__.py')
+        with mock.patch.dict(sys.modules, {'build': foreign_build}):
+            with self.assertRaises(AssertionError):
+                source_tests.verify_provenance()
 
     def test_each_discovery_replaces_process_with_original_unittest_command(self):
         # execv preserves unittest's exit/signal status and the caller's process

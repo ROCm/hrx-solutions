@@ -83,6 +83,8 @@ class InstanceManager:
             current_root.relative_to(package)
             current = resolved.catalog.resolve(strict=True)
             relative = current.relative_to(current_root)
+            if relative != resolved.catalog_identity.relative_path:
+                raise ValueError('checked catalog location differs')
             launch = Path(server['build']['directory']).resolve(strict=True)
             retained_root = catalog_root.resolve(strict=True)
             retained_root.relative_to(launch)
@@ -108,7 +110,7 @@ class InstanceManager:
             deadline.remaining()
             files = hem_models.model_files(self.registry, model_id, pipeline=pipeline)
             deadline.remaining()
-            resolved = hem_config.resolve(files, overrides, config_path, pipeline=pipeline)
+            resolved = hem_config.resolve(files, overrides, config_path, pipeline=pipeline, deadline=deadline)
             deadline.remaining()
             with self.registry.lock('server', server['id'], deadline=deadline):
                 server = self._server(server, starting=True)
@@ -121,11 +123,12 @@ class InstanceManager:
                         raise HemError('instance name is already registered; inspect or stop before retrying')
                     catalog_root = hem_process.require_build(server, self.processes.package_root, deadline)
                     catalog = self._retained_catalog(server, resolved, catalog_root)
-                    document = hem_config.deployment_document(resolved, name, catalog=catalog, device=device)
+                    document = hem_config.deployment_document(resolved, name, catalog=catalog, device=device,
+                                                              deadline=deadline)
                     path = self._document(server, name, 'register', document)
                     deadline.remaining()
                     row = self.registry.create_instance(server['id'], server['launch_token'], name,
-                            model_id=model_id, settings=dict(resolved.settings), document=str(path),
+                            model_id=model_id, settings=resolved.settings_document(), document=str(path),
                             dependencies=[str(p) for p in (*resolved.dependencies, catalog)],
                             pending={'action': 'start', 'stage': 'register', 'accepted': None})
                     row = self._start_native(server, row, client, deadline)

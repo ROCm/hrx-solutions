@@ -28,7 +28,10 @@ class MoonshinePreparerTest(unittest.TestCase):
             (source/'LICENSE').write_text('notice')
             with patch.object(preparer, 'FILES', checksums):
                 native = root/'package/_native'
-                preparer.stage(native, source)
+                outputs = preparer.stage(native, source)
+                destination = native / preparer.RELATIVE
+                self.assertEqual(outputs, [destination / name for name in (*contents, 'LICENSE', 'provenance.json')])
+                self.assertEqual(set(outputs), set(destination.iterdir()))
                 runtime_license = native/'share/loom-serve/LICENSE'
                 runtime_license.write_text('notice')
                 archive_path = root/'wheel.zip'

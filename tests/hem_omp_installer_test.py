@@ -17,13 +17,84 @@ class OMPInstallerTest(unittest.TestCase):
         self.providers=['loom-hem-YQ','loom-hem-Yg']
 
     def run_install(self,**kw):
-        return installer.configure_omp(self.root,self.target,Deadline.after(),providers=self.providers,**kw)
+        # This suite isolates file/YAML transactions; public prerequisite parity
+        # is exercised through hem_omp_cli_test's CLI and direct owner calls.
+        assets=installer.bundled_assets()
+        if kw.get('check'):
+            return installer._check_owned(self.root,self.target,assets,self.providers)
+        disable=kw.get('disable',False)
+        inspected=installer._preflight(self.root,self.target,assets,self.providers,disable)
+        return installer._apply_owned(self.root,self.target,Deadline.after(),assets,inspected,
+                                      providers=self.providers,disable=disable)
 
     def files(self):
         return {str(p.relative_to(self.base)):(p.read_bytes(),p.stat().st_mtime_ns) for p in self.base.rglob('*') if p.is_file()}
 
     def yaml(self,text,name='models.yml'):
         self.target.mkdir(mode=0o700,exist_ok=True);(self.target/name).write_text(text);(self.target/name).chmod(0o600)
+
+    def install_prior_generation(self):
+        # Frozen reviewed source, not new discovery with its helper simply removed.
+        fixture=json.loads((Path(__file__).parent/'client_protocol_legacy.json').read_text())
+        self.assertEqual(fixture['source'],'344569eaab47ef07b3c7f1d5da0024f040d88bdb')
+        assets=installer.bundled_assets();del assets['native_protocol.ts']
+        import hashlib
+        for name,record in fixture['assets']['omp_extension'].items():
+            data=record['text'].encode()
+            self.assertEqual(hashlib.sha256(data).hexdigest(),record['sha256'])
+            assets[name]=data
+        for name,expected in fixture['unchanged_sha256']['omp_extension'].items():
+            self.assertEqual(hashlib.sha256(assets[name]).hexdigest(),expected)
+        with patch.object(installer,'bundled_assets',return_value=assets):self.run_install()
+        directory=self.target/installer.PLUGIN
+        return json.loads((directory/'manifest.json').read_bytes())
+
+    def test_prior_exact_generation_passive_stale_and_runtime_free_disable(self):
+        self.install_prior_generation()
+        directory=self.target/installer.PLUGIN
+        self.assertFalse((directory/'native_protocol.ts').exists())
+        before=self.files()
+        self.assertEqual(self.run_install(check=True)['state'],'outdated')
+        self.assertEqual(before,self.files())
+        with patch.object(installer,'inspect_runtime',side_effect=AssertionError('disable must not inspect client')):
+            installer.configure_omp(self.root,self.target,Deadline.after(),disable=True)
+        self.assertFalse(directory.exists())
+
+    def test_prior_to_shared_generation_upgrade_recovers_after_companion_publication(self):
+        old=self.install_prior_generation()
+        directory=self.target/installer.PLUGIN
+        original=installer.atomic_replace
+        def interrupted(path,*args,**kwargs):
+            answer=original(path,*args,**kwargs)
+            if path.name=='native_protocol.ts':raise OSError('after new companion publication')
+            return answer
+        with patch.object(installer,'atomic_replace',side_effect=interrupted):
+            with self.assertRaises(OSError):self.run_install()
+        before=self.files()
+        self.assertEqual(self.run_install(check=True)['state'],'pending')
+        self.assertEqual(before,self.files())
+        self.run_install()
+        current=json.loads((directory/'manifest.json').read_bytes())
+        self.assertEqual(current['integration_id'],old['integration_id'])
+        self.assertNotEqual(current['generation'],old['generation'])
+        self.assertEqual(set(current['artifacts']),set(installer.ARTIFACTS))
+        self.assertTrue(self.run_install(check=True)['configured'])
+        self.assertFalse((directory/'pending.json').exists())
+
+    def test_neither_partial_prior_set_nor_missing_current_companion_is_owned(self):
+        self.install_prior_generation()
+        directory=self.target/installer.PLUGIN
+        path=directory/'discovery.ts';data=path.read_bytes();path.unlink()
+        self.assertEqual(self.run_install(check=True)['state'],'conflict')
+        with self.assertRaises(InvalidInput):self.run_install(disable=True)
+        path.write_bytes(data+b'// external edit');path.chmod(0o600)
+        self.assertEqual(self.run_install(check=True)['state'],'conflict')
+        with self.assertRaises(InvalidInput):self.run_install(disable=True)
+        path.write_bytes(data)
+        self.run_install()
+        (directory/'native_protocol.ts').unlink()
+        self.assertEqual(self.run_install(check=True)['state'],'conflict')
+        with self.assertRaises(InvalidInput):self.run_install(disable=True)
 
     def test_shared_fixture(self):
         for case in json.loads((Path(__file__).parent/'omp_activation_cases.json').read_text()):

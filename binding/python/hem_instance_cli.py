@@ -10,7 +10,7 @@ from .hem_common import Deadline, HemError, InvalidInput, result
 from .hem_http import NativeClient, registration
 from .hem_instances import InstanceManager
 from .hem_process import ProcessManager
-from .hem_server_cli import ObservationResult, _observation, resolve_server
+from .hem_server_cli import ObservationResult, resolve_server
 from .hem_state import Registry
 
 
@@ -89,13 +89,15 @@ def _observe(registry, manager, server, args, deadline):
             hem_display.emit(str(error))
             native, health = None, 'unknown'
     else:
-        observed = _observation(registry, manager, server['id'], deadline)
-        observed_at = observed['observed_at']
-        native = observed['native']
-        health = observed['state']
+        observed = manager.observe_and_reconcile(server['id'], deadline)
+        observed_at = observed.observed_at
+        native = observed.native
+        health = observed.state
+        if observed.error is not None:
+            hem_display.emit(observed.error)
         # Reconciliation may clear exited launch rows. Reload current records;
         # observations never turn an old incarnation into a replacement mapping.
-        server = dict(observed['record'], external=False)
+        server = dict(observed.record, external=False)
         rows = _rows(registry, server)
     by_name = {row['name']: row for row in rows}
     items = []
@@ -179,7 +181,7 @@ def run(args, deadline):
             files = hem_models.model_files(registry, args.model, pipeline=args.pipeline)
             hem_display.emit('Local asset checks (Qwen structural, curated presence); no native equivalent')
             answer = hem_config.export_deployment(files, args.output, args.name or args.model,
-                        overrides=_overrides(args), config_path=args.config, pipeline=args.pipeline)
+                        overrides=_overrides(args), config_path=args.config, pipeline=args.pipeline, deadline=budget)
         hem_display.emit('# Registration example: replace SERVER:PORT with your compatible server endpoint.')
         hem_display.emit(hem_display.http('POST', 'http://SERVER:PORT/v1/models/register',
                             body_path=Path(answer['output']), body=Path(answer['output']).read_bytes()))

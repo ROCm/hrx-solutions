@@ -28,7 +28,12 @@ def projection(root, target, servers):
 def projector_fixture():
     module = types.ModuleType("binding.python.hem_pi_endpoints")
     module.project_endpoints = projection
-    return patch.dict(sys.modules, {module.__name__: module})
+    from contextlib import ExitStack
+    stack = ExitStack()
+    stack.enter_context(patch.dict(sys.modules, {module.__name__: module}))
+    stack.enter_context(patch.object(hem_pi, "inspect_runtime", return_value={}))
+    stack.enter_context(patch.object(hem_pi, "project_endpoints", side_effect=projection))
+    return stack
 
 
 class InstallerTest(unittest.TestCase):
@@ -39,8 +44,7 @@ class InstallerTest(unittest.TestCase):
         self.root, self.target = self.base / "root", self.base / "pi"
         self.assets = bundled_assets()
         fixture = projector_fixture()
-        fixture.start()
-        self.addCleanup(fixture.stop)
+        self.addCleanup(fixture.close)
 
     def run_pi(self, **kwargs):
         return hem_pi.configure_pi(self.root, self.target, Deadline.after(5), **kwargs)

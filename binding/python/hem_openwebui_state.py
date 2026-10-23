@@ -10,22 +10,16 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
-import math
-import json
 from pathlib import Path
 
-from .hem_common import InvalidInput
-from .hem_openwebui_http import canonical_target
+from .hem_openwebui_wire import (MAX_BYTES, canonical_target, ownership_error as _fail,
+    json_bytes, decode_json, strict_equal as _strict, validate_config)
+from .hem_openwebui_receipts import validate_record
 from .hem_pi_contracts import NATIVE_PROFILE, READABLE_NATIVE_PROFILES, provider_id
 
 OWNER = "loom-control-openwebui"
 SCHEMA_VERSION = 1
-MAX_BYTES = 2 * 1024 * 1024
 _DOCUMENT_KEYS = {"schema_version", "owner", "hem_root", "target_url", "deployment_id", "connections", "pending"}
-
-
-def _fail():
-    raise InvalidInput("WebUI ownership/schema conflict; retain evidence for inspection")
 
 
 def _origin(value):
@@ -48,51 +42,11 @@ def ownership_path(root: Path, target: str) -> Path:
 
 
 def _encoded(value):
-    def check(item):
-        if item is None or type(item) in (str, bool, int):
-            return
-        if type(item) is float and math.isfinite(item):
-            return
-        if type(item) is list:
-            for child in item:
-                check(child)
-            return
-        if type(item) is dict and all(type(key) is str for key in item):
-            for child in item.values():
-                check(child)
-            return
-        _fail()
-    try:
-        check(value)
-        data = json.dumps(value, allow_nan=False, separators=(",", ":")).encode()
-        if len(data) > MAX_BYTES:
-            _fail()
-    except (ValueError, TypeError, RecursionError, UnicodeError, OverflowError):
-        _fail()
-    return data
-
-
-def _unique(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            _fail()
-        result[key] = value
-    return result
+    return json_bytes(value, mode='ownership')
 
 
 def _managed(provider):
     return dict(enable=True, auth_type="none", prefix_id=provider, model_ids=[], connection_type="local")
-
-
-def _strict(left, right):
-    if type(left) is not type(right):
-        return False
-    if isinstance(left, dict):
-        return left.keys() == right.keys() and all(_strict(left[k], right[k]) for k in left)
-    if isinstance(left, list):
-        return len(left) == len(right) and all(_strict(a, b) for a, b in zip(left, right))
-    return left == right
 
 
 def _records(rows):
@@ -124,7 +78,6 @@ def _validate_document(document, root, target):
             document["target_url"] != _origin(target) or not isinstance(document["deployment_id"], str)):
         _fail()
     if document["schema_version"] == 2:
-        from .hem_openwebui_stt import validate_record
         validate_record(document["stt"])
     owned = _records(document["connections"])
     pending = document["pending"]
@@ -152,11 +105,7 @@ def decode_document(data: bytes | None, root: Path, target: str) -> dict:
                     deployment_id="", connections=[], pending=None)
     if not isinstance(data, bytes) or len(data) > MAX_BYTES:
         _fail()
-    try:
-        document = json.loads(data, object_pairs_hook=_unique,
-                              parse_constant=lambda _: _fail())
-    except (ValueError, UnicodeError, RecursionError):
-        _fail()
+    document = decode_json(data, mode='ownership')
     return _validate_document(document, root, target)
 
 
@@ -195,20 +144,8 @@ class MergePlan:
 
 
 def _remote(remote):
-    # Transport validates the same envelope, but pure entry points must not trust callers.
-    _encoded(remote)
-    if (not isinstance(remote, dict) or set(remote) != {"ENABLE_OPENAI_API", "OPENAI_API_BASE_URLS", "OPENAI_API_KEYS", "OPENAI_API_CONFIGS"} or
-            type(remote["ENABLE_OPENAI_API"]) is not bool or
-            not isinstance(remote["OPENAI_API_BASE_URLS"], list) or not isinstance(remote["OPENAI_API_KEYS"], list) or
-            not all(isinstance(v, str) for v in remote["OPENAI_API_BASE_URLS"] + remote["OPENAI_API_KEYS"]) or
-            len(remote["OPENAI_API_BASE_URLS"]) != len(remote["OPENAI_API_KEYS"]) or
-            not isinstance(remote["OPENAI_API_CONFIGS"], dict)):
-        _fail()
-    count = len(remote["OPENAI_API_BASE_URLS"])
-    for index, config in remote["OPENAI_API_CONFIGS"].items():
-        if (not isinstance(index, str) or not index.isascii() or not index.isdecimal() or
-                len(index) > 10 or str(int(index)) != index or int(index) >= count or not isinstance(config, dict)):
-            _fail()
+    # Pure entry points and transport each admit their own untrusted boundary.
+    validate_config(remote, mode='ownership')
 
 
 def _indices(remote, provider):
@@ -236,6 +173,35 @@ def _with_connections(document, rows, identity):
     return value
 
 
+def _recover_pending(remote, document, deployment_id):
+    """Assess admitted remote/ownership values; never propose new desired work.
+
+    The planner and observational owner share this exact before/after policy.
+    The returned document is detached. Only completed proves prior acceptance;
+    unchanged/conflict must not authorize observational clearing or replay.
+    """
+    current = deepcopy(document)
+    recovery = "none"
+    identities = [current["deployment_id"]]
+    if current["pending"]:
+        identities.append(current["pending"]["deployment_id"])
+    if any(identity and identity != deployment_id for identity in identities):
+        return current, "identity_conflict"
+    pending = current["pending"]
+    if pending:
+        affected = {r["provider"] for r in pending["before"] + pending["after"]}
+        if _set_matches(remote, pending["after"], affected):
+            recovery = "completed"
+            rows = [r for r in current["connections"] if r["provider"] not in affected] + pending["after"]
+            current = _with_connections(current, rows, pending["deployment_id"])
+        elif _set_matches(remote, pending["before"], affected):
+            recovery = "unchanged"
+            current["pending"] = None
+        else:
+            return current, "conflict"
+    return current, recovery
+
+
 def plan_change(remote: dict, document: dict, desired: list[dict], *, mode: str, deployment_id: str) -> MergePlan:
     """Plan one mutation, or assess passively. All returned values are detached.
 
@@ -249,26 +215,13 @@ def plan_change(remote: dict, document: dict, desired: list[dict], *, mode: str,
     _validate_document(document, document.get("hem_root"), document.get("target_url"))
     _records(desired)
     original = deepcopy(document)
-    current = deepcopy(document)
+    pending = document["pending"]
+    current, recovery = _recover_pending(remote, document, deployment_id)
     findings = []
-    recovery = "none"
-    identities = [current["deployment_id"]]
-    if current["pending"]:
-        identities.append(current["pending"]["deployment_id"])
-    if any(identity and identity != deployment_id for identity in identities):
+    if recovery == "identity_conflict":
         return MergePlan("drift", [dict(status="target_identity_conflict")], recovery="conflict")
-    pending = current["pending"]
-    if pending:
-        affected = {r["provider"] for r in pending["before"] + pending["after"]}
-        if _set_matches(remote, pending["after"], affected):
-            recovery = "completed"
-            rows = [r for r in current["connections"] if r["provider"] not in affected] + pending["after"]
-            current = _with_connections(current, rows, pending["deployment_id"])
-        elif _set_matches(remote, pending["before"], affected):
-            recovery = "unchanged"
-            current["pending"] = None
-        else:
-            return MergePlan("pending", [dict(status="pending_conflict")], recovery="conflict")
+    if recovery == "conflict":
+        return MergePlan("pending", [dict(status="pending_conflict")], recovery="conflict")
     owned = {r["provider"]: r for r in current["connections"]}
     wanted = {r["provider"]: r for r in desired}
     conflicts = False

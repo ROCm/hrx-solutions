@@ -1,4 +1,4 @@
-"""Owned Pi install/recovery. CLI qualifies Pi/Node before configuration.
+"""Complete qualified Pi setup, owned installation and recovery.
 
 No Pi process, settings file, package installer, HTTP or lifecycle operation is
 invoked here. One root reservation plus one bounded pending plan bridge SQLite
@@ -9,11 +9,20 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import json
+import re
+import shlex
+import shutil
+import subprocess
+from urllib.parse import urlsplit
 from pathlib import Path
 import stat
 import uuid
 
-from .hem_common import InvalidInput, UncertainOutcome
+from .hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
+from . import hem_display
+from .hem_pi_contracts import NODE_MIN_VERSION
+from .hem_pi_endpoints import project_endpoints, _origin
 from .hem_pi_assets import bundled_assets, asset_digests
 from .hem_pi_contracts import (PiResult, MANIFEST_PATH, ENDPOINT_PATH,
     MANIFEST_SCHEMA_VERSION, INTEGRATION_VERSION, EXTENSION_VERSION,
@@ -22,6 +31,158 @@ from .hem_pi_state import (passive_snapshot, integration_lock, target_lock,
     get_target, set_target, clear_target)
 from .hem_state import Registry
 from . import hem_pi_files as files
+
+
+MAX_BYTES = files.MAX_BYTES
+
+
+def _read(path):
+    """Bounded regular metadata only; never follow user auth/settings aliases."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BYTES:
+            raise InvalidInput("unsupported or oversized Pi metadata")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            value = stream.read(MAX_BYTES + 1)
+        if len(value) > MAX_BYTES:
+            raise InvalidInput("oversized Pi metadata")
+        return value
+    finally:
+        os.close(fd)
+
+
+def _metadata(path):
+    try:
+        data = json.loads(_read(path))
+        if not isinstance(data, dict):
+            raise ValueError()
+        return data
+    except (OSError, ValueError, UnicodeError) as error:
+        raise InvalidInput("cannot inspect installed Pi package metadata; select a qualified Pi on PATH") from error
+
+
+def _entry(package, relative):
+    if not isinstance(relative, str) or not relative:
+        raise InvalidInput("installed Pi lacks the qualified public package entry point")
+    try:
+        entry = (package / relative).resolve()
+        if entry.is_relative_to(package) and entry.is_file():
+            return entry
+    except (OSError, ValueError, RuntimeError):
+        pass
+    raise InvalidInput("installed Pi public entry point is missing or escapes its package")
+
+
+def _public_entry(package, metadata):
+    exports = metadata.get("exports")
+    exported = exports.get(".") if isinstance(exports, dict) else None
+    relative = exported.get("import") if isinstance(exported, dict) else exported
+    return _entry(package, relative)
+
+
+def inspect_runtime(deadline):
+    """Identify the selected npm bin without executing Pi, extensions or npm."""
+    selected = shutil.which("pi")
+    if selected is None:
+        raise InvalidInput("Pi is not on PATH; select qualified @earendil-works/pi-coding-agent 1.3.0 (no automatic upgrade)")
+    executable = Path(selected).resolve()
+    package = None
+    for ancestor in executable.parents:
+        manifest = ancestor / "package.json"
+        if manifest.is_file():
+            metadata = _metadata(manifest)
+            if metadata.get("name") == PI_PACKAGE:
+                package = ancestor
+                break
+    if package is None:
+        raise InvalidInput("selected pi launcher has no identifiable qualified npm package; select its unambiguous npm bin on PATH")
+    version = metadata.get("version")
+    if version not in PI_VERSIONS:
+        raise InvalidInput("unsupported selected Pi version; require @earendil-works/pi-coding-agent 1.3.0; existing Pi is unchanged")
+    bins = metadata.get("bin")
+    if not isinstance(bins, dict) or _entry(package, bins.get("pi")) != executable:
+        raise InvalidInput("selected pi does not match its package bin; resolve the ambiguous launcher on PATH")
+    _public_entry(package, metadata)
+    dependencies = metadata.get("dependencies")
+    if not isinstance(dependencies, dict) or dependencies.get("@earendil-works/pi-ai") != version:
+        raise InvalidInput("selected Pi package has an unsupported pi-ai dependency")
+    # Follow ordinary Node module lookup, stopping at the first installed match.
+    ai = next((parent / "node_modules/@earendil-works/pi-ai" for parent in (package, *package.parents)
+               if (parent / "node_modules/@earendil-works/pi-ai/package.json").is_file()), None)
+    if ai is None:
+        raise InvalidInput("selected Pi is missing its qualified pi-ai package")
+    ai = ai.resolve()
+    ai_metadata = _metadata(ai / "package.json")
+    if ai_metadata.get("name") != "@earendil-works/pi-ai" or ai_metadata.get("version") != version:
+        raise InvalidInput("selected Pi resolves an unsupported pi-ai package")
+    _public_entry(ai, ai_metadata)
+    try:
+        with executable.open("rb") as stream:
+            shebang = stream.readline(512).decode("ascii").strip()
+        launcher = shlex.split(shebang[2:]) if shebang.startswith("#!") else []
+    except (OSError, ValueError, UnicodeError) as error:
+        raise InvalidInput("cannot identify the selected Pi Node launcher") from error
+    if launcher == ["/usr/bin/env", "node"]:
+        node = shutil.which("node")
+    elif len(launcher) == 1 and Path(launcher[0]).is_absolute() and Path(launcher[0]).name == "node":
+        node = launcher[0]
+    else:
+        raise InvalidInput("unsupported or ambiguous Pi launcher; require the qualified npm Node bin")
+    if node is None:
+        raise InvalidInput("Pi requires Node >=22.19.0; node is not on PATH")
+    node = str(Path(node).resolve())
+    environment = {key: value for key, value in os.environ.items() if key not in ("NODE_OPTIONS", "NODE_PATH")}
+    try:
+        observed = subprocess.run([node, "--version"], env=environment, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=deadline.remaining(), check=False)
+    except subprocess.TimeoutExpired as error:
+        raise HemError("Node identity check timed out before any Pi configuration writes", accepted=False) from error
+    except OSError as error:
+        raise InvalidInput("cannot inspect selected Node runtime") from error
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)\s*", observed.stdout)
+    if observed.returncode or match is None or tuple(map(int, match.groups())) < NODE_MIN_VERSION:
+        raise InvalidInput("selected Pi requires Node >=22.19.0; no runtime or package was changed")
+    deadline.remaining()
+    return dict(package=PI_PACKAGE, version=version, package_directory=str(package),
+                executable=str(executable), node=node, node_version=observed.stdout.strip())
+
+
+def _legacy(target, managed_providers=(), *, report=True):
+    """Check static provider IDs and report only allowlisted legacy metadata."""
+    path = target / "models.json"
+    try:
+        value = json.loads(_read(path))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, UnicodeError, InvalidInput):
+        if report:
+            hem_display.emit("Pi models.json could not be safely inspected; preserved unchanged. Inspect it manually for unmanaged local listings.")
+        return []
+    providers = value.get("providers", {}) if isinstance(value, dict) else {}
+    providers = providers if isinstance(providers, dict) else {}
+    collisions = set(managed_providers).intersection(providers)
+    if collisions:
+        raise InvalidInput("Pi models.json has static provider IDs that conflict with configured Hem servers: " +
+            ", ".join(sorted(collisions)) + "; export/back up models.json and rename or remove those static providers before rerunning loom-control pi configure; no configuration was changed")
+    provider = providers.get("hrx-loom")
+    if not isinstance(provider, dict):
+        return []
+    endpoint = provider.get("baseUrl")
+    try:
+        parsed = urlsplit(endpoint)
+        endpoint = _origin(f"{parsed.scheme}://{parsed.netloc}") + parsed.path
+        if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/v1"):
+            raise ValueError()
+    except (ValueError, TypeError, AttributeError, InvalidInput):
+        endpoint = "<unverified endpoint>"
+    models = provider.get("models", [])
+    identifiers = [item["id"] for item in models if isinstance(item, dict) and
+                   isinstance(item.get("id"), str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", item["id"])] if isinstance(models, list) else []
+    if report:
+        hem_display.emit("Unmanaged legacy Pi provider hrx-loom is preserved. Export/back up models.json and check default-model references yourself before manually removing only obsolete hrx-loom entries; Hem does not change settings or credentials.")
+    return [dict(provider="hrx-loom", ids=identifiers, endpoint=endpoint,
+                 state="unmanaged", reason="availability unknown; manual export and cleanup are the user's responsibility")]
 
 
 def resolve_target(target=None):
@@ -114,7 +275,7 @@ def _mode_marker(path):
     return fingerprint.name
 
 
-def _make_plan(root, target, reserved, assets, inspected, endpoint, servers, mode):
+def _make_plan(root, target, reserved, assets, inspected, endpoint, projection, mode):
     manifest = inspected["manifest"]
     if mode == "disable":
         if manifest is None:
@@ -125,8 +286,7 @@ def _make_plan(root, target, reserved, assets, inspected, endpoint, servers, mod
             next={MANIFEST_PATH:_pack(files.encoded(disabled)), "@endpoint":None}, digests=manifest["artifacts"])
     if inspected["drift"]:
         raise InvalidInput("edited owned Pi artifacts retained: " + ", ".join(inspected["drift"]))
-    from .hem_pi_endpoints import project_endpoints
-    projection = files.encoded(project_endpoints(root, reserved, servers))
+    projection = files.encoded(projection)
     desired_manifest = files.encoded(_manifest(root, reserved, assets))
     old = {name:_pack(files.read_owned(target / name)) for name in assets}
     old.update({MANIFEST_PATH:_pack(inspected["manifest_bytes"]), "@endpoint":_pack(endpoint)})
@@ -275,18 +435,8 @@ def _result(target, *, state, configured=False, changed=False, completed=True, e
         native_profile=NATIVE_PROFILE, **fields)
 
 
-def configure_pi(root, target, deadline, *, check=False, disable=False):
-    """Configure/check/disable owned resources; only configure requires qualified Pi.
-
-    check is strictly passive, including an absent state namespace. Mutation
-    errors preserve reservation/recovery evidence rather than guessing rollback.
-    """
-    if check and disable:
-        raise InvalidInput("Pi check and disable are mutually exclusive")
-    root, target = Path(root).resolve(), resolve_target(target)
-    assets = bundled_assets()
-    _validate_assets(assets)
-    snapshot = passive_snapshot(root, deadline)
+def _configure_owned(root, target, deadline, assets, snapshot, identity, *, check=False, disable=False):
+    """Apply qualified intent, preserving reservation and bounded recovery evidence."""
     _identity_check(snapshot["pi_target"], target)
     inspected = files.inspect_target(target, root, assets=assets)
     if snapshot["pi_target"] and inspected["manifest"] and inspected["integration_id"] != snapshot["pi_target"]["integration_id"]:
@@ -297,12 +447,11 @@ def configure_pi(root, target, deadline, *, check=False, disable=False):
         if snapshot["pi_target"]:
             endpoint = files.read_owned(root / ENDPOINT_PATH)
             _endpoint(endpoint, root, snapshot["pi_target"])
-            from .hem_pi_endpoints import project_endpoints
             projection = files.encoded(project_endpoints(root, snapshot["pi_target"], snapshot["servers"]))
             changed = changed or endpoint != projection
             configured = configured and endpoint is not None
         return _result(target, state="changes_required" if changed else "configured", configured=configured,
-            exit_code=int(changed), affected_paths=inspected["affected_paths"], available=[], servers=[],
+            exit_code=int(changed), affected_paths=inspected["affected_paths"],
             next_action="loom-control pi configure" if changed else None)
     if disable and snapshot["pi_target"] is None:
         if inspected["manifest"] or inspected["pending"] or inspected["drift"]:
@@ -312,15 +461,22 @@ def configure_pi(root, target, deadline, *, check=False, disable=False):
     with integration_lock(root, deadline):
         reserved = get_target(registry)
         _identity_check(reserved, target)
+        if reserved is None and snapshot["pi_target"] is not None:
+            # A concurrent disable retired the preflight generation. Never
+            # recreate its UUID; a fresh invocation must read current state.
+            raise InvalidInput("Pi reservation changed during setup; inspect with loom-control pi configure --check before retrying")
         with target_lock(target, deadline):
             inspected = files.inspect_target(target, root, assets=assets)
             manifest = inspected["manifest"]
             if manifest and (reserved is None or inspected["integration_id"] != reserved["integration_id"]):
                 raise InvalidInput("Pi target has no matching ownership reservation")
+            if not disable:
+                projection = project_endpoints(root, reserved or identity, registry.list_servers())
+                _legacy(target, [row["provider"] for row in projection["servers"]], report=False)
             if reserved is None:
                 if inspected["drift"] or inspected["pending"]:
                     raise InvalidInput("unowned Pi integration files retained")
-                reserved = dict(target=str(target), integration_id=str(uuid.uuid4()))
+                reserved = identity
                 set_target(registry, reserved)  # Durable BEFORE any preparation.
             # Complete a previously staged operation under its original identity.
             preparing, pending = target / files.PREPARING_PATH, target / files.PENDING_PATH
@@ -339,7 +495,8 @@ def configure_pi(root, target, deadline, *, check=False, disable=False):
                         fingerprint = _mode_marker(preparing / mode)
                         endpoint = files.read_owned(root / ENDPOINT_PATH)
                         _endpoint(endpoint, root, reserved)
-                        plan = _make_plan(root, target, reserved, assets, inspected, endpoint, registry.list_servers(), mode)
+                        recovery_projection = project_endpoints(root, reserved, registry.list_servers()) if mode == "configure" else None
+                        plan = _make_plan(root, target, reserved, assets, inspected, endpoint, recovery_projection, mode)
                         expected_fingerprint = hashlib.sha256(files.encoded(plan)).hexdigest()
                         if fingerprint is None:
                             if temporary.exists():
@@ -399,17 +556,13 @@ def configure_pi(root, target, deadline, *, check=False, disable=False):
                     clear_target(registry, integration_id=reserved["integration_id"])
                     return _result(target, state="disabled", changed=True)
             if disable:
-                plan = _make_plan(root, target, reserved, assets, inspected, endpoint, registry.list_servers(), "disable")
+                plan = _make_plan(root, target, reserved, assets, inspected, endpoint, None, "disable")
             else:
                 if inspected["drift"]:
                     raise InvalidInput("edited owned Pi artifacts retained: " + ", ".join(inspected["drift"]))
-                from .hem_pi_endpoints import project_endpoints
-                projection = files.encoded(project_endpoints(root, reserved, registry.list_servers()))
-                desired_manifest = files.encoded(_manifest(root, reserved, assets))
-                if inspected["configured"] and not inspected["changed"] and endpoint == projection:
-                    return _result(target, state="configured", configured=True, changed=recovered,
-                        affected_paths=[], available=[], servers=[])
-                plan = _make_plan(root, target, reserved, assets, inspected, endpoint, registry.list_servers(), "configure")
+                plan = _make_plan(root, target, reserved, assets, inspected, endpoint, projection, "configure")
+                if inspected["configured"] and not inspected["changed"] and endpoint == _unpack(plan["next"]["@endpoint"]):
+                    return _result(target, state="configured", configured=True, changed=recovered, affected_paths=[])
             _prepare(root, target, reserved, plan, assets, deadline)
             retained = _resume(root, target, reserved, plan, assets, deadline)
             if retained:
@@ -422,4 +575,77 @@ def configure_pi(root, target, deadline, *, check=False, disable=False):
                 if not verified["configured"] or get_target(registry) != reserved:
                     raise UncertainOutcome("Pi installation verification failed; rerun configure")
             return _result(target, state="disabled" if disable else "configured", configured=not disable,
-                changed=True, accepted=True, affected_paths=inspected["affected_paths"], available=[], servers=[])
+                changed=True, accepted=True, affected_paths=inspected["affected_paths"])
+
+
+def configure_pi(root, target, deadline, *, check=False, disable=False):
+    """Qualify and configure Pi; direct callers receive the CLI safeguards."""
+    if check and disable:
+        raise InvalidInput("Pi check and disable are mutually exclusive")
+    try:
+        deadline.remaining()
+    except DeadlineExpired as error:
+        raise HemError("Pi configuration deadline expired before writes", accepted=False) from error
+    if root is None:
+        root = os.environ.get("LOOM_SERVE_DIR", str(Path.home() / ".loom"))
+    root = Path(root)
+    if not root.is_absolute():
+        raise InvalidInput("LOOM_SERVE_DIR/state root must be absolute")
+    root, target = root.resolve(), resolve_target(target)
+    managed_providers = []
+    runtime = None
+    compatibility = dict(state="not_checked", reason="runtime qualification is unnecessary for safe owned-file removal",
+                         next_action=None)
+    try:
+        if not disable:
+            try:
+                runtime = inspect_runtime(deadline)
+                compatibility = dict(state="compatible", reason="selected Pi and Node match the qualified package profile",
+                                     next_action=None)
+            except (HemError, OSError) as error:
+                if not check:
+                    raise
+                compatibility = dict(state="unqualified", reason=str(error),
+                                     next_action="select qualified Pi 1.3.0 and Node >=22.19.0 on PATH, then rerun loom-control pi configure --check")
+                hem_display.emit("Pi runtime compatibility: " + compatibility["reason"])
+                hem_display.emit("Next: " + compatibility["next_action"])
+        assets = bundled_assets()
+        _validate_assets(assets)
+        snapshot = passive_snapshot(root, deadline)
+        identity = snapshot["pi_target"] or dict(target=str(target), integration_id=str(uuid.uuid4()))
+        if not disable:
+            # Validate using the actual proposed reservation identity, before writes.
+            projection = project_endpoints(root, identity, snapshot["servers"])
+            managed_providers = [row["provider"] for row in projection["servers"]]
+    except DeadlineExpired as error:
+        raise HemError("Pi compatibility inspection deadline expired before writes", accepted=False) from error
+    except OSError as error:
+        raise HemError("bundled Pi resources are unavailable; reinstall this wheel before configuring Pi", accepted=False) from error
+    legacy = _legacy(target, managed_providers)
+    hem_display.emit("No native Loom equivalent: owned Pi integration file configuration")
+    try:
+        response = _configure_owned(root, target, deadline, assets, snapshot, identity, check=check, disable=disable)
+    except DeadlineExpired as error:
+        if error.accepted is True:
+            raise
+        if check:
+            raise HemError("Pi inspection deadline expired before any writes", accepted=False) from error
+        raise UncertainOutcome("Pi update deadline expired; inspect with loom-control pi configure --check before retrying") from error
+    except OSError as error:
+        if check:
+            raise HemError("Pi inspection failed without writes", accepted=False) from error
+        raise UncertainOutcome("Pi update interrupted; inspect with loom-control pi configure --check before retrying") from error
+    response.update(runtime=runtime, runtime_compatibility=compatibility, legacy=legacy)
+    if check and compatibility["state"] == "unqualified":
+        # Preserve the configuration findings and existing stronger failure codes.
+        response.exit_code = response.exit_code or 1
+    if response.get("affected_paths"):
+        response["affected_paths"] = sorted(set(response["affected_paths"]) | {str(root / ENDPOINT_PATH), str(root / "control.sqlite3")})
+    for path in response.get("affected_paths", []):
+        hem_display.emit("Pi integration path: " + str(path))
+    if not disable:
+        response["availability"] = "not_observed"
+        hem_display.emit("Pi settings/defaults/auth are unchanged. Launch Pi normally; use /reload or restart for new server names.")
+    if response.get("next_action"):
+        hem_display.emit("Next: " + response["next_action"])
+    return response

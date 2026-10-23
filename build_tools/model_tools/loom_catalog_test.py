@@ -175,17 +175,22 @@ class CatalogTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'invalid required'):
             catalog.discover_bytecode_outputs(queried, self.inventory, self.root)
 
-    def test_query_uses_exact_bazel_outputs_with_caller_build_environment(self):
+    def test_query_interprets_bound_paths_after_logical_symlink_selection(self):
         outputs = self.products()
-        queried = "\n".join(str(p.relative_to(self.root)) for p in outputs.values())
-        with patch.object(catalog.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout=queried)) as run:
-            found = catalog.query_bytecode_outputs(self.root / 'bazel', self.root,
-                                                  build_options=('--config=opt', '--disk_cache='),
-                                                  environment={'BUILD': 'identity'})
-        self.assertEqual(found, outputs)
-        self.assertEqual(run.call_args.args[0], [str(self.root / 'bazel'), 'cquery', '--config=opt', '--disk_cache=', '--output=files', catalog.CATALOG_TARGET])
-        self.assertTrue(run.call_args.kwargs['check'])
-        self.assertEqual(run.call_args.kwargs['env'], {'BUILD': 'identity'})
+        alias=outputs['qwen_08b'];alias.unlink();alias.symlink_to(outputs['qwen_27b'])
+        def query(target):
+            self.assertEqual(target,catalog.CATALOG_TARGET)
+            return tuple(outputs.values())
+        found = catalog.query_bytecode_outputs(query,self.root)
+        self.assertEqual(found, {name:path.resolve() for name,path in outputs.items()})
+        decoder=self.root/'decoder';decoder.write_bytes(b'executable')
+        def decoder_query(target):
+            self.assertEqual(target,catalog.DECODER_TARGET)
+            return (decoder,)
+        self.assertEqual(catalog.query_decoder(decoder_query),decoder)
+        for paths in ((),(decoder,decoder)):
+            with self.assertRaisesRegex(ValueError,'exactly one'):
+                catalog.query_decoder(lambda target:paths)
 
     def test_staging_has_clean_allowlist_regular_outputs_and_manifest_closure(self):
         outputs = self.products()

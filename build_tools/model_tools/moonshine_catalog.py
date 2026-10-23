@@ -103,16 +103,14 @@ def validate_artifact(path, sources, root, decoder, policy=False):
     return expected
 
 
-def query_outputs(bazel, repository, *, build_options=(), environment=None):
-    result = subprocess.run([str(bazel),'cquery',*build_options,'--output=files',TARGET],
-                            cwd=repository,check=True,text=True,stdout=subprocess.PIPE,env=environment)
+def query_outputs(query):
+    """Interpret ordered build-bound outputs using Moonshine physical artifacts."""
     outputs = {}
-    for line in result.stdout.splitlines():
-        path = Path(line.strip())
+    for path in query(TARGET):
         name = path.name
         if name not in ARTIFACTS or name in outputs or not path.as_posix().endswith('/'+RELATIVE+'/'+name):
             raise ValueError('Unexpected or duplicate Moonshine artifact output')
-        path = (repository / path).resolve() if not path.is_absolute() else path.resolve()
+        path = path.resolve()
         if not path.is_file() or not path.read_bytes().startswith(b'LOOM'):
             raise ValueError('Missing or invalid Moonshine bytecode')
         outputs[name] = path
@@ -140,6 +138,11 @@ def stage(destination, outputs, repository, *, decoder):
     (destination/'catalog.json').write_text(json.dumps(installed_definition(json.loads((root/'catalog.json').read_text())),indent=2)+'\n')
     (destination/'artifacts.json').write_text(json.dumps(metadata,indent=2,sort_keys=True)+'\n')
     return sorted(destination.iterdir())
+
+
+def stage_package(package_root, outputs, repository, *, decoder):
+    """Own Moonshine's installed catalog destination and source interpretation."""
+    return stage(package_root / 'loom-pipeline' / RELATIVE, outputs, repository, decoder=decoder)
 
 
 def validate_archive(archive, repository, *, prefix='hrx_solutions/loom-pipeline/'):

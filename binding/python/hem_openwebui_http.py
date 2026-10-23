@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import http.client
 import ipaddress
-import json
-import math
 import re
 import socket
 import threading
@@ -18,89 +16,11 @@ from urllib.parse import quote
 
 from .hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 
+from .hem_openwebui_wire import (MAX_BYTES, canonical_target,
+    json_bytes as _json_bytes, decode_json as _decode, validate_config, validate_audio)
+
+
 QUALIFIED_VERSIONS = ("0.12.3",)
-MAX_BYTES = 2 * 1024 * 1024
-_FIELDS = {"ENABLE_OPENAI_API", "OPENAI_API_BASE_URLS", "OPENAI_API_KEYS", "OPENAI_API_CONFIGS"}
-
-
-def canonical_target(value: str) -> str:
-    """Return a direct numeric-loopback HTTP origin; never resolve hostnames."""
-    try:
-        if not isinstance(value, str) or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value):
-            raise ValueError
-        parsed = urlsplit(value)
-        address = ipaddress.ip_address(parsed.hostname or "")
-        port = parsed.port
-        if (parsed.scheme != "http" or not address.is_loopback or "%" in parsed.netloc
-                or parsed.username is not None or parsed.password is not None
-                or port is None or port == 0 or parsed.path not in ("", "/")
-                or parsed.query or parsed.fragment or "?" in value or "#" in value):
-            raise ValueError
-        host = f"[{address.compressed}]" if address.version == 6 else address.compressed
-        return f"http://{host}:{port}"
-    except (ValueError, TypeError):
-        raise InvalidInput("WebUI URL must be a numeric-loopback http://address:port origin") from None
-
-
-def _json_bytes(value: object) -> bytes:
-    # Reject coercions (non-string keys, tuples, NaN), not just malformed bytes.
-    def check(item):
-        if item is None or type(item) in (str, bool, int):
-            return
-        if type(item) is float and math.isfinite(item):
-            return
-        if type(item) is list:
-            for child in item:
-                check(child)
-            return
-        if type(item) is dict and all(type(key) is str for key in item):
-            for child in item.values():
-                check(child)
-            return
-        raise ValueError
-    try:
-        check(value)
-        body = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
-        if len(body) > MAX_BYTES:
-            raise ValueError
-        return body
-    except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
-        raise InvalidInput("WebUI JSON must be strict and at most 2 MiB") from None
-
-
-def validate_config(value: object) -> dict:
-    """Validate the losslessly round-trippable four-field management document."""
-    _json_bytes(value)
-    if type(value) is not dict or set(value) != _FIELDS:
-        raise InvalidInput("WebUI configuration has unsupported top-level fields")
-    urls, keys, configs = (value[name] for name in ("OPENAI_API_BASE_URLS", "OPENAI_API_KEYS", "OPENAI_API_CONFIGS"))
-    if (type(value["ENABLE_OPENAI_API"]) is not bool or type(urls) is not list
-            or type(keys) is not list or len(urls) != len(keys)
-            or any(type(item) is not str for item in urls + keys) or type(configs) is not dict):
-        raise InvalidInput("WebUI configuration has invalid enable, URL, key or connection fields")
-    for index, config in configs.items():
-        if (not re.fullmatch(r"0|[1-9][0-9]*", index) or len(index) > len(str(len(urls)))
-                or int(index) >= len(urls) or type(config) is not dict):
-            raise InvalidInput("WebUI configuration has an invalid connection index or shape")
-    return value
-
-
-def _decode(body: bytes):
-    def pairs(items):
-        result = {}
-        for key, value in items:
-            if key in result:
-                raise ValueError
-            result[key] = value
-        return result
-    def nonfinite(_):
-        raise ValueError
-    try:
-        value = json.loads(body.decode("utf-8"), object_pairs_hook=pairs, parse_constant=nonfinite)
-        _json_bytes(value)
-        return value
-    except (ValueError, UnicodeError, RecursionError, InvalidInput):
-        raise InvalidInput("WebUI response is not bounded strict JSON") from None
 
 
 class WebUIClient:
@@ -133,11 +53,9 @@ class WebUIClient:
                                    accepted=True) from None
 
     def audio_config(self):
-        from .hem_openwebui_stt import validate_audio
         return validate_audio(self._request("GET", "/api/v1/audio/config"))
 
     def update_audio(self, configuration):
-        from .hem_openwebui_stt import validate_audio
         validate_audio(configuration)
         return self._request("POST", "/api/v1/audio/config/update", _json_bytes(configuration))
 

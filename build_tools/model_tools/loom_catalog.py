@@ -161,27 +161,17 @@ def discover_bytecode_outputs(paths: list[Path], inventory: Path, repository: Pa
     return outputs
 
 
-def query_bytecode_outputs(bazel: Path, repository: Path, *,
-                           build_options: tuple[str, ...] = (),
-                           environment: dict[str, str] | None = None) -> dict[str, Path]:
-    """Discover already-built catalog artifacts without adding them to native bins."""
-    result = subprocess.run(
-        [str(bazel), "cquery", *build_options, "--output=files", CATALOG_TARGET],
-        cwd=repository, check=True, text=True, stdout=subprocess.PIPE, env=environment,
-    )
-    paths = [Path(line.strip()) for line in result.stdout.splitlines() if line.strip()]
-    return discover_bytecode_outputs(paths, repository / "loom-pipeline/catalog_sources.bzl", repository)
+def query_bytecode_outputs(query, repository: Path) -> dict[str, Path]:
+    """Interpret the build-bound query using Qwen's declared catalog identities."""
+    return discover_bytecode_outputs(query(CATALOG_TARGET),
+                                     repository / "loom-pipeline/catalog_sources.bzl", repository)
 
 
-def query_decoder(bazel: Path, repository: Path, *, build_options: tuple[str, ...] = (),
-                  environment: dict[str, str] | None = None) -> Path:
-    result = subprocess.run([str(bazel), "cquery", *build_options, "--output=files", DECODER_TARGET],
-                            cwd=repository, check=True, text=True, stdout=subprocess.PIPE, env=environment)
-    paths = result.stdout.splitlines()
+def query_decoder(query) -> Path:
+    paths = query(DECODER_TARGET)
     if len(paths) != 1:
         raise ValueError("Expected exactly one pinned Loom decoder executable")
-    path = Path(paths[0])
-    return (repository / path).resolve(strict=True) if not path.is_absolute() else path.resolve(strict=True)
+    return paths[0].resolve(strict=True)
 
 
 def validate_bytecode_artifact(artifact: Path, variant: dict, root: Path, decoder: Path) -> None:
@@ -235,6 +225,55 @@ def stage_bytecode_catalog(destination: Path, outputs: dict[str, Path], inventor
         json.dumps({"format": 2, "variants": build}, sort_keys=True, indent=2)+"\n")
     shutil.copyfile(root / "LICENSE-APACHE-2.0", destination / "LICENSE-APACHE-2.0")
     return sorted(path for path in destination.rglob("*") if path.is_file())
+
+
+def stage_package(package_root, outputs, repository, *, decoder):
+    """Own Qwen's installed catalog destination and authored inventory binding."""
+    return stage_bytecode_catalog(package_root / "loom-pipeline/llm", outputs,
+                                  repository / "loom-pipeline/catalog_sources.bzl", decoder=decoder)
+
+
+def validate_archive(archive, repository, *, prefix='hrx_solutions/loom-pipeline/llm/'):
+    """Prove Qwen archive layout, authored closure and exact payload metadata."""
+    names = set(archive.namelist())
+    inventory = repository / "loom-pipeline/catalog_sources.bzl"
+    validate_catalog(inventory)
+    declared = variants(inventory)
+    build_name = prefix + "catalog-build.json"
+    if build_name not in names:
+        raise RuntimeError("wheel is missing catalog build hashes")
+    build = json.loads(archive.read(build_name))
+    if build.get("format") != 2 or set(build.get("variants", {})) != set(declared):
+        raise RuntimeError("wheel catalog build inventory does not match authored variants")
+    allowed = {build_name, prefix + "LICENSE-APACHE-2.0"}
+    root = inventory.parent / "llm"
+    if archive.read(prefix + "LICENSE-APACHE-2.0") != (root / "LICENSE-APACHE-2.0").read_bytes():
+        raise RuntimeError("wheel catalog license does not match authored license")
+    for architecture, variant in declared.items():
+        relative = f"qwen/{architecture}/"
+        name = prefix + variant["output"]
+        content = archive.read(name)
+        digest = hashlib.sha256(content).hexdigest()
+        expected = {
+            "identifier": variant["identifier"],
+            "sources": {source: hashlib.sha256((root / source).read_bytes()).hexdigest()
+                        for source in variant["sources"]},
+            "bytecode_sha256": digest,
+        }
+        if not content.startswith(b"LOOM") or build["variants"][architecture] != expected:
+            raise RuntimeError(f"wheel catalog source/bytecode hash mismatch: {name}")
+        descriptor = prefix + relative + "pipeline.json"
+        if json.loads(archive.read(descriptor)) != {
+                "format": 1, "variant": variant["identifier"],
+                "module": "pipeline.loombc", "sha256": digest}:
+            raise RuntimeError(f"wheel catalog descriptor mismatch: {descriptor}")
+        profile = prefix + relative + "compatibility.json"
+        if archive.read(profile) != (root / relative / "compatibility.json").read_bytes():
+            raise RuntimeError(f"wheel compatibility profile mismatch: {profile}")
+        allowed.update({name, descriptor, profile})
+    actual = {name for name in names if name.startswith(prefix) and not name.endswith("/")}
+    if actual != allowed:
+        raise RuntimeError(f"wheel catalog file inventory mismatch: extra={sorted(actual-allowed)}, missing={sorted(allowed-actual)}")
 
 
 def main() -> None:

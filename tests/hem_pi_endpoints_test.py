@@ -259,7 +259,8 @@ class LifecyclePublicationTest(fixtures.ServerCliTest):
         # Join the actual installer and projector; only payload selection and
         # a pre-spawn assertion are injected. Native lifecycle stays real.
         installer=importlib.import_module(PACKAGE+'.hem_pi')
-        self.assertTrue(installer.configure_pi(self.state,self.root/'pi',common.Deadline.after())['configured'])
+        with patch.object(installer, 'inspect_runtime', return_value={}):
+            self.assertTrue(installer.configure_pi(self.state,self.root/'pi',common.Deadline.after())['configured'])
         projection=self.state/contracts.ENDPOINT_PATH
         assertion=("def checked_spawn(*a, **kw):\n import json\n from pathlib import Path\n "
                    f"document=json.loads(Path({str(projection)!r}).read_text())\n "
@@ -287,8 +288,10 @@ class LifecyclePublicationTest(fixtures.ServerCliTest):
         import sys
         installer=importlib.import_module(PACKAGE+'.hem_pi')
         target=self.root/'pi'
-        installer.configure_pi(self.state,target,common.Deadline.after())
-        code=(f'from {PACKAGE}.hem_pi import configure_pi; '
+        with patch.object(installer, 'inspect_runtime', return_value={}):
+            installer.configure_pi(self.state,target,common.Deadline.after())
+        code=(f'from {PACKAGE} import hem_pi; hem_pi.inspect_runtime=lambda deadline: {{}}; '
+              'configure_pi=hem_pi.configure_pi; '
               f'from {PACKAGE}.hem_common import Deadline; '
               'import sys; from pathlib import Path; '
               '[configure_pi(Path(sys.argv[1]),Path(sys.argv[2]),Deadline.after(3)) for _ in range(4)]')

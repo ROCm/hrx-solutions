@@ -1,5 +1,6 @@
 """Failure propagation in the installed real-model smoke harness."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,8 +11,10 @@ import tempfile
 import sqlite3
 import socket
 import signal
+import runpy
 import unittest
-from contextlib import redirect_stderr
+import zipfile
+from contextlib import redirect_stderr, redirect_stdout
 import io
 
 from build_tools.validation import check_installed_wheel_test as checker_fixtures
@@ -152,6 +155,190 @@ class SmokeFailureTest(unittest.TestCase):
         self.assertFalse(self.gate.results['success'])
 
 
+class SmokeNamespacePayloadTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary=tempfile.TemporaryDirectory();self.addCleanup(self.temporary.cleanup)
+        self.root=Path(self.temporary.name)
+        self.files={'__init__.py':b'', 'model_store.py':b'current model mapping',
+                    '_native/bin/loom-serve':b'ELF fixture',
+                    'loom-pipeline/fixture/pipeline.loombc':b'LOOM fixture'}
+        self.wheel=self.root/'fixture.whl'
+        with zipfile.ZipFile(self.wheel,'w') as archive:
+            for name,data in self.files.items():
+                archive.writestr('hrx_solutions/'+name,data)
+        self.coordinator=self.root/'venv'
+        self.coordinator.mkdir(mode=0o755)
+        self.package=self.coordinator/'hrx_solutions'
+        self.install(self.package)
+
+    def install(self,package):
+        for name,data in self.files.items():
+            target=package/name;target.parent.mkdir(parents=True,exist_ok=True)
+            target.write_bytes(data)
+
+    def setup_namespaces(self,*,corrupt=False,reuse=False,invalid=None):
+        lifecycle=self.root/'lifecycle';lifecycle.mkdir(mode=0o700)
+        args=argparse.Namespace(run=lifecycle,wheel=self.wheel,
+            wheel_sha256=hem_model_smoke.digest(self.wheel),source=self.root/'source',
+            profile='full',acquire08=False,native_provenance='synthetic fixture')
+        if reuse:
+            (self.coordinator/'bin').mkdir(mode=0o700)
+            (self.coordinator/'bin/python').write_text('fixture interpreter')
+            (self.coordinator/'pyvenv.cfg').write_text('include-system-site-packages = false\n')
+            owner=dict(pid=os.getppid(),boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                start_ticks=int(Path(f'/proc/{os.getppid()}/stat').read_text().rsplit(')',1)[1].split()[19]),python=str(self.coordinator/'bin/python'),wheel_sha256=args.wheel_sha256)
+            if invalid=='wheel':owner['wheel_sha256']='wrong wheel'
+            if invalid=='parent':owner['pid']+=1
+            if invalid=='generation':owner['start_ticks']+=1
+            if invalid=='boot':owner['boot_id']='prior boot'
+            if invalid=='python':owner['python']=str(self.root/'unowned/bin/python')
+            args.coordinator_owner=self.root/'coordinator.json'
+            args.coordinator_owner.write_text(json.dumps(owner,sort_keys=True)+'\n')
+            args.coordinator_owner.chmod(0o600)
+            if invalid=='private':self.coordinator.chmod(0o777)
+            if invalid=='symlink':
+                original=args.coordinator_owner.with_suffix('.original');args.coordinator_owner.rename(original)
+                args.coordinator_owner.symlink_to(original)
+            if invalid=='state':(lifecycle/'a/state').mkdir(parents=True)
+            if invalid=='system':(self.coordinator/'pyvenv.cfg').write_text('include-system-site-packages = true\n')
+        gate=hem_model_smoke.Gate(args)
+        packages=[self.package]
+        def child(argv,**kwargs):
+            if argv[:3]==['python3','-m','venv']:
+                Path(argv[3]).mkdir(parents=True)
+            else:
+                self.assertEqual(argv[1:4],['-m','pip','install'])
+                venv=Path(argv[0]).parent.parent
+                package=venv/'lib/hrx_solutions'
+                self.install(package);packages.append(package)
+                if corrupt and venv.parent.name=='b':
+                    (package/'model_store.py').write_bytes(b'stale namespace module')
+            return subprocess.CompletedProcess(argv,0)
+        def identity(argv,**kwargs):
+            venv=Path(argv[0]).parent.parent
+            package=self.package if venv==self.coordinator else venv/'lib/hrx_solutions'
+            return json.dumps(dict(package=str(package/'__init__.py'),
+                                   prefix=str(venv),user_site=False))
+        fake=types.ModuleType('hrx_solutions');fake.__file__=str(self.package/'__init__.py')
+        with mock.patch.dict(sys.modules,hrx_solutions=fake), \
+             mock.patch.object(sys,'prefix',str(self.coordinator)), \
+             mock.patch.object(sys,'executable',str(self.coordinator/'bin/python') if reuse else sys.executable), \
+             mock.patch.object(hem_model_smoke,'run_child',side_effect=child), \
+             mock.patch.object(subprocess,'check_output',side_effect=identity), \
+             mock.patch.object(check_installed_cpu,'source_parity',return_value={'source':'fixture'}) as source, \
+             mock.patch.object(check_installed_cpu,'verify_wheel_payload',wraps=check_installed_cpu.verify_wheel_payload) as verify:
+            if invalid:
+                with self.assertRaises((AssertionError,OSError)):gate.setup()
+                self.assertFalse(gate.states)
+                self.assertEqual(len(packages),1)
+                return gate
+            if corrupt:
+                with self.assertRaisesRegex(AssertionError,'installed wheel mismatch: hrx_solutions/model_store.py'):
+                    gate.setup()
+            else:
+                gate.setup()
+            self.assertEqual([call.args for call in verify.call_args_list],
+                             [(self.wheel,package) for package in ([self.package,*packages] if reuse else packages)])
+            self.assertEqual(len(packages),2 if reuse else 3)
+            source.assert_called_once_with(args.source,self.package)
+        return gate
+
+    def test_setup_records_shared_exact_payload_for_both_namespaces(self):
+        gate=self.setup_namespaces()
+        for namespace in ('a','b'):
+            parity=gate.results[namespace]['installed_parity']
+            self.assertEqual(set(parity),set(self.files))
+            self.assertEqual(parity['model_store.py'],hashlib.sha256(self.files['model_store.py']).hexdigest())
+            self.assertEqual(gate.results[namespace]['native_sha256'],
+                             hashlib.sha256(self.files['_native/bin/loom-serve']).hexdigest())
+
+    def test_setup_refuses_second_namespace_drift_outside_old_filtered_members(self):
+        self.setup_namespaces(corrupt=True)
+
+    def test_explicit_owned_coordinator_reuses_only_A_and_keeps_B_state_independent(self):
+        gate=self.setup_namespaces(reuse=True)
+        self.assertEqual(gate.states['a'],self.coordinator/'bin/python')
+        self.assertNotEqual(gate.states['a'],gate.states['b'])
+        self.assertTrue(gate.results['a']['reused_coordinator'])
+        self.assertFalse(gate.results['b']['reused_coordinator'])
+        self.assertFalse((gate.root/'a/venv').exists())
+        self.assertTrue((gate.root/'b/venv').is_dir())
+        self.assertNotEqual(gate.state_path('a'),gate.state_path('b'))
+        self.assertFalse(gate.state_path('a').exists() or gate.state_path('b').exists())
+        self.assertEqual(gate.state_path('a'),gate.root/'a/state')
+
+    def test_missing_handoff_uses_standalone_A_even_in_matching_interpreter_layout(self):
+        gate=self.setup_namespaces()
+        self.assertNotEqual(gate.states['a'],self.coordinator/'bin/python')
+        self.assertFalse(gate.results['a']['reused_coordinator'])
+
+    def test_wrong_wheel_or_unowned_handoff_is_refused_before_namespace_setup(self):
+        for reason in ('wheel','parent','python','private','generation','boot','symlink','state','system'):
+            with self.subTest(reason=reason):
+                # Each case needs an independent fresh report/receipt namespace.
+                with tempfile.TemporaryDirectory() as temporary:
+                    previous=(self.root,self.coordinator,self.package,self.wheel)
+                    self.root=Path(temporary)
+                    self.coordinator=self.root/'venv';self.coordinator.mkdir(mode=0o755)
+                    self.package=self.coordinator/'hrx_solutions';self.install(self.package)
+                    self.wheel=self.root/'fixture.whl'
+                    with zipfile.ZipFile(self.wheel,'w') as archive:
+                        for name,data in self.files.items():archive.writestr('hrx_solutions/'+name,data)
+                    try:self.setup_namespaces(reuse=True,invalid=reason)
+                    finally:self.root,self.coordinator,self.package,self.wheel=previous
+
+    def test_supervisor_emits_private_exact_wheel_handoff_to_real_helper_entry(self):
+        script=Path(hem_model_smoke.__file__).with_name('model_smoke.py')
+        run=self.root/'supervisor';run.mkdir(mode=0o700)
+        commands=[]
+        def child(argv,**kwargs):
+            commands.append(argv)
+            return mock.Mock(poll=mock.Mock(return_value=0),wait=mock.Mock(return_value=0))
+        previous=Path.cwd()
+        try:
+            with mock.patch.object(sys,'argv',[str(script),str(self.wheel),str(run),
+                    str(script.parent.parent),str(script.parents[2]),'ci08','--acquire08']), \
+                 mock.patch.object(subprocess,'Popen',side_effect=child), \
+                 mock.patch.object(signal,'signal'), redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as exited:
+                    runpy.run_path(str(script),run_name='__main__')
+                self.assertEqual(exited.exception.code,0)
+        finally:
+            os.chdir(previous)
+        marker=run/'coordinator.json'
+        owner=json.loads(marker.read_text())
+        self.assertEqual(owner,dict(pid=os.getpid(),boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+            start_ticks=int(Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19]),python=str(run/'venv/bin/python'),
+            wheel_sha256=hem_model_smoke.digest(self.wheel)))
+        self.assertEqual(marker.stat().st_mode & 0o777,0o600)
+        self.assertIn('huggingface_hub[cli]==0.34.4',commands[1])
+        helper=commands[-1]
+        self.assertEqual(helper[helper.index('--coordinator-owner')+1],str(marker))
+        self.assertEqual(helper[helper.index('--run')+1],str(run/'lifecycle'))
+
+
+    def test_supervisor_refuses_wheel_changed_during_install_before_handoff(self):
+        script=Path(hem_model_smoke.__file__).with_name('model_smoke.py')
+        run=self.root/'changed-wheel';run.mkdir(mode=0o700)
+        commands=[]
+        def child(argv,**kwargs):
+            commands.append(argv)
+            if len(commands)==2:self.wheel.write_bytes(b'changed during install')
+            return mock.Mock(poll=mock.Mock(return_value=0),wait=mock.Mock(return_value=0))
+        previous=Path.cwd()
+        try:
+            with mock.patch.object(sys,'argv',[str(script),str(self.wheel),str(run),
+                    str(script.parent.parent),str(script.parents[2]),'ci08']), \
+                 mock.patch.object(subprocess,'Popen',side_effect=child), \
+                 mock.patch.object(signal,'signal'):
+                with self.assertRaisesRegex(AssertionError,'wheel changed during coordinator installation'):
+                    runpy.run_path(str(script),run_name='__main__')
+        finally:
+            os.chdir(previous)
+        self.assertEqual(len(commands),2)
+        self.assertFalse((run/'coordinator.json').exists())
+
+
 class ShutdownVerificationTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -257,21 +444,24 @@ class AcquisitionPathTest(unittest.TestCase):
                 gate.states[namespace] = binary / 'python'
                 hf = binary / 'hf'
                 hf.write_text(
-                    '#!' + sys.executable + '\nimport json,os,sys,site\n'
-                    'print(json.dumps(dict(hf=sys.argv[0], home=os.environ["HOME"],'
+                    '#!' + sys.executable + '\nimport json,os,sys,site\nfrom pathlib import Path\n'
+                    'evidence=dict(hf=sys.argv[0], home=os.environ["HOME"],'
                     'xdg=os.environ["XDG_CONFIG_HOME"], cache=os.environ["HF_HUB_CACHE"],'
                     'credentials_preserved=os.environ.get("HF_TOKEN")=="synthetic-test-token",'
                     'python_overrides_absent="PYTHONPATH" not in os.environ and "PYTHONHOME" not in os.environ,'
-                    'user_site=site.ENABLE_USER_SITE)))\n')
+                    'user_site=site.ENABLE_USER_SITE)\n'
+                    'Path(__file__).with_name("hf-evidence.json").write_text(json.dumps(evidence))\n'
+                    'print(json.dumps(evidence))\n')
                 hf.chmod(0o700)
                 cli = binary / 'loom-control'
                 cli.write_text(
-                    '#!' + sys.executable + '\nimport json,sys\n'
+                    '#!' + sys.executable + '\nimport json,sys\nfrom pathlib import Path\n'
                     f'sys.path.insert(0,{str(source)!r})\n'
                     'from binding.python.model_download import _run_hf\n'
                     'assert sys.argv[1:3]==["model","download"]\n'
                     '# Exercise the actual download subprocess primitive, without network or weights.\n'
-                    'print(json.dumps(dict(completed=True,hf=json.loads(_run_hf(["hf","--help"])))))\n')
+                    '_run_hf(["hf","--help"])\n'
+                    'print(json.dumps(dict(completed=True,hf=json.loads(Path(__file__).with_name("hf-evidence.json").read_text()))))\n')
                 cli.chmod(0o700)
                 for inherited_path in (empty, global_bin):
                     with self.subTest(namespace=namespace, inherited_path=inherited_path), mock.patch.dict(

@@ -2,6 +2,7 @@
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 import io
+import builtins
 import json
 import os
 import shutil
@@ -13,7 +14,7 @@ from unittest.mock import patch
 from binding.python import curated_catalog as catalogs, hem_cli, hem_config, hem_models, hem_render, model_download
 from binding.python.hem_common import Deadline, HemError, InvalidInput
 from binding.python.hem_state import Registry
-from binding.python.model_store import CatalogAssets
+from binding.python.model_store import AcquisitionInput, RuntimeMapping, CatalogAssets, ModelImportError
 from binding.python.pipeline_validation import available_pipelines, resolve_catalog
 
 
@@ -207,6 +208,39 @@ class CuratedAssetsTest(unittest.TestCase):
             hem_config.export_deployment(files, self.root / 'missing.json', 'raw')
         self.assertFalse((self.root / 'missing.json').exists())
 
+    def test_checked_nested_options_are_immutable_with_fresh_json_and_actual_dependencies(self):
+        nested = {'stream': {'frames': [1, {'capacity': 8}]}}
+        self.descriptor['definition']['options'] = nested
+        self.write_catalog()
+        (self.input / 'optional.json').write_text('{"owned":true}')
+        (self.input / 'sample.wav').write_bytes(b'not a declared runtime asset')
+        self.acquire()
+        files = hem_models.model_files(self.registry, 'sample')
+        resolved = hem_config.resolve(files)
+        with self.assertRaises(TypeError):
+            resolved.settings['options']['stream']['frames'][1]['capacity'] = 9
+        with self.assertRaises(TypeError):
+            resolved.definition['options']['stream']['frames'][0] = 2
+        with self.assertRaises(TypeError):
+            resolved.sources['options'] = 'caller'
+        settings = resolved.settings_document()
+        definition = resolved.definition_document()
+        sources = resolved.sources_document()
+        settings['options']['stream']['frames'][1]['capacity'] = 99
+        definition['options']['stream']['frames'].append(100)
+        sources['options'] = 'caller'
+        self.assertEqual(resolved.settings_document()['options'], nested)
+        self.assertEqual(resolved.definition_document()['options'], nested)
+        self.assertEqual(resolved.sources_document()['options'], 'catalog')
+        self.assertEqual(set(resolved.dependencies), {asset.path for asset in files.files})
+        self.assertEqual(len(resolved.dependencies), 3)
+        self.assertIn(self.state / 'models/sample/optional.json', resolved.dependencies)
+        self.assertNotIn(self.input / 'sample.wav', resolved.dependencies)
+        output = self.root / 'nested.json'
+        answer = hem_config.export_deployment(files, output, 'nested')
+        self.assertEqual(answer['settings']['options'], json.loads(output.read_text())['definition']['options'])
+        json.dumps(answer, allow_nan=False)  # No frozen proxy may escape an output boundary.
+
     def test_cli_input_exclusions_and_named_rendering(self):
         with patch.dict(os.environ, {'LOOM_SERVE_DIR': str(self.state)}), redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
             self.assertEqual(hem_cli.main(['model','import','cli','--pipeline','fixture','--assets-dir',str(self.input),'--json']), 0)
@@ -228,7 +262,21 @@ class CuratedAssetsTest(unittest.TestCase):
         from binding.python import hem_instances, hem_process
         from tests.hem_instances_test import Processes
         from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
+        self.descriptor['definition']['options'] = {'stream': {'frames': [1, {'capacity': 8}]}}
+        self.descriptor['definition']['sources'] = ['programs/provider.loom']
+        (self.catalog / 'programs').mkdir()
+        (self.catalog / 'programs/provider.loom').write_text('// Distinct checked nested closure')
+        self.write_catalog()
+        (self.input / 'optional.json').write_text('{"owned":true}')
         self.acquire()
+        checked = []
+        original_resolve = hem_config.resolve
+        budget = Deadline.after()
+        def resolve(*args, **kwargs):
+            self.assertIs(kwargs['deadline'], budget)
+            answer = original_resolve(*args, **kwargs)
+            checked.append(answer)
+            return answer
         manager = hem_instances.InstanceManager(self.registry, processes=Processes(self.root / 'package'))
         rows, calls = [], []
         def respond(handler, requests):
@@ -241,8 +289,13 @@ class CuratedAssetsTest(unittest.TestCase):
                 reservation = self.registry.list_instances()[0]
                 self.assertEqual(set(reservation['dependencies']), {
                     str(self.state / 'models/sample/weights.bin'),
-                    str(self.state / 'models/sample/extra/rotary.bin'), str(retained)})
+                    str(self.state / 'models/sample/extra/rotary.bin'),
+                    str(self.state / 'models/sample/optional.json'), str(retained)})
                 self.assertEqual(payload['definition']['kind'], 'recognition')
+                self.assertEqual(reservation['settings']['options'], self.descriptor['definition']['options'])
+                self.assertEqual(payload['definition']['options'], reservation['settings']['options'])
+                self.assertEqual(payload['definition'], checked[0].definition_document())
+                self.assertEqual(reservation['settings'], checked[0].settings_document())
                 self.assertEqual(payload['base_directory'], str(retained))
                 self.assertTrue((retained / payload['definition']['control']).is_file())
                 rows.append(model(17, registration='registered'))
@@ -266,8 +319,13 @@ class CuratedAssetsTest(unittest.TestCase):
             server = self.registry.update_server('local', {'phase':'running','pending':None,'build':{'directory':str(launch)}},
                 expected_token='launch', expected_revision=server['revision'])
             with patch.object(hem_process, 'require_build', return_value=launch / 'loom-pipeline'):
-                answer = manager.start(server,'sample',Deadline.after(),name='chat')
+                with patch.object(hem_config, 'resolve', side_effect=resolve), \
+                     patch.object(catalogs, 'definition_for', wraps=catalogs.definition_for) as builder:
+                    answer = manager.start(server,'sample',budget,name='chat')
+                self.assertEqual(len(checked), 1)
+                builder.assert_called_once()
                 self.assertEqual(answer['state'],'running')
+                self.assertEqual(answer['settings'], checked[0].settings_document())
                 # A retained closure survives removal of the current package catalog.
                 shutil.rmtree(self.catalog)
                 self.assertTrue(manager.stop(server,'chat',Deadline.after())['completed'])
@@ -277,6 +335,82 @@ class CuratedAssetsTest(unittest.TestCase):
         self.assertEqual([path for method,path in calls if method=='POST'],
                          ['/v1/models/register','/v1/models/activate','/v1/models/undrain','/v1/models/unregister'])
 
+    def test_explicit_nested_repeated_role_population_excludes_preparation_only(self):
+        self.descriptor['assets'][0]['path'] = 'payload/first.bin'
+        self.descriptor['assets'][1]['path'] = 'payload/nested/second.bin'
+        self.write_catalog()
+        paths = [self.input / name for name in ('upstream-a', 'upstream-b', 'preparation-only')]
+        for index, path in enumerate(paths):
+            path.write_bytes(str(index).encode())
+        inputs = tuple(AcquisitionInput(f'part-{index}', path) for index, path in enumerate(paths))
+        mappings = tuple(RuntimeMapping('checkpoint', asset['path'], 'owned', input_id=f'part-{index}')
+                         for index, asset in enumerate(self.descriptor['assets'][:2]))
+        assets = hem_models._mapped_assets(inputs, mappings)
+        original_import = builtins.__import__
+        def no_preparer(name, *args, **kwargs):
+            fromlist = kwargs.get('fromlist', args[2] if len(args) > 2 else ()) or ()
+            if 'moonshine_preparation' in name or 'moonshine_preparation' in fromlist:
+                raise AssertionError('no-preparer acquisition imported Moonshine')
+            return original_import(name, *args, **kwargs)
+        provenance = dict(kind='import', format=1, asset_contract='fixture-assets-v1',
+                          pipeline='fixture', source={'kind': 'caller-prepared'})
+        with patch.object(builtins, '__import__', side_effect=no_preparer):
+            row = hem_models._acquire(self.registry, 'mapped', assets, provenance, 'fixture')
+        self.assertTrue(row['validation']['valid'])
+        files = hem_models.model_files(self.registry, 'mapped')
+        self.assertEqual([item.role for item in files.files], ['checkpoint', 'checkpoint'])
+        self.assertEqual([item.path.read_bytes() for item in files.files], [b'0', b'1'])
+        resolved = hem_config.resolve(files)
+        self.assertEqual(set(resolved.dependencies), {item.path for item in files.files})
+        self.assertNotIn(paths[2], resolved.dependencies)
+        self.assertFalse((files.directory / paths[2].name).exists())
+        self.assertEqual([asset['logical_path'] for asset in row['assets']],
+                         ['payload/first.bin', 'payload/nested/second.bin'])
+
+    def test_population_refuses_partial_old_set_before_copying_fresh_complete_set(self):
+        paths = [self.input / name for name in ('new-a', 'new-b')]
+        for path, content in zip(paths, (b'A-new', b'B-new')):
+            path.write_bytes(content)
+        inputs = tuple(AcquisitionInput(f'part-{index}', path) for index, path in enumerate(paths))
+        mappings = tuple(RuntimeMapping('checkpoint', asset['path'], 'owned', input_id=f'part-{index}')
+                         for index, asset in enumerate(self.descriptor['assets'][:2]))
+        assets = hem_models._mapped_assets(inputs, mappings)
+        with self.registry.lock('model', 'mixed'):
+            record = self.registry.prepare_model('mixed', assets=assets, provenance={'kind': 'import'})
+            stage = Path(record['pending']['path'])
+            (stage / 'weights.bin').write_bytes(b'A-old')
+            prepared = {mapping.logical_path: path for mapping, path in zip(mappings, paths)}
+            with self.assertRaisesRegex(HemError, 'Conflicting staged generated'):
+                hem_models._populate(record, prepared=prepared)
+        self.assertEqual((stage / 'weights.bin').read_bytes(), b'A-old')
+        self.assertFalse((stage / 'extra/rotary.bin').exists())
+        self.assertFalse(Path(record['directory']).exists())
+        self.assertEqual(self.registry.get_model('mixed')['pending']['stage'], 'staging')
+
+    def test_named_repeated_roles_do_not_supply_omitted_optional_paths(self):
+        self.descriptor['assets'][2]['role'] = 'checkpoint'
+        self.descriptor['download_recipe'] = dict(id='fixture-recipe', description='Synthetic',
+            sources=[dict(role='checkpoint', kind='huggingface', repo_id='example/model',
+                          revision='a' * 40, filename=name)
+                     for name in ('weights.bin', 'extra/rotary.bin')], generated=[])
+        self.write_catalog()
+        preview = hem_models.download(None, 'fixture-recipe', model_id='dry', dry_run=True)
+        self.assertEqual(preview['assets'], [dict(role='checkpoint', logical_path=source['filename'],
+            source_path=str(model_download._cache_path(source)), ownership='reference')
+            for source in self.descriptor['download_recipe']['sources']])
+        recipe = model_download.recipe_by_id('fixture-recipe')
+        sources = model_download._sources(recipe)
+        # Optional is supplied only by an explicit association; role alone adds nothing.
+        selected = (RuntimeMapping('checkpoint', 'optional.json', 'reference', input_id='source-0'),)
+        self.assertEqual(model_download.runtime_mappings(recipe, sources, mappings=selected), selected)
+        for mapping in (RuntimeMapping('wrong-role', 'weights.bin', 'reference', input_id='source-0'),
+                        RuntimeMapping('checkpoint', 'undeclared.bin', 'reference', input_id='source-0')):
+            with self.subTest(mapping=mapping), self.assertRaises(ModelImportError):
+                model_download.runtime_mappings(recipe, sources, mappings=(mapping,))
+        recipe['generated'] = [{'role': 'checkpoint', 'path': 'extra/rotary.bin'}]
+        with self.assertRaisesRegex(ModelImportError, 'generated output'):
+            model_download.runtime_mappings(recipe, sources)
+
     def test_named_recipe_preview_only_has_no_fetch_or_state(self):
         self.descriptor['download_recipe'] = dict(id='fixture-recipe', description='Synthetic',
             sources=[dict(role='checkpoint',kind='huggingface',repo_id='example/model',revision='a'*40,filename='weights.bin')],
@@ -285,7 +419,9 @@ class CuratedAssetsTest(unittest.TestCase):
         with patch.object(model_download, '_run_hf') as network:
             preview = hem_models.download(None,'fixture-recipe',model_id='dry',dry_run=True)
             self.assertEqual(preview['generated'][0]['path'], 'extra/rotary.bin')
-            self.assertEqual(preview['assets'][0]['role'], 'checkpoint')
+            self.assertEqual(preview['assets'], [dict(role='checkpoint', logical_path='weights.bin',
+                source_path=str(model_download._cache_path(self.descriptor['download_recipe']['sources'][0])),
+                ownership='reference')])
             with self.assertRaisesRegex(InvalidInput, 'Unsupported named preparation'):
                 hem_models.download(self.registry,'fixture-recipe',model_id='unsupported')
             network.assert_not_called()

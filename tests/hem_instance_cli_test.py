@@ -78,10 +78,9 @@ class InstanceCliTest(unittest.TestCase):
         package = hem_config.__package__
         script = (
             'import functools,sys; '
-            f'from {package} import hem_cli,hem_config,hem_instance_cli,hem_server_cli; '
+            f'from {package} import hem_cli,hem_config,hem_instance_cli,hem_server_cli,pipeline_validation; '
             'from pathlib import Path; '
-            'original_resolve=hem_config.resolve_catalog; '
-            'hem_config.resolve_catalog=lambda identifier:Path(sys.argv[1])/"loom-pipeline"/Path(original_resolve(identifier)).relative_to(Path(original_resolve(identifier)).parents[2]); '
+            'pipeline_validation.__file__=str(Path(sys.argv[1])/"pipeline_validation.py"); '
             'original=hem_config.load_profile; '
             f'hem_config.load_profile=lambda catalog:dict(original(catalog), tokenizer_canonical_sha256={digest!r}); '
             'hem_instance_cli.ProcessManager=functools.partial(hem_instance_cli.ProcessManager,package_root=sys.argv[1]); '

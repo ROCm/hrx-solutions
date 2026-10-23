@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Private signal-aware supervisor for the model-smoke shell entrypoint."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import signal
@@ -83,10 +84,12 @@ def invoke(argv, *, helper=False, **kwargs):
 
 code = 1
 try:
+    expected_sha = hashlib.sha256(Path(wheel).read_bytes()).hexdigest()
     code = invoke(['python3', '-m', 'venv', str(run / 'venv')])
     if code == 0:
         with (run / 'install.log').open('w') as log:
-            code = invoke([str(run / 'venv/bin/python'), '-m', 'pip', 'install', '--disable-pip-version-check', wheel], stdout=log, stderr=subprocess.STDOUT)
+            code = invoke([str(run / 'venv/bin/python'), '-m', 'pip', 'install', '--disable-pip-version-check', wheel,
+                           *(['huggingface_hub[cli]==0.34.4'] if '--acquire08' in model and profile != 'openwebui' else [])], stdout=log, stderr=subprocess.STDOUT)
     if code == 0 and profile == 'openwebui':
         sys.path.insert(0, source)
         from build_tools.ci_tools.local_ci_runtime import create
@@ -101,14 +104,20 @@ try:
                 code = invoke(['docker', 'pull', IMAGE], stdout=log, stderr=subprocess.STDOUT)
     if code == 0:
         os.chdir(run)
-        import hashlib
         sha = hashlib.sha256(Path(wheel).read_bytes()).hexdigest()
+        assert sha == expected_sha, 'wheel changed during coordinator installation'
+        owner=run/'coordinator.json'
+        with os.fdopen(os.open(owner,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:
+            json.dump(dict(pid=os.getpid(),boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                           start_ticks=int(Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19]),
+                           python=str(run/'venv/bin/python'),wheel_sha256=sha),stream,sort_keys=True)
+            stream.write('\n')
         helper = 'build_tools.integrations.openwebui.openwebui_configuration_smoke' if profile == 'openwebui' else 'build_tools.validation.hem_model_smoke'
         qualification = [] if profile == 'openwebui' else ['--profile', 'ci08']
         code = invoke([str(run / 'venv/bin/python'), '-c',
                        'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module(sys.argv.pop(1), run_name="__main__", alter_sys=True)', source, helper,
                        '--run', str(run / 'lifecycle'), '--wheel', wheel, '--wheel-sha256', sha,
-                       '--source', source, *model, *qualification], helper=True)
+                       '--source', source, '--coordinator-owner', str(owner), *model, *qualification], helper=True)
 finally:
     if unresolved:
         publish('unresolved', error=unresolved, child_pid=child.pid if child else None)

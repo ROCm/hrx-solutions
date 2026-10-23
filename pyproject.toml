@@ -43,4 +43,4 @@ packages = ["hrx_solutions"]
 hrx_solutions = "binding/python"
 
 [tool.setuptools.package-data]
-hrx_solutions = ["omp_extension/index.ts", "omp_extension/installation.ts", "omp_extension/activation.ts", "omp_extension/discovery.ts", "omp_extension/stream.ts", "omp_extension/profile.json", "omp_extension/package.json", "pi_extension/*.ts", "pi_extension/*.json", "opencode_plugin/index.ts", "opencode_plugin/discovery.ts", "opencode_plugin/installation.ts", "opencode_plugin/profile.json", "opencode_plugin/package.json"]
+hrx_solutions = ["native_protocol.ts", "omp_extension/index.ts", "omp_extension/installation.ts", "omp_extension/activation.ts", "omp_extension/discovery.ts", "omp_extension/stream.ts", "omp_extension/profile.json", "omp_extension/package.json", "pi_extension/*.ts", "pi_extension/*.json", "opencode_plugin/index.ts", "opencode_plugin/discovery.ts", "opencode_plugin/installation.ts", "opencode_plugin/profile.json", "opencode_plugin/package.json"]

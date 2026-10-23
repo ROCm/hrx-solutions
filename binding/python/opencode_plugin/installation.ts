@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export const MAX_BYTES = 1024 * 1024;
 export const PROFILE = "loom-text-serve-61417137-v1";
-export const ASSETS = ["index.ts", "discovery.ts", "installation.ts", "profile.json", "package.json"];
+export const ASSETS = ["index.ts", "discovery.ts", "native_protocol.ts", "installation.ts", "profile.json", "package.json"];
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export function fail(reason: string): never {
   throw new Error(`Loom Control OpenCode: ${reason}; run loom-control opencode configure to inspect/repair, then opencode reload or restart`);

@@ -21,6 +21,8 @@ def stage(native_root, hrx_source):
         format=1, repository='https://github.com/ROCm/hrx-system', revision=REVISION,
         upstream_directory=UPSTREAM, files=FILES), indent=2) + '\n')
 
+    return [destination / name for name in (*FILES, 'LICENSE', 'provenance.json')]
+
 
 def validate_archive(archive):
     prefix = 'hrx_solutions/_native/' + RELATIVE + '/'

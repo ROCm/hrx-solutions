@@ -42,7 +42,13 @@ while (( SECONDS < deadline )); do
     break
   fi
   if jq -e --argjson incarnation "$INCARNATION" \
-    '.data[] | select(.id == "qwen3.8-27b" and .loom.incarnation == $incarnation) | .loom | .registration == "ready" and .parameter_operation == "idle" and .parameters.active == true and .status.admission == "drained"' \
+    'def primary_active:
+       .parameters | if type != "object" then false
+       elif has("primary") then
+         .primary | if type == "object" then .active == true else false end
+       else .active == true end;
+     .data[] | select(.id == "qwen3.8-27b" and .loom.incarnation == $incarnation) | .loom |
+     .registration == "ready" and .parameter_operation == "idle" and primary_active and .status.admission == "drained"' \
     status.json >/dev/null; then
     ready=true
     break
@@ -51,6 +57,10 @@ while (( SECONDS < deadline )); do
 done
 $ready
 ```
+
+The predicate uses primary activation whenever the `primary` key exists. Only
+an absent key permits the legacy flat activation field. A malformed primary
+or an active auxiliary component cannot establish readiness.
 
 Only a zero exit from the final command permits undrain. On error, timeout or
 identity loss, inspect status and process logs; accepted preparation can still

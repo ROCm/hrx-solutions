@@ -8,7 +8,6 @@ import { createServer } from 'node:http';
 
 const assets = resolve(process.argv[2]);
 const { validateInstallation, ASSETS, parseDocument } = await import(pathToFileURL(join(assets, 'installation.ts')));
-const { joinInventory, readEndpoints, validateBaseUrl, discover, applySnapshot } = await import(pathToFileURL(join(assets, 'discovery.ts')));
 const root = mkdtempSync(join(tmpdir(), 'loom-oc2-adapter-'));
 const target = join(root,'client'), directory = join(target,'plugins','loom-control-opencode'), state = join(root,'state');
 mkdirSync(directory,{recursive:true}); mkdirSync(join(state,'clients'),{recursive:true});
@@ -26,9 +25,27 @@ let checks=0;
 function test(name,fn) {fn();checks++;console.log('PASS '+name);}
 let server, replacementServer;
 try {
-  for(const name of ASSETS) copyFileSync(join(assets,name),join(directory,name));
+  for(const name of ASSETS) copyFileSync(name==='native_protocol.ts'?join(assets,'..',name):join(assets,name),join(directory,name));
   writeFileSync(join(directory,'config.json'),JSON.stringify(config)); writeManifest(); projection();
   test('valid owned generation and exact manifest',()=>assert.deepEqual(validateInstallation(join(directory,'index.ts')),config));
+
+  // Exercise the real entrypoint, before any discovery/native companion is loaded.
+  const host=join(target,'node_modules','@opencode','plugin');mkdirSync(host,{recursive:true});
+  writeFileSync(join(host,'package.json'),JSON.stringify({type:'module',exports:'./index.js'}));
+  writeFileSync(join(host,'index.js'),'export const Plugin={define:value=>value};');
+  const entry=await import(pathToFileURL(join(directory,'index.ts')));
+  const nativePath=join(directory,'native_protocol.ts'), nativeBytes=readFileSync(nativePath);
+  const sentinel='__loom_native_companion_executed';delete globalThis[sentinel];
+  for(const invalid of ['tampered','missing']) {
+    if(invalid==='tampered')writeFileSync(nativePath,`globalThis.${sentinel}=true;\n`+nativeBytes);
+    else rmSync(nativePath);
+    await assert.rejects(entry.default.setup({}));
+    assert.equal(globalThis[sentinel],undefined);
+    writeFileSync(nativePath,nativeBytes);
+    checks++;console.log('PASS '+invalid+' native companion refused before top-level execution');
+  }
+  const { joinInventory, readEndpoints, validateBaseUrl, discover, applySnapshot } = await import(pathToFileURL(join(directory, 'discovery.ts')));
+
   test('duplicate JSON fields and excessive nesting rejected',()=>{assert.throws(()=>parseDocument('{"owner":1,"owner":2}'));assert.throws(()=>parseDocument('['.repeat(65)+'0'+']'.repeat(65)));assert.deepEqual(parseDocument('{"a\\u0062":[null,true,"x\\\"y",-2.4]}'),{ab:[null,true,'x"y',-2.4]});});
   test('partial generation/pending blocks',()=>{writeFileSync(join(directory,'pending.json'),'{}');assert.throws(()=>validateInstallation(join(directory,'index.ts')));rmSync(join(directory,'pending.json'));const original=manifest.generation;manifest.generation=randomUUID();writeManifest();assert.throws(()=>validateInstallation(join(directory,'index.ts')));manifest.generation=original;writeManifest();});
   test('edited companion refused',()=>{writeFileSync(join(directory,'discovery.ts'),'edited');assert.throws(()=>validateInstallation(join(directory,'index.ts')));copyFileSync(join(assets,'discovery.ts'),join(directory,'discovery.ts'));writeManifest();});
@@ -36,6 +53,11 @@ try {
   test('managed symlink refused',()=>{const path=join(directory,'config.json'),data=readFileSync(path);rmSync(path);writeFileSync(join(root,'alias.json'),data);symlinkSync(join(root,'alias.json'),path);assert.throws(()=>validateInstallation(join(directory,'index.ts')));rmSync(path);writeFileSync(path,data);});
   test('numeric exact loopback origins',()=>{for(const url of ['http://127.0.0.1:80/v1','http://[::1]:18080/v1','http://127.255.2.3:65535/v1'])assert.equal(validateBaseUrl(url),url);for(const url of ['http://localhost:80/v1','https://127.0.0.1:80/v1','http://127.0.0.1:0/v1','http://127.256.0.1:80/v1','http://127.0.0.1:65536/v1','http://127.0.0.1/v1','http://127.0.0.1:80/v1?x','http://user@127.0.0.1:80/v1','http://127.0.0.1:080/v1'])assert.throws(()=>validateBaseUrl(url));});
   test('projection ownership/ordering/profile and count',()=>{projection([endpoint()]);assert.equal(readEndpoints(config).length,1);for(const rows of [[endpoint(),endpoint()],[{...endpoint(),provider:'wrong'}],[{...endpoint(),native_profile:'unknown'}],Array.from({length:257},(_,i)=>endpoint('n'+i))]){projection(rows);assert.throws(()=>readEndpoints(config));}projection();const text=readFileSync(config.endpoint_file,'utf8');writeFileSync(config.endpoint_file,text.replace('loom-control-clients','foreign'));assert.throws(()=>readEndpoints(config));projection();});
+  test('neutral native facts preserve incarnation without leaking host policy',()=>{
+    const models=joinInventory(list(row()),list(row()),endpoint());
+    assert.equal(Object.hasOwn(models[0],'incarnation'),false);
+    assert.deepEqual(Object.keys(models[0]).sort(),['id','modelID','providerID','name','capabilities','limit'].sort());
+  });
   test('native exact IDs truthful output without Pi cap',()=>{const models=joinInventory(list(row()),list(row()),endpoint());assert.equal(models[0].id,'qwen-a');assert.deepEqual(models[0].capabilities,{tools:false,input:['text'],output:['text']});assert.deepEqual(models[0].limit,{context:32768,output:16384});const small=row();small.context_length=4096;assert.equal(joinInventory(list(small),list(small),endpoint())[0].limit.output,4096);});
   test('mixed recognition and text inventory keeps only chat model',()=>{
     const speech=row('dictation');speech.loom.kind='recognition';speech.loom.endpoint='/v1/audio/transcriptions';

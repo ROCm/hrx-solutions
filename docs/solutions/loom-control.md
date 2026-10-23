@@ -47,6 +47,60 @@ The management command is now `loom-control`; update scripts that invoke
 `loom-hem`. No compatibility alias is installed. Existing state and configuration
 remain unchanged.
 
+## Architecture and responsibilities
+
+The Python control layer owns local assets, configuration and lifecycle
+coordination. The pinned HRX runtime owns native execution. Durable records,
+fresh observations and accepted native work carry different evidence; a saved
+phase or a successful POST alone does not prove readiness or retirement.
+
+```mermaid
+flowchart TD
+    CLI["CLI: arguments and results"] --> Assets["Model acquisition and trusted preparation"]
+    CLI --> Serving["Checked serving interpretation"]
+    CLI --> Core["Core lifecycle and HTTP transport"]
+    CLI --> Facts["Operation eligibility from catalog and native facts"]
+    Facts -. qualifies .-> Integrations["Integration configuration owners"]
+    Serving --> Core
+    Core --> State["Durable records, locks and revisions"]
+    Core --> Native["Pinned HRX native runtime"]
+    Integrations --> Core
+    TUI["Passive TUI snapshots"] -. observes .-> State
+    TUI -. observes .-> Native
+    Build["Wheel build and model family producers"] --> Native
+    Build --> Catalog["Packaged catalogs and helpers"]
+    Catalog --> Serving
+```
+
+| Responsibility | Owner and navigation |
+| --- | --- |
+| Command grammar and presentation | [`hem_cli.py`](../../binding/python/hem_cli.py) and resource CLI modules parse inputs and render outcomes. The legacy [`_launcher.py`](../../binding/python/_launcher.py) retains its own defaults and native argument forwarding. |
+| Durable state and passive decoding | [`hem_state.py`](../../binding/python/hem_state.py) owns records, transactions, revision checks and resource locks. Its pure `decode_record` is shared with [`hem_tui_provider.py`](../../binding/python/hem_tui_provider.py), whose bounded, read-only snapshots do not migrate or reconcile state. A second snapshot detects changes during observation. |
+| Acquisition and preparation | [`hem_models.py`](../../binding/python/hem_models.py) coordinates publication and retry; [`model_store.py`](../../binding/python/model_store.py) owns asset mappings. Model-owned helpers such as [`moonshine_preparation.py`](../../binding/python/moonshine_preparation.py) prepare trusted files. File preparation is separate from native activation. |
+| Serving interpretation | [`hem_config.py`](../../binding/python/hem_config.py) produces recursively immutable checked settings, definitions, sources and dependencies. Export and managed launch retain that interpretation, verifying catalog root identity and rebasing its envelope without selecting defaults again. [`pipeline_validation.py`](../../binding/python/pipeline_validation.py) assembles text definitions from explicit settings shared with the legacy launcher. |
+| Operation eligibility and integration effects | Eligibility comes from finite catalog kind/modality and fresh native facts, with integration-specific policy. [`hem_integrations.py`](../../binding/python/hem_integrations.py) dispatches to complete Pi, OpenCode, OMP and WebUI owners. Those owners control their configuration and remote effects. See [connection commands](#connect-pi-once). |
+| Process and native lifecycle | [`hem_process.py`](../../binding/python/hem_process.py) owns launch validation, process/socket identity and locked observation/reconciliation. [`hem_instances.py`](../../binding/python/hem_instances.py) coordinates model registration and dependency retention. [`hem_http.py`](../../binding/python/hem_http.py) owns structured transport failures, acceptance uncertainty and native readiness/retirement predicates. Presentation observations do not grant later mutation authority: transitions revalidate ownership and registration identity. |
+| Native execution and model policy | Packaged [pipeline catalogs](../../loom-pipeline/) supply model binding and policy. HRX, pinned by [`MODULE.bazel`](../../MODULE.bazel), implements admission, scheduling, resource borrowing, HTTP control and device execution. See the [native lifecycle](../serving/lifecycle.md) and [LLM internals](../../loom-pipeline/llm/README.md). |
+| Build and independent acceptance | [`python_packaging.py`](../../build_tools/wheel_tools/python_packaging.py) binds build/query context and stages native deliverables. [`package_families.py`](../../build_tools/model_tools/package_families.py) composes fixed model-owned producers. Independent wheel checks validate expected contents; a host build alone does not qualify installed serving or GPU/Pi behavior. See [build tools](../../build_tools/README.md). |
+
+The lifecycle keeps configuration ownership distinct from native progress:
+
+```mermaid
+flowchart TD
+    Assets["Qualified assets and catalog"] --> Checked["Checked definition and retained dependencies"]
+    Checked --> Register["Register drained; retain incarnation"]
+    Register --> Activate["Activate; observe within budget"]
+    Activate --> Ready["Same incarnation ready, idle, primary active, no error"]
+    Ready --> Open["Undrain; verify admission open"]
+    Open --> Retire["Unregister; observe original incarnation gone"]
+    Retire --> Release["Release retained dependencies"]
+```
+
+Accepted work can outlive a lost response or a waiting deadline. On uncertainty,
+inspect fresh status before retrying. Retirement requires the original
+incarnation to disappear from status; absence from discovery alone cannot
+release dependencies. See [bounded automation](../serving/lifecycle.md).
+
 ## Supported pipelines
 
 The wheel includes Qwen and Moonshine pipelines, the native server and its
@@ -568,8 +622,11 @@ explicitly start the instances you want. Existing-server model changes appear
 on startup or Pi's model-picker refresh; an open picker is not a continuous
 inventory. Adding a **new server name**, including the first server after an
 empty setup, requires Pi `/reload` or restart. Endpoint changes for existing
-names refresh without reconfiguration. Offline/unsupported servers report
-unavailable; durable setup can succeed with no currently usable models.
+names refresh without reconfiguration. Pi runtime refresh reports offline or
+unsupported servers as unavailable; durable setup can succeed with no currently
+usable models. Configure and check do not query native `/models` or `/status`: JSON
+reports `availability: "not_observed"` and omits the former advisory `servers`,
+`available` and `availability_reason` fields. Runtime discovery owns live inventory.
 
 ```bash
 loom-control pi configure --check
@@ -588,8 +645,7 @@ qualification fails or is skipped. Ownership conflicts and uncertain state retai
 their existing stronger exits. `--check` and `--disable` are mutually exclusive. All modes accept
 `--pi-dir PATH`, `--json` and `--timeout SECONDS` (default 10). Operational,
 invalid-input, pending and uncertain exits follow the existing 1/2/3/4 contract.
-Progress and exact discovery GET curl equivalents go to stderr; JSON stdout
-stays structured. File installation prints affected paths and explains that
+Progress goes to stderr; JSON stdout stays structured. File installation prints affected paths and explains that
 there is no equivalent native Loom command.
 
 Target precedence is `--pi-dir` > `PI_CODING_AGENT_DIR` > `~/.pi/agent`. For an
@@ -733,10 +789,19 @@ bundled assets plus generated config/manifest. Installation uses bounded
 atomic replacements, a pending intent and matching generations. Interrupted
 updates fail closed and can be retried; unknown or edited contents are retained
 for explicit resolution. Shared `opencode.json`/JSONC, credentials, default
-models/providers and other plugins are preserved. Explicit known provider
-suppression is reported; effective managed/project policy is evaluated by
-OpenCode, so check actual visibility after launch. No general policy evaluator
-is added here.
+models/providers and other plugins are preserved. Effective host policy is
+unassessed: setup does not read target, project/ancestor, environment-selected
+or inline host policy. OpenCode evaluates allowlists, denylists and managed
+policy; inspect actual provider visibility after launch. A successful configure
+means the owned integration is installed, not that host policy exposes it.
+The runtime plugin still refuses an occupied Loom provider identity.
+
+This contract cutover removes `policy_conflicts` and `policy_warnings` from
+configure/check JSON and removes policy-only configure/check vetoes. Consumers
+must use owned configuration, runtime compatibility and endpoint-projection
+results for setup status, then inspect visibility in OpenCode. CLI, direct Python
+setup and the configuration smoke caller use the same complete OpenCode owner;
+none invokes a separate public preview before installation.
 
 The root-owned `clients/endpoints.json` is a derived projection of saved local
 server endpoints, independent of Pi configuration. It stores neither model

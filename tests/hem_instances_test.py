@@ -18,7 +18,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_config, hem_instances, hem_models, hem_process, hem_state
+from binding.python import hem_config, hem_instances, hem_models, hem_process, hem_state, pipeline_validation
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.hem_http import NativeClient
 from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
@@ -311,6 +311,51 @@ class LifecycleTest(unittest.TestCase):
             with patch.object(hem_config, 'resolve', return_value=replace(resolved, catalog=escaped)):
                 with self.assertRaisesRegex(HemError, 'matching package catalog'):
                     self.start(server)
+            self.assertEqual(self.registry.list_instances(), [])
+            self.assertEqual(self.mutations(), [])
+            self.assertFalse(list(self.registry.root.rglob('register-*.json')))
+
+    def test_checked_interpretation_is_selected_once_then_used_for_registration(self):
+        with fixture(self.respond) as (endpoint, requests):
+            server = self.server(endpoint)
+            deadline = Deadline.after()
+            checked = []
+            original_resolve = hem_config.resolve
+            original_emit = hem_config.deployment_document
+            def resolve(*args, **kwargs):
+                self.assertIs(kwargs['deadline'], deadline)
+                answer = original_resolve(*args, **kwargs)
+                checked.append(answer)
+                return answer
+            def emit(value, *args, **kwargs):
+                self.assertIs(value, checked[0])
+                self.assertIs(kwargs['deadline'], deadline)
+                return original_emit(value, *args, **kwargs)
+            with patch.object(hem_config, 'resolve', side_effect=resolve), \
+                 patch.object(hem_config, 'deployment_document', side_effect=emit), \
+                 patch.object(hem_config, 'catalog_modules', wraps=hem_config.catalog_modules) as modules:
+                self.start(server, deadline, overrides={'rows': 2, 'context_capacity': 4096})
+            self.assertEqual(len(checked), 1)
+            modules.assert_called_once()
+            row = self.row()
+            sent = [json.loads(body) for method, path, body, _ in requests
+                    if method == 'POST' and path.endswith('/register')][0]
+            self.assertEqual(sent['definition'], checked[0].definition_document())
+            self.assertEqual(row['settings'], checked[0].settings_document())
+            self.assertEqual(row['dependencies'], [str(path) for path in (
+                *checked[0].dependencies, Path(sent['base_directory']))])
+
+    def test_retained_provider_drift_is_refused_before_reservation_or_registration(self):
+        with fixture(self.respond) as (endpoint, _):
+            server = self.server(endpoint)
+            retained_root = Path(server['build']['directory']) / 'loom-pipeline'
+            selected = pipeline_validation.resolve_catalog('qwen-08b')
+            retained = retained_root / selected.relative_to(self.processes.package_root / 'loom-pipeline')
+            modules = pipeline_validation.catalog_modules(retained)
+            provider = retained / modules.providers[-1]
+            provider.write_bytes(provider.read_bytes() + b'\n')
+            with self.assertRaisesRegex(InvalidInput, 'checked serving interpretation'):
+                self.start(server)
             self.assertEqual(self.registry.list_instances(), [])
             self.assertEqual(self.mutations(), [])
             self.assertFalse(list(self.registry.root.rglob('register-*.json')))
@@ -611,12 +656,8 @@ class OwnedProcessLifecycleTest(unittest.TestCase):
                 weights, tokenizer = root / 'tiny.gguf', root / 'tokenizer.json'
                 weights.write_bytes(b'CPU fixture weights')
                 tokenizer.write_text('{}')
-                def info(pipeline):
-                    answer = original_info(pipeline)
-                    answer['catalog'] = str(package / 'loom-pipeline' / Path(answer['catalog']).relative_to(source_catalog.parents[2]))
-                    return answer
                 with patch.object(hem_config, 'select_pipeline', return_value='qwen-08b'), \
-                     patch.object(hem_config, 'pipeline_info', side_effect=info):
+                     patch.object(pipeline_validation, '__file__', str(package / 'pipeline_validation.py')):
                     hem_models.import_model(registry, 'tiny', ggufs=[weights], tokenizer=tokenizer)
                     answer = manager.start(server, 'tiny', Deadline.after(5), name='chat')
                 self.assertTrue(answer['completed'])
@@ -633,7 +674,7 @@ class OwnedProcessLifecycleTest(unittest.TestCase):
                 shutil.rmtree(package)
                 self.assertTrue((retained / modules.prepare).is_file())
                 with patch.object(hem_config, 'select_pipeline', return_value='qwen-08b'), \
-                     patch.object(hem_config, 'pipeline_info', side_effect=info):
+                     patch.object(pipeline_validation, '__file__', str(package / 'pipeline_validation.py')):
                     with self.assertRaises(HemError):
                         manager.start(server, 'tiny', Deadline.after(3), name='new-alias')
                 self.assertEqual(len(registry.list_instances()), 1)

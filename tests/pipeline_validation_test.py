@@ -1,4 +1,5 @@
 from contextlib import redirect_stdout, redirect_stderr
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -10,7 +11,7 @@ from unittest.mock import patch
 from binding.python import _launcher, pipeline_validation
 from binding.python.model_store import ModelFiles
 from binding.python.pipeline_validation import validate_model
-from tests.gguf_fixtures import profile, write_matching_gguf
+from tests.gguf_fixtures import expected_tensors, profile, write_matching_gguf
 
 
 class PipelineValidationTest(unittest.TestCase):
@@ -56,6 +57,52 @@ class PipelineValidationTest(unittest.TestCase):
         self.assertFalse(result.compatible)
         self.assertIn('MTP: missing required tensor',result.message)
 
+    def test_public_success_and_supplied_tokenizer_for_both_profiles(self):
+        data = json.loads(self.tokenizer.read_text())
+        for pipeline in ('qwen', 'qwen-08b'):
+            if pipeline == 'qwen-08b':
+                self.select_08b_contract()
+            write_matching_gguf(self.weights, contract=self.contract)
+            result = validate_model(ModelFiles(self.weights, self.tokenizer), pipeline)
+            self.assertTrue(result.compatible, result.message)
+            self.assertEqual(result.pipeline, pipeline)
+            self.assertIsNotNone(result.inspection)
+            self.tokenizer.write_text('invalid')
+            supplied = validate_model(ModelFiles(self.weights, self.tokenizer), pipeline,
+                                      tokenizer_data=data)
+            self.assertTrue(supplied.compatible, supplied.message)
+            self.tokenizer.write_text(json.dumps(data))
+
+    def test_public_fragment_validation_does_not_require_native_index(self):
+        names = tuple(expected_tensors(self.contract))
+        second = self.directory / 'second.gguf'
+        write_matching_gguf(self.weights, contract=self.contract, missing=names[::2])
+        write_matching_gguf(second, contract=self.contract, missing=names[1::2])
+        files = ModelFiles(self.weights, self.tokenizer, (self.weights, second))
+        index = self.directory / 'parts.safetensors.index.json'
+        # Explicit descriptor fragments qualify independently of serving's carrier.
+        for carrier in (self.weights, index):
+            with self.subTest(carrier=carrier):
+                result = validate_model(replace(files, weights=carrier), 'qwen')
+                self.assertTrue(result.compatible, result.message)
+        for content in ('invalid', '{"weight_map":{}}'):
+            with self.subTest(index=content):
+                index.write_text(content)
+                result = validate_model(replace(files, weights=index), 'qwen')
+                self.assertTrue(result.compatible, result.message)
+
+    def test_public_diagnostics_are_bounded_and_curated_remains_distinct(self):
+        names = tuple(expected_tensors(self.contract))
+        write_matching_gguf(self.weights, missing=names[:40])
+        result = validate_model(ModelFiles(self.weights, self.tokenizer), 'qwen')
+        self.assertFalse(result.compatible)
+        self.assertEqual(result.message.count('  - '), 33)
+        self.assertIn('8 additional mismatches', result.message)
+        self.assertIn('moonshine-streaming-tiny', pipeline_validation.available_pipelines())
+        curated = validate_model(ModelFiles(self.weights, self.tokenizer), 'moonshine-streaming-tiny')
+        self.assertFalse(curated.compatible)
+        self.assertIn('Unknown pipeline', curated.message)
+
     def test_qwen_aliases_use_immutable_catalog_without_name_cache(self):
         cache = self.root / 'runtime-cache'
         for pipeline in ('qwen', 'qwen-08b'):
@@ -96,6 +143,40 @@ class PipelineValidationTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 _launcher.exec_loom_serve()
             self.assertEqual(execute.call_args.args[1], [str(binary), *native_args])
+
+    def test_legacy_launcher_preserves_defaults_explicit_settings_and_native_flags(self):
+        selected = pipeline_validation.resolve_catalog('qwen')
+        package = self.root / 'launcher-package'
+        binary = package / '_native/bin/loom-serve'
+        binary.parent.mkdir(parents=True)
+        binary.write_text('fixture executable; exec is intercepted')
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit):
+                options = [f'--model={selected}', f'--weights={self.weights}', f'--tokenizer={self.tokenizer}']
+                native = ['--device', '  opaque:selector /custom  ', '--listen=127.0.0.1:19333',
+                          '--unknown-native=preserved'] if explicit else []
+                if explicit:
+                    options += ['--rows=2', '--context_capacity=2048', '--pool_capacity=8192',
+                                '--prefill_capacity=64', '--mtp_depth=2', '--port=19999']
+                with patch.object(_launcher, '__file__', str(package / '_launcher.py')), \
+                     patch.object(pipeline_validation, 'runtime_cache_dir', return_value=self.root / 'cache'), \
+                     patch('sys.argv', ['loom-serve', *options, *native]), \
+                     patch.object(_launcher, 'native_environment', return_value={}), \
+                     patch.object(_launcher.os, 'execve', side_effect=SystemExit(0)) as execute:
+                    with self.assertRaises(SystemExit):
+                        _launcher.exec_loom_serve()
+                executable, argv, environment = execute.call_args.args
+                self.assertEqual(executable, str(binary))
+                self.assertEqual(argv[0], str(binary))
+                self.assertEqual(argv[2:], native if explicit else ['--device=amdgpu', '--listen=127.0.0.1:8080'])
+                self.assertEqual(environment, {})
+                document = json.loads(Path(argv[1].removeprefix('--model=')).read_text())
+                self.assertEqual(document['name'], selected.name)
+                self.assertNotIn('admission', document)
+                self.assertEqual(document['device'], 0)
+                keys = ('rows', 'context_capacity', 'pool_capacity', 'prefill_capacity', 'draft_depth')
+                self.assertEqual(tuple(document['definition'][key] for key in keys),
+                                 (2, 2048, 8192, 64, 2) if explicit else (4, 16384, 65536, 512, 0))
 
     def test_installed_catalog_selection_and_low_level_mtp_rejection(self):
         package = self.root/'installed/hrx_solutions'

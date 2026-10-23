@@ -176,7 +176,7 @@ class ConfigurationGate:
         gate = self.gate
         for directory in (self.target, self.project, Path(self.env['XDG_DATA_HOME']), Path(self.env['XDG_CACHE_HOME']), Path(self.env['XDG_STATE_HOME'])):
             directory.mkdir(mode=0o700)
-        from hrx_solutions.hem_omp_cli import BUN_SHA256
+        from hrx_solutions.hem_omp import BUN_SHA256
         assert hashlib.sha256(self.bun.read_bytes()).hexdigest() == BUN_SHA256
         for directory, names in [('client', ('package.json','bun.lock')), ('runtime', ('package.json','package-lock.json'))]:
             for name in names:
@@ -196,7 +196,7 @@ class ConfigurationGate:
         installed = self.target/'extensions/loom-control-omp'
         from hrx_solutions.hem_omp import bundled_assets
         for name,data in bundled_assets().items():
-            assert data == (installed/name).read_bytes() == (gate.args.source/'binding/python/omp_extension'/name).read_bytes()
+            assert data == (installed/name).read_bytes() == (gate.args.source/'binding/python'/('native_protocol.ts' if name=='native_protocol.ts' else 'omp_extension/'+name)).read_bytes()
         before = configuration_snapshot(self.target)
         assert self.command()['changed'] is False and configuration_snapshot(self.target) == before
         passive_before = snapshot(self.target)

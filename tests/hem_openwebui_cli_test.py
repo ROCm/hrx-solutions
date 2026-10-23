@@ -4,13 +4,11 @@ import io
 import json
 import os
 from pathlib import Path
-import sys
 import tempfile
-import types
 import unittest
 from unittest.mock import Mock, patch
 
-from binding.python import hem_cli, hem_openwebui_cli as cli
+from binding.python import hem_cli, hem_openwebui as owner
 from binding.python.hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 
 
@@ -29,11 +27,9 @@ class WebUICliTest(unittest.TestCase):
         patch.dict(os.environ, {'LOOM_SERVE_DIR': str(self.root),
             'OPENWEBUI_URL': self.target, 'OPENWEBUI_TOKEN': self.token}).start()
         self.coordinator = Mock(side_effect=self.coordinate)
-        module = types.ModuleType('binding.python.hem_openwebui')
-        module.configure_openwebui = self.coordinator
-        patch.dict(sys.modules, {'binding.python.hem_openwebui': module}).start()
+        patch.object(owner, '_configure_owned', self.coordinator).start()
 
-    def coordinate(self, root, target, token, deadline, *, check=False, disable=False, display=None, stt_server=None, stt_instance=None):
+    def coordinate(self, root, target, token, deadline, *, check=False, disable=False, display=None, stt_server=None, stt_instance=None, client_factory=None):
         self.assertEqual(root, self.root)
         self.assertEqual(token, self.token)
         self.assertLessEqual(deadline.remaining(), 10)

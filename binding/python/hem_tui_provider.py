@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-import json
 import os
 from pathlib import Path
 import sqlite3
@@ -15,9 +14,9 @@ from urllib.parse import quote
 
 from .hem_common import Deadline, DeadlineExpired, HemError
 from .hem_http import NativeClient
-from .hem_process import PinnedProcess
+from .hem_process import PinnedProcess, observe_server
 from .runtime_paths import state_root
-from .hem_state import _validate_schema
+from .hem_state import _validate_schema, decode_record
 
 MAX_INVENTORY_ROWS = 4096
 MAX_INVENTORY_BYTES = 8 * 1024 * 1024
@@ -53,19 +52,6 @@ class _ServerHealth:
 
 def _database_uri(path: Path) -> str:
     return "file:" + quote(str(path), safe="/") + "?mode=ro"
-
-
-def _decode(data, revision, identity, required):
-    try:
-        record = json.loads(data)
-        if not isinstance(record, dict) or any(record.get(key) != value
-                                               for key, value in identity.items()):
-            raise ValueError("identity mismatch")
-        if not required.issubset(record):
-            raise ValueError("missing fields")
-    except (TypeError, ValueError, json.JSONDecodeError) as error:
-        raise HemError("corrupt state record; inventory retained") from error
-    return dict(record, revision=revision)
 
 
 def _read_snapshot(root: Path, deadline: Deadline):
@@ -113,16 +99,14 @@ def _read_snapshot(root: Path, deadline: Deadline):
         servers = []
         for server_id, launch_token, revision, data in server_rows:
             deadline.remaining()
-            servers.append(_ServerSnapshot(_decode(
-                data, revision, {"id": server_id, "launch_token": launch_token},
-                {"saved_settings", "phase", "pending"})))
+            servers.append(_ServerSnapshot(decode_record(
+                "servers", data, revision, {"id": server_id, "launch_token": launch_token})))
         instances = []
         for server_id, launch_token, name, revision, data in instance_rows:
             deadline.remaining()
-            instances.append(_InstanceSnapshot(_decode(
-                data, revision,
-                {"server_id": server_id, "launch_token": launch_token, "name": name},
-                {"model_id", "incarnation", "pending"})))
+            instances.append(_InstanceSnapshot(decode_record(
+                "instances", data, revision,
+                {"server_id": server_id, "launch_token": launch_token, "name": name})))
         return servers, instances
     except sqlite3.Error as error:
         raise HemError(f"state database unavailable; inventory retained: {error}") from error
@@ -132,24 +116,19 @@ def _read_snapshot(root: Path, deadline: Deadline):
 
 
 def _observe_server(record, deadline):
-    if record["launch_token"] is None:
-        return _ServerHealth("stopped", "not-running")
-    if not record.get("process") or not record.get("build") or not record.get("endpoint"):
-        return _ServerHealth("unknown", "unknown")
-    try:
-        with PinnedProcess(record["process"], record["build"]["executable"],
-                           emit=lambda _message: None) as process:
-            try:
-                native = NativeClient(
-                    record["endpoint"], deadline, process.connection,
-                    ownership_after=process.verify, emit=lambda _message: None,
-                ).status(display=False, max_response_bytes=MAX_TUI_STATUS_BYTES)
-                return _ServerHealth("running", "available", native)
-            except HemError:
-                process.verify(deadline)
-                return _ServerHealth("running", "unavailable")
-    except HemError:
-        return _ServerHealth("unknown", "unknown")
+    observation = observe_server(
+        record, deadline,
+        pin=lambda row: PinnedProcess(row['process'], row['build']['executable'],
+                                     emit=lambda _message: None),
+        client=lambda row, process, budget: NativeClient(
+            row['endpoint'], budget, process.connection,
+            ownership_after=process.verify, emit=lambda _message: None),
+        max_response_bytes=MAX_TUI_STATUS_BYTES,
+    )
+    return _ServerHealth(
+        {'verified': 'running', 'exited': 'stopped', 'unknown': 'unknown'}[observation.process_health],
+        {'healthy': 'available', 'unhealthy': 'unavailable', 'not-running': 'not-running',
+         'unknown': 'unknown'}[observation.http_health], observation.native)
 
 
 def _server_state(record, health):

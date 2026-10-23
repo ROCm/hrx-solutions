@@ -9,23 +9,106 @@ from __future__ import annotations
 import base64
 import hashlib
 from importlib.resources import files
-import json
 import os
 from pathlib import Path
 import uuid
+import re
+import shlex
+import shutil
+import subprocess
 
-from .hem_common import InvalidInput, result
+from .hem_common import InvalidInput, result, HemError, DeadlineExpired, UncertainOutcome
+from . import hem_display
+from .hem_client_documents import MAX_BYTES, decode_document, canonical_uuid as _uuid
+from .hem_pi_state import passive_snapshot
+from .hem_clients_endpoints import project_endpoints, ensure_endpoints, read_endpoints
+from .hem_state import Registry
 from .hem_pi_files import (atomic_replace, encoded, private_path, read_owned,
                            remove_owned, staged_path, sync_dir, validate_stage)
 from .hem_state import ResourceLock
 from .hem_omp_yaml import scan, selected_file, edit_plan
 
-ASSETS = ("index.ts", "discovery.ts", "installation.ts", "activation.ts", "stream.ts", "profile.json", "package.json")
+ASSETS = ("index.ts", "discovery.ts", "native_protocol.ts", "installation.ts", "activation.ts", "stream.ts", "profile.json", "package.json")
 ARTIFACTS = (*ASSETS, "config.json")
 FILES = (*ARTIFACTS, "manifest.json")
 PLUGIN = "extensions/loom-control-omp"
-MAX_BYTES = 1024 * 1024
 REPAIR = "inspect/export the retained files before repair; rerun loom-control omp configure --check"
+
+
+VERSION = '18.11.2'
+BUN_VERSION = '1.3.14'
+BUN_SHA256 = '9fd36f87e4b90b07632b987a2e4ec81ca15a62c81bf983190cea6d715be2ad74'
+PACKAGE = '@oh-my-pi/pi-coding-agent'
+
+
+def normalize_profile(value):
+    # Released @oh-my-pi/pi-utils/dirs normalization, kept passive.
+    value=value.strip()
+    if not value or value=='default':return ''
+    if (not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,63}',value) or value.endswith('.') or
+        re.fullmatch(r'(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\..*)?',value,re.I)):
+        raise InvalidInput('invalid OMP profile name; use the qualified lowercase profile grammar')
+    return value
+
+
+def resolve_target(override=None):
+    profile=normalize_profile(os.environ.get('OMP_PROFILE',os.environ.get('PI_PROFILE','')))
+    if override is not None and profile:
+        raise InvalidInput('explicit --omp-dir conflicts with named OMP_PROFILE/PI_PROFILE; clear profile selectors for explicit target')
+    if override is not None: path=Path(override).expanduser()
+    elif profile: path=Path.home()/'.omp/profiles'/profile/'agent'
+    else: path=Path(os.environ.get('PI_CODING_AGENT_DIR',str(Path.home()/'.omp/agent'))).expanduser()
+    if not path.is_absolute(): raise InvalidInput('OMP agent directory must be absolute')
+    private_path(path)
+    return path.resolve()
+
+
+def inspect_runtime(deadline,*,passive=False):
+    selected=shutil.which('omp')
+    if selected is None: raise InvalidInput('OMP absent from PATH; select qualified @oh-my-pi/pi-coding-agent18.11.2 with Bun1.3.14; no automatic install')
+    executable=Path(selected).resolve()
+    package=None
+    for parent in executable.parents:
+        path=parent/'package.json'
+        if path.is_file():
+            # Metadata may live in a shared package installation; no write or execution.
+            if path.stat().st_size>1024*1024: raise InvalidInput('oversized OMP package metadata')
+            metadata=document(path.read_bytes())
+            if metadata.get('name')==PACKAGE: package=parent;break
+    if package is None or metadata.get('version')!=VERSION: raise InvalidInput('unsupported OMP package; require18.11.2')
+    bins=metadata.get('bin',{})
+    if not isinstance(bins,dict) or not isinstance(bins.get('omp'),str) or (package/bins['omp']).resolve()!=executable:
+        raise InvalidInput('ambiguous OMP launcher; select genuine package npm bin')
+    try:
+        with executable.open('rb') as stream: shebang=stream.readline(512).decode().strip()
+    except (OSError,UnicodeError) as error: raise InvalidInput('cannot inspect OMP launcher') from error
+    if shebang!='#!/usr/bin/env bun': raise InvalidInput('unqualified OMP launcher; require Bun npm route')
+    bun=shutil.which('bun')
+    if bun is None: raise InvalidInput('qualified Bun1.3.14 absent from PATH')
+    if passive:
+        hasher=hashlib.sha256()
+        if Path(bun).stat().st_size>512*1024*1024: raise InvalidInput('oversized Bun identity')
+        with Path(bun).open('rb') as stream:
+            while True:
+                deadline.remaining();chunk=stream.read(1024*1024)
+                if not chunk:break
+                hasher.update(chunk)
+        if hasher.hexdigest()!=BUN_SHA256:raise InvalidInput('Bun identity not passively qualified; version not executed')
+
+    environment={k:v for k,v in os.environ.items() if k not in ('BUN_OPTIONS','NODE_OPTIONS','NODE_PATH')}
+    try:
+        observed=None if passive else subprocess.run([str(Path(bun).resolve()),'--version'],env=environment,stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=deadline.remaining(),check=False)
+    except subprocess.TimeoutExpired as error: raise HemError('Bun identity check timed out before writes',accepted=False) from error
+    except OSError as error: raise InvalidInput('cannot inspect selected Bun runtime') from error
+    if not passive and (observed.returncode or observed.stdout.strip()!=BUN_VERSION): raise InvalidInput('require qualified Bun1.3.14; runtime unchanged')
+    dependencies=metadata.get('dependencies',{})
+    if dependencies.get('@oh-my-pi/pi-ai')!=VERSION: raise InvalidInput('unsupported OMP pi-ai dependency')
+    ai=next((parent/'node_modules/@oh-my-pi/pi-ai' for parent in (package,*package.parents)
+             if (parent/'node_modules/@oh-my-pi/pi-ai/package.json').is_file()),None)
+    if ai is None or (ai/'package.json').stat().st_size>1024*1024:raise InvalidInput('qualified pi-ai package missing')
+    ai_metadata=document((ai/'package.json').read_bytes())
+    if ai_metadata.get('name')!='@oh-my-pi/pi-ai' or ai_metadata.get('version')!=VERSION:raise InvalidInput('unsupported selected pi-ai package')
+    return dict(package=PACKAGE,version=VERSION,executable=str(executable),bun=str(Path(bun).resolve()),bun_version=BUN_VERSION,qualification='passive qualified Bun/package identity' if passive else 'qualified Bun npm route')
 
 
 class OMPResult(dict):
@@ -36,62 +119,28 @@ class OMPResult(dict):
 
 def bundled_assets():
     resource = files(__package__).joinpath("omp_extension")
-    return {name: resource.joinpath(name).read_bytes() for name in ASSETS}
+    return {name: (files(__package__).joinpath(name) if name == "native_protocol.ts" else resource.joinpath(name)).read_bytes()
+            for name in ASSETS}
 
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def _unique(pairs):
-    value = {}
-    for key, item in pairs:
-        if key in value:
-            raise ValueError("duplicate field")
-        value[key] = item
-    return value
-
-
 def document(data):
     try:
-        if len(data) > MAX_BYTES:
-            raise ValueError()
-        value = json.loads(data, object_pairs_hook=_unique)
-        def depth(item, level=0):
-            if level > 64:
-                raise ValueError()
-            if isinstance(item, dict):
-                for child in item.values(): depth(child, level + 1)
-            elif isinstance(item, list):
-                for child in item: depth(child, level + 1)
-        depth(value)
-        if not isinstance(value, dict): raise ValueError()
-        return value
+        return decode_document(data)
     except (ValueError, TypeError, UnicodeError, RecursionError) as error:
         raise InvalidInput("malformed OMP ownership data; " + REPAIR) from error
-
-
-def _uuid(value):
-    try:
-        identifier = uuid.UUID(value)
-        return identifier.version == 4 and str(identifier) == value
-    except (ValueError, TypeError, AttributeError):
-        return False
-
-
-def _canonical(path):
-    path = Path(path)
-    if not path.is_absolute() or str(path.resolve()) != str(path):
-        raise InvalidInput("OMP target/state root must be canonical and absolute")
-    private_path(path)
-    return path
 
 
 def validate_set(values, target, root):
     """Prove one complete owned generation, including root and exact whitelist."""
     if not values:
         return None
-    if set(values) != set(FILES) or any(not isinstance(data, bytes) or len(data) > MAX_BYTES for data in values.values()):
+    # The sole prior format predates the shared companion; no partial set is owned.
+    artifacts = ARTIFACTS if "native_protocol.ts" in values else tuple(name for name in ARTIFACTS if name != "native_protocol.ts")
+    if set(values) != {*artifacts, "manifest.json"} or any(not isinstance(data, bytes) or len(data) > MAX_BYTES for data in values.values()):
         raise InvalidInput("unsupported OMP owned file set; " + REPAIR)
     manifest, config = document(values["manifest.json"]), document(values["config.json"])
     if (set(manifest) != {"schema_version", "integration_version", "enabled", "generation", "integration_id", "target", "artifacts", "native_activation"} or
@@ -99,8 +148,8 @@ def validate_set(values, target, root):
         type(manifest["integration_version"]) is not int or manifest["integration_version"] != 1 or
         manifest["enabled"] is not True or not _uuid(manifest["generation"]) or not _uuid(manifest["integration_id"]) or
         manifest["target"] != str(target) or not isinstance(manifest["artifacts"], dict) or
-        set(manifest["artifacts"]) != set(ARTIFACTS) or
-        any(manifest["artifacts"][name] != digest(values[name]) for name in ARTIFACTS)):
+        set(manifest["artifacts"]) != set(artifacts) or
+        any(manifest["artifacts"][name] != digest(values[name]) for name in artifacts)):
         raise InvalidInput("foreign, edited or unsupported OMP manifest; " + REPAIR)
     activation = manifest['native_activation']
     if (not isinstance(activation, dict) or set(activation) != {'path', 'providers', 'heading'} or
@@ -236,7 +285,7 @@ def _resume(directory, pending, target, root, deadline):
 
 def _desired(target, root, assets, previous, identity, activation):
     old = validate_set(previous, target, root)
-    if old and old['native_activation'] == activation and all(previous[n] == data for n,data in assets.items()): return previous
+    if old and old['native_activation'] == activation and all(previous.get(n) == data for n,data in assets.items()): return previous
     generation = str(uuid.uuid4())
     config = encoded(dict(schema_version=1, generation=generation, integration_id=identity,
         target=str(target), hem_root=str(root), endpoint_file=str(root/'clients/endpoints.json'), native_models_file=activation['path']))
@@ -274,25 +323,35 @@ def _prepare(root, target, values, providers, disable, assets):
     return desired,native
 
 
-def configure_omp(root,target,deadline,*,providers=(),check=False,disable=False):
-    root,target = _canonical(root),_canonical(target)
-    assets = bundled_assets()
-    if check:
-        try:
-            _,values,pending,stages = _inspect(target)
-            manifest = validate_set(values,target,root) if not pending and not stages else None
-            if pending or stages: state='pending'
-            elif not manifest: state='absent'
-            else:
-                desired,_ = _prepare(root,target,values,providers,False,assets)
-                state='configured' if desired==values else 'outdated'
-            return OMPResult(result(state,completed=True,configured=state=='configured',target=str(target),
-                pending=bool(pending or stages),findings=[] if state=='configured' else [state],
-                next_action=('Inspect/export retained recovery files; an incomplete unpublished plan temporary cannot be safely adopted. ' + str(staged_path(target/PLUGIN/'pending.json')) + '; after verifying its ownership and that no pending.json was published, manually move the temporary aside and rerun configure.' if pending is None and 'pending.json' in stages else REPAIR) if state=='pending' else None),exit_code=0 if state=='configured' else 1)
-        except InvalidInput as error:
-            return OMPResult(result('conflict',completed=True,configured=False,target=str(target),findings=[str(error)],next_action=REPAIR),exit_code=2)
-    _,values,pending,stages = _inspect(target)
-    if pending is None and not stages: _prepare(root,target,values,providers,disable,assets)
+def _check_owned(root,target,assets,providers):
+    """Inspect current file/activation state without publishing or recovering."""
+    try:
+        _,values,pending,stages = _inspect(target)
+        manifest = validate_set(values,target,root) if not pending and not stages else None
+        if pending or stages: state='pending'
+        elif not manifest: state='absent'
+        else:
+            desired,_ = _prepare(root,target,values,providers,False,assets)
+            state='configured' if desired==values else 'outdated'
+        return OMPResult(result(state,completed=True,configured=state=='configured',target=str(target),
+            pending=bool(pending or stages),findings=[] if state=='configured' else [state],
+            next_action=('Inspect/export retained recovery files; an incomplete unpublished plan temporary cannot be safely adopted. ' + str(staged_path(target/PLUGIN/'pending.json')) + '; after verifying its ownership and that no pending.json was published, manually move the temporary aside and rerun configure.' if pending is None and 'pending.json' in stages else REPAIR) if state=='pending' else None),exit_code=0 if state=='configured' else 1)
+    except InvalidInput as error:
+        return OMPResult(result('conflict',completed=True,configured=False,target=str(target),findings=[str(error)],next_action=REPAIR),exit_code=2)
+
+
+def _preflight(root,target,assets,providers,disable):
+    """Refuse known file/YAML conflicts before root/endpoint publication."""
+    inspected = _inspect(target)
+    _,values,pending,stages = inspected
+    if pending is None and not stages:
+        _prepare(root,target,values,providers,disable,assets)
+    return inspected
+
+
+def _apply_owned(root,target,deadline,assets,inspected,*,providers,disable=False):
+    """Reinspect and mutate one target under its own lock, preserving recovery."""
+    _,values,pending,stages = inspected
     if disable and not values and pending is None and not stages:
         return OMPResult(result('disabled',completed=True,changed=False,configured=False,target=str(target),affected_paths=[]))
     private_path(target,create=True)
@@ -318,3 +377,55 @@ def configure_omp(root,target,deadline,*,providers=(),check=False,disable=False)
         if disable and directory.exists(): directory.rmdir();sync_dir(directory.parent)
         return OMPResult(result('disabled' if disable else 'configured',completed=True,changed=changed,
             configured=not disable,target=str(target),affected_paths=[str(directory/n) for n in FILES] if changed else []))
+
+
+def configure_omp(root,target,deadline,*,check=False,disable=False):
+    """Own the complete qualified OMP operation for CLI and direct callers."""
+    if check and disable:
+        raise InvalidInput('OMP check and disable are mutually exclusive')
+    deadline.remaining()
+    value=Path(root if root is not None else os.environ.get('LOOM_SERVE_DIR',str(Path.home()/'.loom')))
+    if not value.is_absolute(): raise InvalidInput('LOOM_SERVE_DIR must be absolute')
+    private_path(value);root=value.resolve();target=resolve_target(target)
+    runtime=None;compatibility=dict(state='not_checked',reason='client unnecessary for owned removal')
+    if not disable:
+        try:
+            runtime=inspect_runtime(deadline,passive=check)
+            compatibility=dict(state='compatible',reason=runtime['qualification'])
+        except (HemError,OSError) as error:
+            if not check: raise
+            compatibility=dict(state='unqualified',reason=str(error))
+    assets=bundled_assets()
+    projection=None;providers=[]
+    if not disable:
+        projection=project_endpoints(root,passive_snapshot(root,deadline)['servers'])
+        if len(projection['servers'])>256: raise InvalidInput('OMP supports at most256 candidate endpoints')
+        providers=[row['provider'] for row in projection['servers']]
+    hem_display.emit('No native Loom equivalent: owned OMP extension and native keyless-provider activation')
+    try:
+        if check:
+            response=_check_owned(root,target,assets,providers)
+        else:
+            inspected=_preflight(root,target,assets,providers,disable)
+            if not disable:
+                ensure_endpoints(Registry(root,deadline=deadline),deadline)
+            response=_apply_owned(root,target,deadline,assets,inspected,providers=providers,disable=disable)
+    except (OSError,DeadlineExpired) as error:
+        if check: raise HemError('OMP inspection failed without writes',accepted=False) from error
+        raise UncertainOutcome('OMP update interrupted; '+REPAIR) from error
+    response.update(runtime=runtime,runtime_compatibility=compatibility,
+        availability=dict(state='not_observed',reason='startup or explicit refresh/restart discovers ready models'))
+    if check:
+        try:
+            valid=read_endpoints(root)==projection and projection is not None
+            response['endpoint_projection']='current' if valid else 'absent_or_outdated'
+            if not valid: response['findings'].append('root endpoint projection absent/outdated; rerun configure');response.exit_code=response.exit_code or 1
+        except (HemError,OSError) as error:
+            response['findings'].append(str(error));response.exit_code=response.exit_code or 2
+        if compatibility['state']!='compatible':response.exit_code=response.exit_code or 1
+    if not disable:
+        prefix='PI_CODING_AGENT_DIR='+shlex.quote(str(target))+' OMP_PROFILE= PI_PROFILE= '
+        response.update(launch=prefix+'omp',refresh=prefix+'omp models refresh --json',
+            guidance='Adding a saved server requires configure, then refresh and restart OMP. Model changes on configured servers require refresh and restart only. No polling. Export/backups are your responsibility. Advanced YAML outside the narrow block subset requires manual editing.')
+        hem_display.emit('Launch: '+response['launch']);hem_display.emit('Refresh: '+response['refresh']+'; then restart OMP')
+    return response

@@ -8,7 +8,6 @@ import { createServer } from 'node:http';
 
 const assets = resolve(process.argv[2]);
 const { validateInstallation, ASSETS, parseDocument } = await import(pathToFileURL(join(assets, 'installation.ts')));
-const { joinInventory, readEndpoints, validateBaseUrl, discover } = await import(pathToFileURL(join(assets, 'discovery.ts')));
 const root = mkdtempSync(join(tmpdir(), 'loom-omp-adapter-'));
 const target = join(root,'client'), directory = join(target,'extensions','loom-control-omp'), state = join(root,'state');
 mkdirSync(directory,{recursive:true}); mkdirSync(join(state,'clients'),{recursive:true});
@@ -26,9 +25,24 @@ let checks=0;
 function test(name,fn) {fn();checks++;console.log('PASS '+name);}
 let server, replacementServer;
 try {
-  for(const name of ASSETS) copyFileSync(join(assets,name),join(directory,name));
+  for(const name of ASSETS) copyFileSync(name==='native_protocol.ts'?join(assets,'..',name):join(assets,name),join(directory,name));
   writeFileSync(join(directory,'config.json'),JSON.stringify(config)); writeManifest(); projection();
   test('valid owned generation and exact manifest',()=>assert.deepEqual(validateInstallation(join(directory,'index.ts')),config));
+
+  // Exercise the real entrypoint, before any discovery/native companion is loaded.
+  const entry=await import(pathToFileURL(join(directory,'index.ts')));
+  const nativePath=join(directory,'native_protocol.ts'), nativeBytes=readFileSync(nativePath);
+  const sentinel='__loom_native_companion_executed';delete globalThis[sentinel];
+  for(const invalid of ['tampered','missing']) {
+    if(invalid==='tampered')writeFileSync(nativePath,`globalThis.${sentinel}=true;\n`+nativeBytes);
+    else rmSync(nativePath);
+    await assert.rejects(entry.default({}));
+    assert.equal(globalThis[sentinel],undefined);
+    writeFileSync(nativePath,nativeBytes);
+    checks++;console.log('PASS '+invalid+' native companion refused before top-level execution');
+  }
+  const { joinInventory, readEndpoints, validateBaseUrl, discover } = await import(pathToFileURL(join(directory, 'discovery.ts')));
+
   test('duplicate JSON fields and excessive nesting rejected',()=>{assert.throws(()=>parseDocument('{"owner":1,"owner":2}'));assert.throws(()=>parseDocument('['.repeat(65)+'0'+']'.repeat(65)));assert.deepEqual(parseDocument('{"a\\u0062":[null,true,"x\\\"y",-2.4]}'),{ab:[null,true,'x"y',-2.4]});});
   test('partial generation/pending blocks',()=>{writeFileSync(join(directory,'pending.json'),'{}');assert.throws(()=>validateInstallation(join(directory,'index.ts')));rmSync(join(directory,'pending.json'));const original=manifest.generation;manifest.generation=randomUUID();writeManifest();assert.throws(()=>validateInstallation(join(directory,'index.ts')));manifest.generation=original;writeManifest();});
   test('edited companion refused',()=>{writeFileSync(join(directory,'discovery.ts'),'edited');assert.throws(()=>validateInstallation(join(directory,'index.ts')));copyFileSync(join(assets,'discovery.ts'),join(directory,'discovery.ts'));writeManifest();});
@@ -36,6 +50,11 @@ try {
   test('managed symlink refused',()=>{const path=join(directory,'config.json'),data=readFileSync(path);rmSync(path);writeFileSync(join(root,'alias.json'),data);symlinkSync(join(root,'alias.json'),path);assert.throws(()=>validateInstallation(join(directory,'index.ts')));rmSync(path);writeFileSync(path,data);});
   test('numeric exact loopback origins',()=>{for(const url of ['http://127.0.0.1:80/v1','http://[::1]:18080/v1','http://127.255.2.3:65535/v1'])assert.equal(validateBaseUrl(url),url);for(const url of ['http://localhost:80/v1','https://127.0.0.1:80/v1','http://127.0.0.1:0/v1','http://127.256.0.1:80/v1','http://127.0.0.1:65536/v1','http://127.0.0.1/v1','http://127.0.0.1:80/v1?x','http://user@127.0.0.1:80/v1','http://127.0.0.1:080/v1'])assert.throws(()=>validateBaseUrl(url));});
   test('projection ownership/ordering/profile and count',()=>{projection([endpoint()]);assert.equal(readEndpoints(config).length,1);for(const rows of [[endpoint(),endpoint()],[{...endpoint(),provider:'wrong'}],[{...endpoint(),native_profile:'unknown'}],Array.from({length:257},(_,i)=>endpoint('n'+i))]){projection(rows);assert.throws(()=>readEndpoints(config));}projection();const text=readFileSync(config.endpoint_file,'utf8');writeFileSync(config.endpoint_file,text.replace('loom-control-clients','foreign'));assert.throws(()=>readEndpoints(config));projection();});
+  test('neutral native facts preserve incarnation without leaking host policy',()=>{
+    const models=joinInventory(list(row()),list(row()),endpoint());
+    assert.equal(models[0].incarnation,1);
+    assert.deepEqual(Object.keys(models[0]).sort(),['incarnation','id','modelID','providerID','name','capabilities','limit'].sort());
+  });
   test('native exact IDs truthful output without Pi cap',()=>{const models=joinInventory(list(row()),list(row()),endpoint());assert.equal(models[0].id,'qwen-a');assert.deepEqual(models[0].capabilities,{tools:false,input:['text'],output:['text']});assert.deepEqual(models[0].limit,{context:32768,output:16384});const small=row();small.context_length=4096;assert.equal(joinInventory(list(small),list(small),endpoint())[0].limit.output,4096);});
   test('mixed recognition and text inventory keeps only chat model',()=>{
     const speech=row('dictation');speech.loom.kind='recognition';speech.loom.endpoint='/v1/audio/transcriptions';
@@ -62,11 +81,16 @@ try {
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
   const ep=endpoint('local',server.address().port); projection([ep]);
   let snapshot=await discover(config,()=>validateInstallation(join(directory,'index.ts')));assert.equal(snapshot[0].models.length,1);assert(requests.every(r=>r.auth===undefined));assert.deepEqual(new Set(requests.map(r=>r.url)),new Set(['/v1/models','/v1/status']));checks++;console.log('PASS bounded keyless native joined discovery');
+  const other=endpoint('other',1);requests=[];projection([ep,other]);
+  const filtered=await discover(config,()=>validateInstallation(join(directory,'index.ts')),ep.provider);
+  assert.equal(filtered.length,1);assert.equal(filtered[0].endpoint.provider,ep.provider);assert.equal(requests.length,2);
+  await assert.rejects(discover(config,()=>{projection([ep,endpoint('other',2)]);return config;},ep.provider));
+  projection([ep]);checks++;console.log('PASS provider-filtered sweep still fingerprints all endpoints');
   for(mode of ['empty','malformed','large','redirect']){snapshot=await discover(config,()=>validateInstallation(join(directory,'index.ts')));assert.equal(snapshot[0].models.length,0);checks++;console.log('PASS no cached rows after '+mode);}
   mode='hang';const before=Date.now();snapshot=await discover(config,()=>validateInstallation(join(directory,'index.ts')));assert.equal(snapshot[0].models.length,0);assert(Date.now()-before<5000);checks++;console.log('PASS total bounded discovery deadline');server.closeAllConnections();
   mode='ready';await assert.rejects(discover(config,()=>({...config,generation:randomUUID()})));checks++;console.log('PASS generation change during refresh refused');
   projection([ep]);await assert.rejects(discover(config,()=>{projection([]);return config;}));checks++;console.log('PASS changed projection cannot mix old rows with new origin');
-  const {scanActivation,activated,selectedModelsFile}=await import(pathToFileURL(join(assets,'activation.ts')));
+  const {scanActivation,activated,selectedModelsFile}=await import(pathToFileURL(join(directory,'activation.ts')));
   const cases=JSON.parse(readFileSync(new URL('./omp_activation_cases.json',import.meta.url),'utf8'));
   for(const fixture of cases){if(fixture.error)assert.throws(()=>scanActivation(fixture.text),undefined,fixture.name);else assert.deepEqual(Object.fromEntries([...scanActivation(fixture.text)].map(([id,stanza])=>[id,stanza.valid])),fixture.providers,fixture.name);checks++;}
   const provider=ep.provider, owned=`  # loom-control omp begin ${config.integration_id} ${provider}\n  ${provider}:\n    auth: none\n  # loom-control omp end ${config.integration_id} ${provider}\n`;

@@ -6,6 +6,7 @@ The bootstrap durably identifies itself while sharing the caller's server flock.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass, replace
 import hashlib
 import ipaddress
 import os
@@ -291,7 +292,7 @@ def require_build(record, package_root, deadline):
     current = package_identity(package_root, deadline)
     retained = package_identity(build['directory'], deadline)
     if any(current[key] != build.get(key) or retained[key] != build.get(key) for key in keys):
-        raise HemError('serving build/catalog differs; shut down and launch a new empty server')
+        raise HemError('serving build/catalog differs; shut down and launch a new empty server', reason='build_mismatch')
     return Path(build['directory']) / 'loom-pipeline'
 
 
@@ -327,6 +328,81 @@ def _confirmed_exit(process):
         os.close(fd)
 
 
+def validate_launch_settings(settings):
+    """Validate infrastructure choices without interpreting an opaque device.
+
+    Return the loopback origin; retain the supplied settings/selector unchanged.
+    CLI-only missing-option and whitespace presentation belongs to the caller.
+    """
+    if set(settings) != {'device', 'listen'} or not isinstance(settings['device'], str) or not settings['device']:
+        raise InvalidInput('server launch requires device and listen settings only')
+    try:
+        host, port_text = settings['listen'].rsplit(':', 1)
+        host = host.strip('[]')
+        port = int(port_text)
+        if not ipaddress.ip_address(host).is_loopback or not 0 < port < 65536:
+            raise ValueError()
+    except (ValueError, AttributeError):
+        raise InvalidInput('managed server listen must be a numeric loopback host and nonzero port') from None
+    return f'http://[{host}]:{port}' if ':' in host else f'http://{host}:{port}'
+
+
+@dataclass(frozen=True)
+class ServerObservation:
+    """Scoped evidence for presentation, never authority for a later mutation."""
+
+    record: dict
+    process_health: str
+    http_health: str
+    native: dict | None = None
+    error: str | None = None
+    observed_at: float = 0.0
+
+    @property
+    def state(self):
+        if self.process_health == 'unknown':
+            return 'unknown'
+        if self.record['launch_token'] is None:
+            return 'stopped'
+        if self.http_health != 'healthy':
+            return 'unhealthy'
+        return self.record['phase']
+
+
+def observe_server(record, deadline, *, pin, client, max_response_bytes=None, display=False):
+    """Observe one supplied record without state reads, writes or reconciliation.
+
+    Callers own snapshot consistency and any lock. The pin and client retain
+    both socket association and post-response identity verification. Passive
+    readers can bound the response without constructing a Registry.
+    """
+    base = dict(record=record, observed_at=time.time())
+    if record['launch_token'] is None:
+        return ServerObservation(process_health='exited', http_health='not-running', **base)
+    if not record.get('process') or not record.get('build') or not record.get('endpoint'):
+        return ServerObservation(process_health='unknown', http_health='unknown', **base)
+    try:
+        with pin(record) as pinned:
+            try:
+                options = dict(display=display)
+                if max_response_bytes is not None:
+                    options['max_response_bytes'] = max_response_bytes
+                native = client(record, pinned, deadline).status(**options)
+            except UncertainOutcome:
+                # Socket association uncertainty cannot establish unhealthy HTTP
+                # on an otherwise verified process.
+                raise
+            except HemError as error:
+                pinned.verify(deadline)
+                return ServerObservation(process_health='verified', http_health='unhealthy',
+                                         error=str(error), **base)
+        return ServerObservation(process_health='verified', http_health='healthy',
+                                 native=native, **base)
+    except HemError as error:
+        return ServerObservation(process_health='unknown', http_health='unknown',
+                                 error=str(error), **base)
+
+
 class ProcessManager:
     """Lock-owning launch/reconcile operations; server CLI remains a thin caller."""
     def __init__(self, registry, *, package_root=None, emit=hem_display.emit):
@@ -339,43 +415,72 @@ class ProcessManager:
         return self.registry.update_server(record['id'], changes,
                     expected_token=record['launch_token'], expected_revision=record['revision'])
 
-    def _reconcile(self, server_id, deadline=None, *, observe=True):
+    def _observe_and_reconcile(self, server_id, deadline=None, *, observe=True, display=False):
+        """Caller owns server lock; return the evidence used by these transitions."""
         self.reap()
         record = self.registry.get_server(server_id)
+        observed_at = time.time()
+
+        def unknown(error=None):
+            return ServerObservation(record, 'unknown', 'unknown', error=error,
+                                     observed_at=observed_at)
+
         if record['launch_token'] is None:
-            return record
+            return ServerObservation(record, 'exited', 'not-running', observed_at=observed_at)
         process = record['process']
         try:
             exited = process is None or _confirmed_exit(process)
-        except UncertainOutcome:
-            return self._update(record, dict(phase='unknown'))
+        except UncertainOutcome as error:
+            record = self._update(record, dict(phase='unknown'))
+            return unknown(str(error))
         if exited:
             # Caller owns server lock. A delayed bootstrap still holding the
             # inherited lock cannot race this token invalidation.
-            return self.registry.clear_server(server_id, expected_token=record['launch_token'],
-                                              expected_revision=record['revision'])
+            record = self.registry.clear_server(server_id, expected_token=record['launch_token'],
+                                                expected_revision=record['revision'])
+            return ServerObservation(record, 'exited', 'not-running', observed_at=observed_at)
         expected = record['build']['executable']
         try:
             current = identity(process['pid'])
             if current['executable'] != expected:
                 if record['pending'] and record['pending'].get('stage') == 'bootstrap' and current['executable'] == process['executable']:
-                    return record  # Live helper, never native readiness.
-                return self._update(record, dict(phase='unknown'))
-            with PinnedProcess(process, expected) as pinned:
-                if observe:
-                    self.client(record, pinned, deadline or Deadline.after()).status(display=False)
-                    if record['pending'] and record['pending']['action'] == 'start':
-                        return self._update(record, dict(phase='running', pending=None))
-                    if record['phase'] == 'unknown':
-                        phase = 'stopping' if record['pending'] and record['pending']['action'] == 'shutdown' else 'running'
-                        return self._update(record, dict(phase=phase))
-        except HemError:
-            return self._update(record, dict(phase='unknown'))
-        return record
+                    return unknown()  # Live helper, never native readiness.
+                record = self._update(record, dict(phase='unknown'))
+                return unknown()
+            if not observe:
+                with self.pin(record):
+                    pass
+                return unknown()
+            observation = observe_server(record, deadline or Deadline.after(),
+                                         pin=self.pin, client=self.client, display=display)
+            if observation.http_health != 'healthy':
+                record = self._update(record, dict(phase='unknown'))
+            elif record['pending'] and record['pending']['action'] == 'start':
+                record = self._update(record, dict(phase='running', pending=None))
+            elif record['phase'] == 'unknown':
+                phase = 'stopping' if record['pending'] and record['pending']['action'] == 'shutdown' else 'running'
+                record = self._update(record, dict(phase=phase))
+            return replace(observation, record=record)
+        except HemError as error:
+            record = self._update(record, dict(phase='unknown'))
+            return unknown(str(error))
+
+    def _reconcile(self, server_id, deadline=None, *, observe=True):
+        return self._observe_and_reconcile(server_id, deadline, observe=observe).record
 
     def reconcile(self, server_id, deadline):
         with self.registry.lock('server', server_id, deadline=deadline):
             return self._reconcile(server_id, deadline)
+
+    def observe_and_reconcile(self, server_id, deadline):
+        """Return one locked observation; consumers must revalidate before effects."""
+        record = self.registry.get_server(server_id)
+        try:
+            with self.registry.lock('server', server_id, deadline=deadline):
+                return self._observe_and_reconcile(server_id, deadline, display=True)
+        except HemError as error:
+            return ServerObservation(record, 'unknown', 'unknown', error=str(error),
+                                     observed_at=time.time())
 
     @contextmanager
     def pin(self, record):
@@ -394,17 +499,7 @@ class ProcessManager:
         settings is exactly {'device': str, 'listen': loopback-host:port}. Saved
         definition handling belongs to server CLI; this freezes current settings.
         """
-        if set(settings) != {'device', 'listen'} or not isinstance(settings['device'], str) or not settings['device']:
-            raise InvalidInput('server launch requires device and listen settings only')
-        try:
-            host, port_text = settings['listen'].rsplit(':', 1)
-            host = host.strip('[]')
-            port = int(port_text)
-            if not ipaddress.ip_address(host).is_loopback or not 0 < port < 65536:
-                raise ValueError()
-        except (ValueError, AttributeError):
-            raise InvalidInput('managed server listen must be a numeric loopback host and nonzero port') from None
-        endpoint = f'http://[{host}]:{port}' if ':' in host else f'http://{host}:{port}'
+        endpoint = validate_launch_settings(settings)
         with self.registry.lock('server', server_id, deadline=deadline) as lock:
             record = self._reconcile(server_id, deadline)
             if record['launch_token']:
@@ -482,7 +577,7 @@ class ProcessManager:
                 except HemError as error:
                     # A refused connection during the bind window is expected.
                     # Other malformed/lost observations do not establish health.
-                    if not isinstance(error.__cause__, ConnectionRefusedError):
+                    if error.reason != 'connection_refused':
                         raise UncertainOutcome(f'server readiness is unknown: {error}', accepted=True) from error
             time.sleep(min(0.01, deadline.remaining()))
 

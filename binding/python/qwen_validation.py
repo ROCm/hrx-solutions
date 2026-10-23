@@ -2,16 +2,64 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
-from .gguf import ArrayInfo, GGUF, Metadata
+from .gguf import ArrayInfo, GGUF, Metadata, inspect_gguf_set
+
+if TYPE_CHECKING:
+    from .model_store import ModelFiles
 
 
 _INTEGER_TYPES = {0, 1, 2, 3, 4, 5, 10, 11}
+
+
+@dataclass(frozen=True)
+class ModelInspection:
+    """Descriptor and tokenizer facts reusable across candidate profiles."""
+
+    weights: GGUF
+    tokenizer_data: Any
+    tokenizer_error: Optional[str] = None
+
+
+def inspect_model(
+    model: ModelFiles, *, tokenizer_data: Optional[dict] = None, native_index: bool = False,
+) -> ModelInspection:
+    """Inspect descriptors/tokenizer, optionally admitting a native serving index.
+
+    Public descriptor validation accepts explicit GGUF fragments independently of
+    the native index carrier. Serving selection additionally requires that index.
+    """
+    weights = inspect_gguf_set(model.gguf_paths)
+    if native_index and (model.weights not in model.gguf_paths or len(model.gguf_paths) > 1):
+        if not str(model.weights).endswith(".safetensors.index.json"):
+            raise ValueError("Fragmented weights require a .safetensors.index.json native index")
+        index = json.loads(Path(model.weights).read_text(encoding="utf-8"))
+        weight_map = index.get("weight_map") if isinstance(index, dict) else None
+        expected = {name: Path(path).absolute() for name, path in weights.tensor_files.items()}
+        actual = ({name: (model.weights.parent / path).absolute() for name, path in weight_map.items()}
+                  if isinstance(weight_map, dict) and all(isinstance(path, str) for path in weight_map.values()) else {})
+        if actual != expected:
+            raise ValueError("Native weights index does not match inspected GGUF tensor mappings")
+    tokenizer_error = None
+    if tokenizer_data is None:
+        try:
+            tokenizer_data = json.loads(Path(model.tokenizer).read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            tokenizer_error = f"Tokenizer is not valid UTF-8 JSON: {exc}"
+    return ModelInspection(weights, tokenizer_data, tokenizer_error)
+
+
+def compare_profile(inspection: ModelInspection, profile: dict) -> tuple[str, ...]:
+    """Compare one inspected asset set with a candidate's exact contract."""
+    return compare_gguf(inspection.weights, profile) + (
+        (inspection.tokenizer_error,) if inspection.tokenizer_error is not None
+        else _compare_tokenizer_data(inspection.tokenizer_data, profile))
 
 
 def load_profile(catalog: Path) -> dict:
@@ -145,6 +193,10 @@ def compare_tokenizer(path: Path, profile: dict, *, data: Optional[dict] = None)
             data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         return (f"Tokenizer is not valid UTF-8 JSON: {exc}",)
+    return _compare_tokenizer_data(data, profile)
+
+
+def _compare_tokenizer_data(data: Any, profile: dict) -> tuple[str, ...]:
     if not isinstance(data, dict) or not isinstance(data.get("model"), dict):
         return ("Tokenizer JSON does not contain a model object",)
     normalized = json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

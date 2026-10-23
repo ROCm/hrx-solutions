@@ -9,11 +9,14 @@ import json
 import os
 from pathlib import Path
 import shutil
+import tempfile
 
 from . import curated_catalog, hem_config, hem_display, model_download
 from .gguf import inspect_gguf_set
-from .hem_common import HemError, InvalidInput
-from .model_store import CatalogAssets, ModelFiles, ModelImportError, readable_file, validate_model_id
+from .hem_common import Deadline, HemError, InvalidInput
+from .model_store import (AcquisitionInput, RuntimeMapping, PreparationAttempt,
+    CatalogAssets, ModelFiles, ModelImportError, mapped_assets, prepared_outputs,
+    readable_file, validate_model_id)
 
 _INDEX = 'model.safetensors.index.json'
 _GENERATED_RECEIPT = '.loom-acquisition.json'
@@ -22,15 +25,40 @@ _GENERATED_RECEIPT = '.loom-acquisition.json'
 def _assets(ggufs, tokenizer, alias):
     paths = [Path(path).expanduser().absolute() for path in ggufs]
     token = Path(tokenizer).expanduser().absolute()
+    inputs = tuple(AcquisitionInput(f'input-{index}', path)
+                   for index, path in enumerate(paths + [token]))
+    return _qwen_assets(inputs, alias)
+
+
+def _qwen_assets(inputs, alias):
+    paths, token = [item.path for item in inputs[:-1]], inputs[-1].path
     if not paths or len(set(paths + [token])) != len(paths) + 1:
         raise InvalidInput('GGUF members and tokenizer must have distinct source mappings')
     if any(path.suffix.lower() != '.gguf' for path in paths):
         raise InvalidInput('Every GGUF member must have a .gguf extension')
     names = (['model.gguf'] if len(paths) == 1 else
              [f'model-{i+1:05d}-of-{len(paths):05d}.gguf' for i in range(len(paths))])
-    return [dict(logical_path=name, source_path=str(path),
-                 ownership='reference' if alias else 'owned')
-            for name, path in zip(names + ['tokenizer.json'], paths + [token])]
+    mappings = tuple(RuntimeMapping('gguf' if index < len(paths) else 'tokenizer', name,
+                                   'reference' if alias else 'owned', input_id=item.input_id)
+                     for index, (name, item) in enumerate(zip(names + ['tokenizer.json'], inputs)))
+    return _mapped_assets(inputs, mappings, named=False)
+
+
+def _mapped_assets(inputs, mappings, **kwargs):
+    try:
+        return mapped_assets(inputs, mappings, **kwargs)
+    except ModelImportError as error:
+        raise InvalidInput(str(error)) from error
+
+
+def _preparation_attempt(root, model_id):
+    """Reserve caller-owned scratch while the acquisition holds its model lock."""
+    parent = Path(root) / 'preparation-attempts' / model_id
+    try:
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return PreparationAttempt(Path(tempfile.mkdtemp(prefix='attempt-', dir=parent)))
+    except OSError as error:
+        raise HemError(f'Could not reserve private preparation output; incomplete acquisition retained: {error}') from error
 
 
 def _files(record, directory=None):
@@ -120,7 +148,7 @@ def _generated_receipt(record, directory=None, *, create=False):
         raise InvalidInput(f'Generated rotary acquisition identity is unproven; preserve the model and acquire under a new ID: {error}') from error
 
 
-def _populate(record):
+def _populate(record, *, prepared=None):
     pending = record['pending']
     if not pending or pending['stage'] != 'staging':
         return
@@ -128,8 +156,16 @@ def _populate(record):
     # publish_model handles a crash after rename; never recreate that staging path.
     if not stage.exists() and pending.get('inode'):
         return
+    prepared = prepared or {}
+    # A fresh result is one associated set. Ordinary retry preservation below
+    # must not retain an older member or adopt content appearing during prepare.
+    conflicts = [stage / name for name in prepared if os.path.lexists(stage / name)]
+    if conflicts:
+        raise HemError('Conflicting staged generated outputs retained; inspect incomplete acquisition before retrying: '
+                       + ', '.join(map(str, conflicts)))
     for asset in record['assets']:
-        source, destination = Path(asset['source_path']), stage / asset['logical_path']
+        source = prepared.get(asset['logical_path'], Path(asset['source_path']))
+        destination = stage / asset['logical_path']
         if os.path.lexists(destination):
             if asset['ownership'] == 'reference':
                 if not destination.is_symlink() or os.readlink(destination) != str(source):
@@ -177,18 +213,42 @@ def _qualify(registry, model_id, pipeline=None):
     return registry.record_validation(model_id, valid=True, pipeline=selected, evidence=after)
 
 
-def _acquire(registry, model_id, assets, provenance, pipeline, obtain=None):
+def _acquire(registry, model_id, assets, provenance, pipeline, obtain=None, *,
+             inputs=(), generated=(), preparer=None):
+    """Own reservation, optional fixed preparation, staging and publication once."""
     with registry.lock('model', model_id):
         record = registry.prepare_model(model_id, assets=assets, provenance=provenance)
+        pending = record['pending']
+        stage = Path(pending['path']) if pending and pending['stage'] == 'staging' else None
+        needs_preparation = preparer is not None and stage is not None and stage.exists() and any(
+            not os.path.lexists(stage / item.logical_path) for item in generated)
+        if needs_preparation:
+            preparer.preflight()  # Existing 30s cap, before unbounded acquisition.
         if obtain is not None:
             obtain()  # Matching published references may need a missing pinned cache member again.
-        pending = record['pending']
-        if pending and pending['stage'] == 'staging':
+        prepared = {}
+        if needs_preparation:
+            attempt = _preparation_attempt(registry.root, model_id)
+            deadline = Deadline.after(preparer.TIMEOUT)  # Fresh only after inputs are ready.
+            result = preparer.prepare(inputs, attempt, deadline)
             try:
-                _populate(record)
+                outputs = prepared_outputs(attempt, result, tuple(
+                    (item.generated_role, item.logical_path) for item in generated))
+            except ModelImportError as error:
+                raise InvalidInput(f'Incomplete preparation result; attempt retained at {attempt.directory}: {error}') from error
+            prepared = {item.logical_path: outputs[item.generated_role] for item in generated}
+        if stage is None or not stage.exists():
+            # Published generated identities, including rename-before-DB recovery,
+            # must be proven as-is. Never recreate their first-publication proof.
+            _generated_receipt(record)
+        if stage is not None:
+            try:
+                _populate(record, prepared=prepared)
+                if stage.exists():
+                    _generated_receipt(record, stage, create=True)
             except OSError as exc:
                 raise HemError(f'Could not acquire model {model_id}; incomplete assets retained: {exc}') from exc
-            # Publication itself is deliberately recoverable independently of validation.
+            # Registry owns no-replace rename and recoverable DB publication.
             registry.publish_model(model_id)
         return _qualify(registry, model_id, pipeline)
 
@@ -200,7 +260,6 @@ def import_model(registry, model_id, *, ggufs, tokenizer, alias=False, pipeline=
     if isinstance(ggufs, (str, Path)):
         ggufs = [ggufs]
     assets = _assets(ggufs, tokenizer, alias)
-    hem_display.emit('Local model acquisition and packaged pipeline validation (no native equivalent)')
     return _acquire(registry, model_id, assets, {'kind': 'import'}, pipeline)
 
 
@@ -208,13 +267,16 @@ def import_assets(registry, model_id, *, directory, pipeline, alias=False):
     """Copy or alias an explicitly selected, complete caller-prepared file set."""
     catalog = curated_catalog.load_catalog(pipeline)
     directory = Path(directory).expanduser().absolute()
-    assets = [dict(logical_path=asset['path'], source_path=str(directory / asset['path']),
-                   ownership='reference' if alias else 'owned', role=asset['role'])
-              for asset in catalog.assets
-              if asset['required'] or os.path.lexists(directory / asset['path'])]
+    declarations = [asset for asset in catalog.assets
+                    if asset['required'] or os.path.lexists(directory / asset['path'])]
+    inputs = tuple(AcquisitionInput(f'input-{index}', directory / asset['path'])
+                   for index, asset in enumerate(declarations))
+    mappings = tuple(RuntimeMapping(asset['role'], asset['path'], 'reference' if alias else 'owned',
+                                   input_id=item.input_id)
+                     for asset, item in zip(declarations, inputs))
+    assets = _mapped_assets(inputs, mappings)
     provenance = dict(kind='import', format=1, asset_contract=catalog.contract,
                       pipeline=pipeline, source={'kind': 'caller-prepared'})
-    hem_display.emit('Local acquisition/presence checks only; native loading remains unprobed')
     return _acquire(registry, model_id, assets, provenance, pipeline)
 
 
@@ -239,12 +301,13 @@ def download(registry, recipe_id, *, model_id, pipeline=None, offline=False, dry
         raise InvalidInput(str(exc).replace('loom-serve-setup models', 'loom-control model')) from exc
     offline = offline or os.environ.get('HF_HUB_OFFLINE', '').upper() in ('1', 'ON', 'YES', 'TRUE')
     files = [model_download.source_status(source) for source in sources]
-    paths = [Path(item['cache_path']) for item in files]
     named = 'sources' in recipe
-    assets = ([dict(logical_path=source['filename'], source_path=str(path),
-                    ownership='reference', role=source['role'])
-               for source, path in zip(sources, paths)] if named
-              else _assets(paths[:-1], paths[-1], True))
+    inputs = model_download.acquisition_inputs(sources)
+    try:
+        mappings = model_download.runtime_mappings(recipe, sources) if named else ()
+    except ModelImportError as error:
+        raise InvalidInput(str(error)) from error
+    assets = (_mapped_assets(inputs, mappings) if named else _qwen_assets(inputs, True))
     selected = pipeline or recipe['pipeline']
     commands = [['hf', 'download', source['repo_id'], source['filename'], '--revision',
                  source['revision'], '--cache-dir', str(model_download.cache_root())] for source in sources]
@@ -269,39 +332,19 @@ def download(registry, recipe_id, *, model_id, pipeline=None, offline=False, dry
         if recipe['id'] != 'moonshine-streaming-tiny' or selected != recipe['pipeline']:
             raise InvalidInput('Unsupported named preparation recipe or pipeline override')
         from . import moonshine_preparation
-        generated = registry.root / 'models' / model_id / 'rotary.safetensors'
-        assets.append(dict(role='rotary', logical_path='rotary.safetensors',
-                           ownership='owned', source_path=str(generated)))
+        generated_mappings = tuple(RuntimeMapping(item['role'], item['path'], 'owned',
+                                                   generated_role=item['role'])
+                                   for item in recipe['generated'])
+        if tuple((item.generated_role, item.logical_path) for item in generated_mappings) != moonshine_preparation.GENERATED:
+            raise InvalidInput('Named preparation outputs differ from the fixed adapter contract')
+        assets = _mapped_assets(inputs, (*mappings, *generated_mappings),
+                                generated_directory=registry.root / 'models' / model_id)
         provenance = dict(kind='download', format=1, pipeline=selected,
                           asset_contract=recipe['asset_contract'], source=recipe,
                           preparation=dict(revision=moonshine_preparation.REVISION,
                                            files=moonshine_preparation.TOOL_FILES))
-        with registry.lock('model', model_id):
-            record = registry.prepare_model(model_id, assets=assets, provenance=provenance)
-            pending = record['pending']
-            stage = Path(pending['path']) if pending and pending['stage'] == 'staging' else None
-            needs_rotary = stage is not None and stage.exists() and not os.path.lexists(stage / 'rotary.safetensors')
-            if needs_rotary:
-                moonshine_preparation.preflight()  # Before network acquisition.
-            obtain()
-            if needs_rotary:
-                rotary = moonshine_preparation.prepare(registry, record)
-                try:
-                    _atomic_file(stage / 'rotary.safetensors', lambda stream: stream.write(rotary.read_bytes()))
-                except OSError as error:
-                    raise HemError(f'Could not stage prepared rotary; incomplete acquisition retained: {error}') from error
-            elif stage is None or not stage.exists():
-                # This includes a crash after directory rename but before DB publication.
-                _generated_receipt(record)
-            if stage is not None:
-                try:
-                    _populate(record)
-                    if stage.exists():
-                        _generated_receipt(record, stage, create=True)
-                except OSError as error:
-                    raise HemError(f'Could not populate model; incomplete acquisition retained: {error}') from error
-                registry.publish_model(model_id)
-            return _qualify(registry, model_id, selected)
+        return _acquire(registry, model_id, assets, provenance, selected, obtain,
+                        inputs=inputs, generated=generated_mappings, preparer=moonshine_preparation)
     return _acquire(registry, model_id, assets, {'kind': 'download', 'recipe': recipe}, selected, obtain)
 
 

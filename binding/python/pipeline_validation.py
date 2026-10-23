@@ -1,8 +1,4 @@
-"""Validate model assets against registered Loom pipeline implementations.
-
-This module deliberately knows about pipeline identifiers, not model families.
-Pipeline-specific compatibility checks live in adapters registered here.
-"""
+"""Validate model assets against fixed packaged Loom pipeline contracts."""
 
 from __future__ import annotations
 
@@ -12,15 +8,15 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Protocol, Optional
+from typing import Optional
 import sys
 import threading
 
 from . import curated_catalog
 from .runtime_paths import runtime_cache_dir
-from .gguf import GGUF, inspect_gguf_set
+from .gguf import GGUF
 from .model_store import ModelFiles
-from .qwen_validation import compare_gguf, compare_tokenizer, load_profile
+from .qwen_validation import compare_profile, inspect_model, load_profile
 
 
 @dataclass(frozen=True)
@@ -33,28 +29,23 @@ class ValidationResult:
     inspection: Optional[GGUF] = None
 
 
-class Pipeline(Protocol):
-    """A selected pipeline's model compatibility check."""
-
-    identifier: str
-
-    def validate(self, model: ModelFiles, *, tokenizer_data: Optional[dict] = None) -> ValidationResult: ...
-
-
-_PIPELINES: dict[str, Pipeline] = {}
 _QWEN_CATALOGS = {"qwen": "qwen_27b", "qwen-08b": "qwen_08b"}
+
+
+def catalog_roots(pipeline: str) -> tuple[Path, ...]:
+    """Authoritative installed/source roots for an existing pipeline family."""
+    if pipeline in curated_catalog.CATALOGS:
+        return curated_catalog.catalog_roots()
+    package = Path(__file__).resolve().parent
+    return package / "loom-pipeline", package.parents[1] / "loom-pipeline"
 
 
 def resolve_catalog(pipeline: str) -> Path:
     """Resolve an explicitly selected catalog in source or installed layouts."""
     if pipeline in curated_catalog.CATALOGS:
         return curated_catalog.catalog_path(pipeline)
-    package = Path(__file__).resolve().parent
     relative = Path("qwen") / _QWEN_CATALOGS[pipeline] if pipeline in _QWEN_CATALOGS else Path(pipeline)
-    candidates = (
-        package / "loom-pipeline" / "llm" / relative,
-        package.parents[1] / "loom-pipeline" / "llm" / relative,
-    )
+    candidates = tuple(root / "llm" / relative for root in catalog_roots(pipeline))
     for candidate in candidates:
         if candidate.is_dir():
             return candidate.resolve()
@@ -140,16 +131,9 @@ def mtp_enabled(catalog: Path, requested: bool | None = None) -> bool:
     return supported if requested is None else requested
 
 
-def register_pipeline(pipeline: Pipeline) -> None:
-    """Register a pipeline implementation by its stable CLI identifier."""
-    if not pipeline.identifier or pipeline.identifier in _PIPELINES:
-        raise ValueError(f"Pipeline identifier is empty or already registered: {pipeline.identifier!r}")
-    _PIPELINES[pipeline.identifier] = pipeline
-
-
 def available_pipelines() -> tuple[str, ...]:
-    """Return the registered pipeline identifiers in stable order."""
-    return tuple(sorted(set(_PIPELINES) | set(curated_catalog.CATALOGS)))
+    """Return the fixed packaged pipeline identifiers in stable order."""
+    return tuple(sorted(set(_QWEN_CATALOGS) | set(curated_catalog.CATALOGS)))
 
 
 def validate_model(
@@ -157,9 +141,8 @@ def validate_model(
     pipeline: str,
     *, tokenizer_data: Optional[dict] = None,
 ) -> ValidationResult:
-    """Inspect local model files with the selected registered pipeline."""
-    implementation = _PIPELINES.get(pipeline)
-    if implementation is None:
+    """Inspect local model files with the selected Qwen contract."""
+    if pipeline not in _QWEN_CATALOGS:
         choices = ", ".join(available_pipelines()) or "none registered"
         return ValidationResult(
             False, pipeline, f"Unknown pipeline {pipeline!r}. Available pipelines: {choices}."
@@ -181,44 +164,54 @@ def validate_model(
     worker = threading.Thread(target=heartbeat, daemon=True)
     worker.start()
     try:
-        return implementation.validate(model, tokenizer_data=tokenizer_data)
+        return _validate_qwen(model, pipeline, tokenizer_data=tokenizer_data)
     finally:
         done.set()
         worker.join()
 
 
-class _QwenPipeline:
-    """Header-only compatibility with the packaged Qwen architecture contract."""
-
-    def __init__(self, identifier: str = "qwen"):
-        self.identifier = identifier
-
-    def validate(self, model: ModelFiles, *, tokenizer_data: Optional[dict] = None) -> ValidationResult:
-        try:
-            profile = load_profile(resolve_catalog(self.identifier))
-            weights = inspect_gguf_set(model.gguf_paths)
-            problems = compare_gguf(weights, profile) + compare_tokenizer(model.tokenizer, profile, data=tokenizer_data)
-        except (OSError, ValueError) as exc:
-            return ValidationResult(False, self.identifier, f"Could not inspect Qwen model assets: {exc}")
-        if problems:
-            details = "\n".join(f"  - {problem}" for problem in problems[:32])
-            if len(problems) > 32:
-                details += f"\n  - ... {len(problems) - 32} additional mismatches"
-            return ValidationResult(
-                False, self.identifier,
-                f"Model does not match {profile['identifier']} ({len(problems)} mismatches):\n{details}",
-            )
+def _validate_qwen(
+    model: ModelFiles, pipeline: str, *, tokenizer_data: Optional[dict] = None,
+) -> ValidationResult:
+    """Present shared inspection/comparison through the public validation result."""
+    try:
+        profile = load_profile(resolve_catalog(pipeline))
+        inspection = inspect_model(model, tokenizer_data=tokenizer_data)
+        problems = compare_profile(inspection, profile)
+    except (OSError, UnicodeError, ValueError) as exc:
+        return ValidationResult(False, pipeline, f"Could not inspect Qwen model assets: {exc}")
+    if problems:
+        details = "\n".join(f"  - {problem}" for problem in problems[:32])
+        if len(problems) > 32:
+            details += f"\n  - ... {len(problems) - 32} additional mismatches"
         return ValidationResult(
-            True, self.identifier,
-            f"Model matches {profile['identifier']}: {profile['base_layer_count']} base layers "
-            f"{'and MTP' if profile['mtp_layer'] is not None else 'without MTP'}, "
-            f"{len(weights.tensors)} tensors checked from GGUF descriptors; matching tokenizer configuration.",
-            inspection=weights,
+            False, pipeline,
+            f"Model does not match {profile['identifier']} ({len(problems)} mismatches):\n{details}",
         )
+    return ValidationResult(
+        True, pipeline,
+        f"Model matches {profile['identifier']}: {profile['base_layer_count']} base layers "
+        f"{'and MTP' if profile['mtp_layer'] is not None else 'without MTP'}, "
+        f"{len(inspection.weights.tensors)} tensors checked from GGUF descriptors; matching tokenizer configuration.",
+        inspection=inspection.weights,
+    )
 
 
-for _identifier in _QWEN_CATALOGS:
-    register_pipeline(_QwenPipeline(_identifier))
+def text_definition(
+    model: ModelFiles, modules: CatalogModules, *, rows: int,
+    context_capacity: int, pool_capacity: int, prefill_capacity: int, draft_depth: int,
+) -> dict:
+    """Assemble explicit text fields; callers own validation/defaults/envelopes."""
+    return {
+        "kind": "text", "prepare": modules.prepare, "control": modules.control,
+        "sources": list(modules.providers),
+        # Preserve parser-selecting extensions on symlinked model assets.
+        "weights": str(model.weights.absolute()),
+        "tokenizer": str(model.tokenizer.absolute()),
+        "rows": rows, "context_capacity": context_capacity,
+        "pool_capacity": pool_capacity, "prefill_capacity": prefill_capacity,
+        "draft_depth": draft_depth, "options": {},
+    }
 
 
 def deployment_for_model(
@@ -233,16 +226,9 @@ def deployment_for_model(
     if pool_capacity <= 0:
         raise ValueError("The pinned Loom Serve runtime requires positive --pool-capacity")
     modules = catalog_modules(catalog)
-    definition = {
-        "kind": "text", "prepare": modules.prepare, "control": modules.control,
-        "sources": list(modules.providers),
-        # Preserve parser-selecting extensions on symlinked model assets.
-        "weights": str(model.weights.absolute()),
-        "tokenizer": str(model.tokenizer.absolute()),
-        "rows": rows, "context_capacity": context_capacity,
-        "pool_capacity": pool_capacity, "prefill_capacity": prefill_capacity,
-        "draft_depth": draft_depth, "options": {},
-    }
+    definition = text_definition(model, modules, rows=rows, context_capacity=context_capacity,
+                                 pool_capacity=pool_capacity, prefill_capacity=prefill_capacity,
+                                 draft_depth=draft_depth)
     document = {"name": model_id, "device": 0,
                 "base_directory": str(catalog.absolute()), "definition": definition}
     content = json.dumps(document, indent=2) + "\n"

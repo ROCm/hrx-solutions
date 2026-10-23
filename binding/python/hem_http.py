@@ -30,7 +30,8 @@ class NativeResponse:
         try:
             return json.loads(self.body)
         except (ValueError, UnicodeError) as error:
-            raise HemError("native response is not valid JSON", accepted=self.accepted) from error
+            raise HemError("native response is not valid JSON", accepted=self.accepted,
+                           status=self.status, reason="invalid_json") from error
 
 
 class NativeClient:
@@ -133,7 +134,8 @@ class NativeClient:
             if max_response_bytes is not None and len(payload) > max_response_bytes:
                 raise HemError(
                     f"native HTTP response exceeds {max_response_bytes} bytes",
-                    accepted=(200 <= status < 300) if method == "POST" else None)
+                    accepted=(200 <= status < 300) if method == "POST" else None,
+                    status=status, reason="response_too_large")
             if 200 <= status < 300:
                 return NativeResponse(status, payload, True if method == "POST" else None)
             diagnostic = payload.decode('utf-8', errors='replace')
@@ -141,12 +143,14 @@ class NativeClient:
                 if secret:
                     diagnostic = diagnostic.replace(secret, "<redacted>")
             raise HemError(f"native HTTP {status}: {diagnostic}",
-                           accepted=False if method == "POST" else None)
+                           accepted=False if method == "POST" else None,
+                           status=status, reason="http_status")
         except UncertainOutcome as error:
             # The post-response identity check can be uncertain even though
             # this socket already delivered an authoritative acknowledgment.
             if method == "POST" and status is not None:
                 error.accepted = 200 <= status < 300
+            error.status = status
             raise
         except (OSError, http.client.HTTPException, DeadlineExpired) as error:
             if method == "POST" and submitted:
@@ -156,15 +160,28 @@ class NativeClient:
                         budget.remaining()
                     except DeadlineExpired:
                         raise DeadlineExpired("native accepted request; response incomplete at deadline",
-                                              accepted=True) from error
-                    raise HemError("native accepted request but response body was lost; inspect status", accepted=True) from error
+                                              accepted=True, status=status,
+                                              reason="response_incomplete") from error
+                    raise HemError("native accepted request but response body was lost; inspect status",
+                                   accepted=True, status=status,
+                                   reason="response_incomplete") from error
                 if status is not None and status >= 400:
-                    raise HemError(f"native HTTP {status}; error response body was lost", accepted=False) from error
+                    raise HemError(f"native HTTP {status}; error response body was lost", accepted=False,
+                                   status=status, reason="response_incomplete") from error
                 raise UncertainOutcome("native mutation response lost; inspect before retrying",
-                                       accepted=None) from error
-            budget.remaining()
+                                       accepted=None, status=status,
+                                       reason="response_incomplete") from error
+            try:
+                budget.remaining()
+            except DeadlineExpired as expired:
+                expired.status = status
+                expired.reason = "response_incomplete" if status is not None else "connection_failed"
+                raise
             raise HemError(f"native HTTP observation/connection failed: {error}",
-                           accepted=False if method == "POST" else None) from error
+                           accepted=False if method == "POST" else None,
+                           status=status, reason=("connection_refused" if
+                               isinstance(error, ConnectionRefusedError) else
+                               "connection_failed")) from error
         finally:
             if timer is not None:
                 timer.cancel()
@@ -217,7 +234,8 @@ class NativeClient:
                     # Acceptance does not establish completion. A failed or
                     # invalid observation cannot tell us the mutation's outcome.
                     raise UncertainOutcome(
-                        f"native completion observation failed: {error}", accepted=accepted) from error
+                        f"native completion observation failed: {error}", accepted=accepted,
+                        status=error.status, reason=error.reason) from error
                 first = False
                 if predicate(document):
                     return document

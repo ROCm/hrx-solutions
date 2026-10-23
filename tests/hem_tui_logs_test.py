@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from binding.python import hem_tui, hem_tui_logs
-from binding.python.hem_common import HemError
+from binding.python.hem_common import HemError, UncertainOutcome
 from binding.python.hem_state import Registry
 
 
@@ -387,7 +387,7 @@ class SourceTest(unittest.IsolatedAsyncioTestCase):
     async def test_native_malformed_oversized_and_changed_without_409_do_not_advance(self):
         replies = [(200, native_batch((), 0)),
                    (200, b"not-json\n"),
-                   (200, b"x" * (hem_tui_logs.MAX_NATIVE_LOG_BYTES + 1)),
+                   (409, b"x" * (hem_tui_logs.MAX_NATIVE_LOG_BYTES + 1)),
                    (200, native_batch((), 0, identity="200:1"))]
         with endpoint(replies) as (url, _requests):
             self.running_server(url)
@@ -418,6 +418,55 @@ class SourceTest(unittest.IsolatedAsyncioTestCase):
                 restarted = await source.poll()
         self.assertEqual(reset.entries[0].kind, "reset")
         self.assertEqual(restarted.entries[0].kind, "reset")
+
+    async def test_native_rejection_with_uncertain_ownership_retains_cursor(self):
+        class UncertainAfterLogs(FakePinned):
+            checks = 0
+
+            def verify(self, _deadline=None):
+                self.checks += 1
+                if self.checks == 2:
+                    raise UncertainOutcome("response ownership is unknown")
+
+        with endpoint([(200, native_batch((), 0)), (409, b"cursor changed")]) as (url, requests):
+            self.running_server(url)
+            self.registry.create_instance(
+                "local", "launch-one", "chat", incarnation=17)
+            source = hem_tui_logs.LocalLogProvider(
+                self.root, timeout=2).open_source(observation("model"))
+            with patch.object(hem_tui_logs, "PinnedProcess", return_value=FakePinned()):
+                await source.poll()
+            cursor = source._cursor
+            pinned = UncertainAfterLogs()
+            with patch.object(hem_tui_logs, "PinnedProcess", return_value=pinned):
+                unavailable = await source.poll()
+            self.assertEqual(unavailable.entries[0].kind, "unavailable")
+            self.assertEqual(source._cursor, cursor)
+            self.assertFalse(source._reset_pending)
+            self.assertEqual(pinned.checks, 2)
+        self.assertEqual(len([path for path, _ in requests if path == "/logz"]), 2)
+
+    async def test_native_cursor_policy_uses_metadata_instead_of_diagnostic_prose(self):
+        replies = [(200, native_batch((), 0))]
+        with endpoint(replies) as (url, requests):
+            self.running_server(url)
+            self.registry.create_instance(
+                "local", "launch-one", "chat", incarnation=17)
+            source = hem_tui_logs.LocalLogProvider(
+                self.root, timeout=2).open_source(observation("model"))
+            with patch.object(hem_tui_logs, "PinnedProcess", return_value=FakePinned()):
+                await source.poll()
+                with patch.object(hem_tui_logs.NativeClient, "logs", side_effect=HemError(
+                        "cursor no longer usable", status=409, reason="http_status")):
+                    reset = await source.poll()
+                self.assertEqual(reset.entries[0].kind, "reset")
+                source._cursor = "100:1:0"
+                with patch.object(hem_tui_logs.NativeClient, "logs", side_effect=HemError(
+                        "native HTTP 409: misleading diagnostic", reason="connection_failed")):
+                    unavailable = await source.poll()
+                self.assertEqual(unavailable.entries[0].kind, "unavailable")
+                self.assertEqual(source._cursor, "100:1:0")
+        self.assertEqual(len([path for path, _ in requests if path == "/logz"]), 1)
 
     async def test_native_fresh_400_and_409_are_unavailable_not_cursor_resets(self):
         for status in (400, 409):

@@ -7,6 +7,12 @@
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 
+if [[ ${1:-} == --fast ]]; then
+  shift
+  exec env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u LD_PRELOAD -u LD_AUDIT -u LD_LIBRARY_PATH \
+    PYTHONNOUSERSITE=1 python3 -E -s "$repo/build_tools/wheel_tools/host_wheel.py" "$@"
+fi
+
 cache_args=(--env HRX_BAZEL_CACHE_ENABLED=0)
 if [[ -n "${HRX_BAZEL_CACHE_DIR:-}" && ${HRX_BAZEL_CACHE_ENABLED:-1} != 0 ]]; then
   if result=$(cd -- "$repo" && python3 -m build_tools.ci_tools.wheel_cache prepare --directory "$HRX_BAZEL_CACHE_DIR") &&

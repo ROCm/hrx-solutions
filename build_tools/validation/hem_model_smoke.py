@@ -11,6 +11,7 @@ import os
 import re
 from pathlib import Path
 import site
+import stat
 import shlex
 import sqlite3
 import socket
@@ -19,7 +20,6 @@ import subprocess
 import sys
 import time
 import urllib.request
-import zipfile
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -176,6 +176,38 @@ class Gate:
         self.save()
         return payload
 
+    def owned_coordinator(self):
+        """Admit only this live supervisor's private exact-wheel interpreter."""
+        supplied=getattr(self.args,'coordinator_owner',None)
+        if supplied is None:
+            return None
+        marker=Path(supplied)
+        assert marker.is_absolute() and marker == self.root.parent/'coordinator.json', 'invalid coordinator ownership path'
+        prefix=self.root.parent/'venv'
+        for directory in (self.root.parent,prefix):
+            info=directory.lstat()
+            forbidden=0o077 if directory==self.root.parent else 0o022
+            assert stat.S_ISDIR(info.st_mode) and info.st_uid==os.getuid() and not info.st_mode & forbidden, 'coordinator must be task-owned and private'
+            assert directory.resolve()==directory, 'coordinator directory alias refused'
+        descriptor=os.open(marker,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        with os.fdopen(descriptor,'rb') as stream:
+            info=os.fstat(stream.fileno())
+            assert stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and not info.st_mode & 0o077 and info.st_size<=4096, 'invalid coordinator ownership record'
+            data=stream.read(4097)
+        owner=json.loads(data)
+        assert type(owner) is dict and set(owner)=={'pid','boot_id','start_ticks','python','wheel_sha256'}, 'invalid coordinator ownership fields'
+        assert data==(json.dumps(owner,sort_keys=True)+'\n').encode(), 'noncanonical coordinator ownership record'
+        assert type(owner['pid']) is int and owner['pid']==os.getppid(), 'coordinator supervisor ownership mismatch'
+        assert owner['boot_id']==Path('/proc/sys/kernel/random/boot_id').read_text().strip(), 'coordinator boot identity mismatch'
+        start_ticks=int(Path(f"/proc/{owner['pid']}/stat").read_text().rsplit(')',1)[1].split()[19])
+        assert type(owner['start_ticks']) is int and owner['start_ticks']==start_ticks, 'coordinator supervisor generation mismatch'
+        python=prefix/'bin/python'
+        assert owner['python']==str(python) and Path(sys.prefix)==prefix and Path(sys.executable).absolute()==python, 'coordinator interpreter ownership mismatch'
+        assert owner['wheel_sha256']==self.args.wheel_sha256, 'coordinator wheel ownership mismatch'
+        assert 'include-system-site-packages = false' in (prefix/'pyvenv.cfg').read_text(), 'coordinator must be standalone'
+        assert not self.state_path('a').exists(), 'coordinator A requires fresh isolated state'
+        return python
+
     def setup(self):
         assert sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE
         assert 'PYTHONPATH' not in os.environ and 'PYTHONHOME' not in os.environ
@@ -189,17 +221,22 @@ class Gate:
         package.relative_to(Path(sys.prefix).resolve())
         verify_wheel_payload(self.args.wheel, package)
         self.results['source_parity'] = source_parity(self.args.source, package)
+        coordinator=self.owned_coordinator()
         namespaces = ('a',) if self.args.profile == 'ci08' else ('a', 'b')
         for namespace in namespaces:
             directory = self.root / namespace
             directory.mkdir()
             (self.runtime_root / namespace).mkdir(mode=0o700, exist_ok=True)
-            venv = directory / 'venv'
-            run_child(['python3', '-m', 'venv', str(venv)], check=True)
-            python = venv / 'bin/python'
-            run_child([str(python), '-m', 'pip', 'install', '--disable-pip-version-check', str(self.args.wheel),
-                            *(['huggingface_hub[cli]==0.34.4'] if self.args.acquire08 else [])],
-                           check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if namespace=='a' and coordinator is not None:
+                python=coordinator
+                venv=python.parent.parent
+            else:
+                venv = directory / 'venv'
+                run_child(['python3', '-m', 'venv', str(venv)], check=True)
+                python = venv / 'bin/python'
+                run_child([str(python), '-m', 'pip', 'install', '--disable-pip-version-check', str(self.args.wheel),
+                                *(['huggingface_hub[cli]==0.34.4'] if self.args.acquire08 else [])],
+                               check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             self.states[namespace] = python
             env = dict(os.environ, LOOM_SERVE_DIR=str(self.state_path(namespace)), PYTHONNOUSERSITE='1')
             check = subprocess.check_output([str(python), '-c',
@@ -209,14 +246,8 @@ class Gate:
             package = Path(identity['package']).parent
             native = package / '_native/bin/loom-serve'
             assert native.is_file(), 'native-bearing wheel required'
-            with zipfile.ZipFile(self.args.wheel) as archive:
-                installed = {}
-                for name in archive.namelist():
-                    relative = name.removeprefix('hrx_solutions/')
-                    if name.startswith('hrx_solutions/') and not name.endswith('/') and (relative.startswith('_native/') or relative.startswith('loom-pipeline/') or relative.startswith('hem_')):
-                        assert (package / relative).read_bytes() == archive.read(name), name
-                        installed[relative] = digest(package / relative)
-            self.results[namespace] = dict(identity=identity, installed_parity=installed, native_sha256=digest(native))
+            installed = verify_wheel_payload(self.args.wheel, package)['installed_files']
+            self.results[namespace] = dict(identity=identity, installed_parity=installed, native_sha256=digest(native), reused_coordinator=namespace=='a' and coordinator is not None)
         self.results['source_commit'] = source_commit(self.args.source)
         self.results['wheel_sha256'] = digest(self.args.wheel)
         self.results['native_provenance'] = self.args.native_provenance
@@ -584,6 +615,7 @@ def main():
     parser.add_argument('--wheel', required=True, type=Path)
     parser.add_argument('--wheel-sha256', required=True)
     parser.add_argument('--source', required=True, type=Path)
+    parser.add_argument('--coordinator-owner', type=Path, help='private supervisor interpreter ownership handoff')
     parser.add_argument('--profile', choices=('ci08', 'full'), default='full')
     parser.add_argument('--model08', type=Path)
     parser.add_argument('--model27', type=Path)

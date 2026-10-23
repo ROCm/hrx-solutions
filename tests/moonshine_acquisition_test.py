@@ -10,11 +10,14 @@ import tempfile
 import threading
 import unittest
 from contextlib import redirect_stderr
+from copy import deepcopy
+from dataclasses import replace
 from unittest.mock import patch
 
 from binding.python import hem_cli, hem_instance_cli, hem_models, model_download, moonshine_preparation as preparation
 from binding.python.hem_common import Deadline, HemError
 from binding.python.hem_state import Registry
+from binding.python.model_store import NamedAsset, PreparationResult, RuntimeMapping
 
 
 class MoonshineAcquisitionTest(unittest.TestCase):
@@ -34,11 +37,18 @@ class MoonshineAcquisitionTest(unittest.TestCase):
         self.rotary = self.root / 'generated'
         self.rotary.write_bytes(b'opaque prepared rotary')
         self.preflight = patch.object(preparation, 'preflight').start()
-        self.prepare = patch.object(preparation, 'prepare', return_value=self.rotary).start()
+        self.prepare = patch.object(preparation, 'prepare', side_effect=self.completed).start()
         self.network = patch.object(model_download, '_run_hf', side_effect=AssertionError('unexpected network')).start()
         self.addCleanup(patch.stopall)
         self.stderr = redirect_stderr(io.StringIO())
         self.stderr.__enter__(); self.addCleanup(self.stderr.__exit__, None, None, None)
+
+    def completed(self, inputs, attempt, deadline):
+        deadline.remaining()
+        attempt.output.mkdir()
+        rotary = attempt.output / 'rotary.safetensors'
+        rotary.write_bytes(self.rotary.read_bytes())
+        return PreparationResult(attempt.directory, (NamedAsset('rotary', rotary.name, rotary),))
 
     def acquire(self, name='speech', **kwargs):
         kwargs.setdefault('offline', True)
@@ -76,7 +86,7 @@ class MoonshineAcquisitionTest(unittest.TestCase):
         row = self.registry.get_model('speech')
         self.assertFalse((Path(row['pending']['path']) / 'rotary.safetensors').exists())
         self.assertFalse(Path(row['directory']).exists())
-        self.prepare.side_effect = None
+        self.prepare.side_effect = self.completed
         self.acquire()
         self.assertEqual(hem_models.show(self.registry, 'speech')['state'], 'ready')
 
@@ -98,6 +108,103 @@ class MoonshineAcquisitionTest(unittest.TestCase):
         answer = hem_models.download(None, self.recipe['id'], model_id='preview', dry_run=True)
         self.assertEqual(answer['generated'], [{'role': 'rotary', 'path': 'rotary.safetensors'}])
         self.preflight.assert_not_called(); self.prepare.assert_not_called(); self.network.assert_not_called()
+
+    def test_explicit_source_prefix_and_preparation_only_input_do_not_become_runtime_paths(self):
+        recipe = deepcopy(self.recipe)
+        recipe['sources'][0]['filename'] = 'upstream/model.safetensors'
+        recipe['sources'].append(dict(role='preparation-reference', kind='huggingface',
+            repo_id='example/reference', revision='a' * 40, filename='audio/reference.wav'))
+        sources = model_download._sources(recipe)
+        selected = tuple(RuntimeMapping(asset['role'], asset['filename'], 'reference',
+                                       input_id=f'source-{index}')
+                         for index, asset in enumerate(self.recipe['sources']))
+        mappings = model_download.runtime_mappings(recipe, sources, mappings=selected)
+        assets = hem_models._mapped_assets(model_download.acquisition_inputs(sources), mappings)
+        self.assertEqual([asset['logical_path'] for asset in assets],
+                         ['model.safetensors', 'tokenizer.json', 'config.json'])
+        self.assertTrue(assets[0]['source_path'].endswith('/upstream/model.safetensors'))
+        self.assertNotIn('reference.wav', str(assets))
+        self.prepare.assert_not_called(); self.network.assert_not_called()
+
+    def test_slow_successful_obtain_does_not_consume_helper_allowance(self):
+        clock = [0.0]
+        sources = model_download._sources(self.recipe)
+        for source in sources:
+            model_download._cache_path(source).unlink()
+        events = []
+        def preflight():
+            events.append('preflight')
+            clock[0] += 25
+        def fetch(command):
+            events.append('obtain')
+            clock[0] += 400  # Successful fetch takes longer than the helper cap.
+            source = next(item for item in sources if item['filename'] == command[3])
+            model_download._cache_path(source).write_bytes(b'freshly fetched')
+        def prepare(inputs, attempt, deadline):
+            events.append('prepare')
+            self.assertEqual(deadline.remaining(), preparation.TIMEOUT)
+            return self.completed(inputs, attempt, deadline)
+        def after(seconds):
+            return Deadline(clock[0] + seconds, clock=lambda: clock[0])
+        self.preflight.side_effect = preflight
+        self.network.side_effect = fetch
+        self.prepare.side_effect = prepare
+        with patch.object(hem_models, 'Deadline') as deadline:
+            deadline.after.side_effect = after
+            row = self.acquire(offline=False)
+        self.assertTrue(row['validation']['valid'])
+        self.assertEqual(events, ['preflight', 'obtain', 'obtain', 'obtain', 'prepare'])
+        self.preflight.assert_called_once_with()
+        deadline.after.assert_called_once_with(preparation.TIMEOUT)
+
+    def test_incomplete_foreign_or_aliased_result_never_stages_or_publishes(self):
+        def invalid(kind):
+            def prepare(inputs, attempt, deadline):
+                result = self.completed(inputs, attempt, deadline)
+                output = result.outputs[0]
+                if kind == 'missing':
+                    return replace(result, outputs=())
+                if kind == 'duplicate':
+                    return replace(result, outputs=(output, output))
+                if kind == 'unknown':
+                    return replace(result, outputs=(replace(output, role='unknown'),))
+                if kind == 'foreign-attempt':
+                    return replace(result, attempt_directory=attempt.directory.parent)
+                if kind == 'outside':
+                    return replace(result, outputs=(replace(output, path=self.rotary),))
+                if kind == 'nonregular':
+                    output.path.unlink(); output.path.mkdir()
+                if kind == 'symlink':
+                    output.path.unlink(); output.path.symlink_to(self.rotary)
+                return result
+            return prepare
+        for kind in ('missing', 'duplicate', 'unknown', 'foreign-attempt', 'outside', 'nonregular', 'symlink'):
+            with self.subTest(kind=kind):
+                self.prepare.side_effect = invalid(kind)
+                with self.assertRaisesRegex(HemError, 'Incomplete preparation result'):
+                    self.acquire(name=kind)
+                row = self.registry.get_model(kind)
+                self.assertFalse(Path(row['directory']).exists())
+                self.assertFalse((Path(row['pending']['path']) / 'rotary.safetensors').exists())
+
+    def test_rotary_appearing_during_preparation_is_not_adopted_or_proven(self):
+        def conflicting(inputs, attempt, deadline):
+            result = self.completed(inputs, attempt, deadline)
+            record = self.registry.get_model('speech')
+            stage = Path(record['pending']['path'])
+            (stage / 'rotary.safetensors').write_bytes(b'unrelated staged rotary')
+            return result
+        self.prepare.side_effect = conflicting
+        with self.assertRaisesRegex(HemError, 'Conflicting staged generated'):
+            self.acquire()
+        record = self.registry.get_model('speech')
+        stage = Path(record['pending']['path'])
+        self.assertFalse(Path(record['directory']).exists())
+        self.assertEqual(record['pending']['stage'], 'staging')
+        self.assertEqual((stage / 'rotary.safetensors').read_bytes(), b'unrelated staged rotary')
+        self.assertFalse((stage / hem_models._GENERATED_RECEIPT).exists())
+        # Refusal precedes all population, including the unrelated input aliases.
+        self.assertFalse(any((stage / source['filename']).exists() for source in self.recipe['sources']))
 
     def test_published_missing_generated_file_never_regenerates(self):
         row = self.acquire()
@@ -196,10 +303,20 @@ class MoonshineAcquisitionTest(unittest.TestCase):
 
 
 class PreparationProcessTest(unittest.TestCase):
+    def cached_inputs(self, root):
+        environment = patch.dict(os.environ, {'HF_HUB_CACHE': str(root / 'cache')})
+        environment.start(); self.addCleanup(environment.stop)
+        sources = model_download._sources(model_download.recipe_by_id('moonshine-streaming-tiny'))
+        inputs = model_download.acquisition_inputs(sources)
+        for item in inputs:
+            item.path.parent.mkdir(parents=True, exist_ok=True)
+            item.path.write_bytes(b'opaque input')
+        return inputs
+
     def test_private_attempt_completion_not_launch_document_and_fresh_retry(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            registry = Registry(root / 'state')
+            inputs = self.cached_inputs(root)
             calls = []
             def run(arguments, **kwargs):
                 self.assertEqual(arguments[0], sys.executable)
@@ -216,10 +333,12 @@ class PreparationProcessTest(unittest.TestCase):
                 return 0
             with patch.object(preparation, '_run', side_effect=run):
                 with self.assertRaisesRegex(HemError, 'did not complete'):
-                    preparation.prepare(registry, {'id': 'speech'})
-                rotary = preparation.prepare(registry, {'id': 'speech'})
+                    preparation.prepare(inputs, hem_models._preparation_attempt(root, 'speech'), Deadline.after())
+                result = preparation.prepare(inputs, hem_models._preparation_attempt(root, 'speech'), Deadline.after())
             self.assertNotEqual(calls[0], calls[1])
-            self.assertEqual(rotary.name, 'rotary.safetensors')
+            self.assertEqual(result.outputs[0].logical_path, 'rotary.safetensors')
+            self.assertEqual(result.attempt_directory, calls[1].parent)
+            self.assertEqual(result.facts, ())
             self.assertFalse(json.loads((calls[0].parent / 'receipt.json').read_text())['completed'])
             self.assertTrue(json.loads((calls[1].parent / 'receipt.json').read_text())['completed'])
 

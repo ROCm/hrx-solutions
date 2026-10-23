@@ -7,7 +7,6 @@ import argparse
 import configparser
 import email.parser
 import hashlib
-import json
 import tarfile
 import zipfile
 from collections import defaultdict
@@ -38,15 +37,24 @@ STABLE_RUNTIME_NAMES = {
 }
 ROCM_LIBRARY_PREFIXES = ("libamd", "libhsa", "libroc")
 HEM_MODULES = (
+    "hem_integrations", "hem_client_documents", "hem_openwebui_wire", "hem_openwebui_receipts",
     "hem_arguments", "hem_bootstrap", "hem_cli", "hem_common", "hem_config", "hem_tui",
     "hem_display", "hem_help", "hem_http", "hem_instance_cli", "hem_instances", "hem_render",
-    "hem_model_cli", "hem_models", "hem_pipeline_cli", "hem_process",
+    "hem_model_cli", "hem_models", "hem_model_operations", "hem_operation_targets", "hem_pipeline_cli", "hem_process",
     "hem_server_cli", "hem_shutdown", "hem_state", "hem_pi_assets",
     "hem_pi_cli", "hem_pi_contracts", "hem_pi", "hem_pi_endpoints",
     "hem_pi_files", "hem_pi_state",
 )
 PI_ASSETS = ("index.ts", "discovery.ts", "budgets.ts", "stream.ts",
              "profile.json", "package.json")
+# Independent authored resource inventory; do not derive acceptance from installers.
+CLIENT_ASSETS = (
+    "native_protocol.ts",
+    "omp_extension/index.ts", "omp_extension/discovery.ts", "omp_extension/installation.ts",
+    "omp_extension/activation.ts", "omp_extension/stream.ts", "omp_extension/profile.json", "omp_extension/package.json",
+    "opencode_plugin/index.ts", "opencode_plugin/discovery.ts", "opencode_plugin/installation.ts",
+    "opencode_plugin/profile.json", "opencode_plugin/package.json",
+)
 OBSOLETE_MODULES = (
     "setup_cli", "serve_start", "connection_manager", "server_manager",
     "remote_registry", "state_store",
@@ -69,6 +77,19 @@ def validate_pi_sdist(path: Path) -> None:
             expected = (REPO_ROOT / "binding/python/pi_extension" / name).read_bytes()
             if matches[0].size != len(expected) or archive.extractfile(matches[0]).read() != expected:
                 raise RuntimeError("sdist Pi asset differs from reviewed source: " + name)
+
+
+def validate_client_sdist(path: Path) -> None:
+    """Client generations are materialized from these exact authored resources."""
+    with tarfile.open(path) as archive:
+        for name in CLIENT_ASSETS:
+            suffix = "/binding/python/" + name
+            matches = [member for member in archive.getmembers() if member.name.endswith(suffix)]
+            if len(matches) != 1 or not matches[0].isfile():
+                raise RuntimeError("sdist is missing or duplicates client asset: " + name)
+            expected = (REPO_ROOT / "binding/python" / name).read_bytes()
+            if matches[0].size != len(expected) or archive.extractfile(matches[0]).read() != expected:
+                raise RuntimeError("sdist client asset differs from reviewed source: " + name)
 
 
 def validate_wheel(path: Path) -> tuple[int, int]:
@@ -134,6 +155,7 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         }
         required_files.update(PACKAGE_PREFIX + name + ".py" for name in HEM_MODULES)
         required_files.update(PACKAGE_PREFIX + "pi_extension/" + name for name in PI_ASSETS)
+        required_files.update(PACKAGE_PREFIX + name for name in CLIENT_ASSETS)
         required_files.update(target.split(":")[0].replace(".", "/") + ".py"
                               for target in REQUIRED_ENTRY_POINTS.values())
         for architecture in ("qwen_27b", "qwen_08b"):
@@ -150,6 +172,12 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             expected = (REPO_ROOT / "binding/python/pi_extension" / name).read_bytes()
             if wheel.read(member) != expected:
                 raise RuntimeError("wheel Pi asset differs from reviewed source: " + member)
+
+        for name in CLIENT_ASSETS:
+            member = PACKAGE_PREFIX + name
+            expected = (REPO_ROOT / "binding/python" / name).read_bytes()
+            if wheel.namelist().count(member) != 1 or wheel.read(member) != expected:
+                raise RuntimeError("wheel client asset duplicates or differs from reviewed source: " + member)
 
         obsolete_checkers = sorted(
             name for name in names
@@ -175,44 +203,8 @@ def validate_wheel(path: Path) -> tuple[int, int]:
 
         if any(name.endswith(".loom") for name in names):
             raise RuntimeError("wheel must not contain executable .loom sources")
-        inventory = REPO_ROOT / "loom-pipeline/catalog_sources.bzl"
-        loom_catalog.validate_catalog(inventory)
-        variants = loom_catalog.variants(inventory)
-        build_name = PIPELINE_PREFIX + "catalog-build.json"
-        if build_name not in names:
-            raise RuntimeError("wheel is missing catalog build hashes")
-        build = json.loads(wheel.read(build_name))
-        if build.get("format") != 2 or set(build.get("variants", {})) != set(variants):
-            raise RuntimeError("wheel catalog build inventory does not match authored variants")
-        allowed = {build_name, PIPELINE_PREFIX + "LICENSE-APACHE-2.0"}
-        root = inventory.parent / "llm"
-        if wheel.read(PIPELINE_PREFIX + "LICENSE-APACHE-2.0") != (root / "LICENSE-APACHE-2.0").read_bytes():
-            raise RuntimeError("wheel catalog license does not match authored license")
-        for architecture, variant in variants.items():
-            relative = f"qwen/{architecture}/"
-            name = PIPELINE_PREFIX + variant["output"]
-            content = wheel.read(name)
-            digest = hashlib.sha256(content).hexdigest()
-            expected = {
-                "identifier": variant["identifier"],
-                "sources": {source: hashlib.sha256((root / source).read_bytes()).hexdigest()
-                            for source in variant["sources"]},
-                "bytecode_sha256": digest,
-            }
-            if not content.startswith(b"LOOM") or build["variants"][architecture] != expected:
-                raise RuntimeError(f"wheel catalog source/bytecode hash mismatch: {name}")
-            descriptor = PIPELINE_PREFIX + relative + "pipeline.json"
-            if json.loads(wheel.read(descriptor)) != {
-                    "format": 1, "variant": variant["identifier"],
-                    "module": "pipeline.loombc", "sha256": digest}:
-                raise RuntimeError(f"wheel catalog descriptor mismatch: {descriptor}")
-            profile = PIPELINE_PREFIX + relative + "compatibility.json"
-            if wheel.read(profile) != (root / relative / "compatibility.json").read_bytes():
-                raise RuntimeError(f"wheel compatibility profile mismatch: {profile}")
-            allowed.update({name, descriptor, profile})
-        actual = {name for name in names if name.startswith(PIPELINE_PREFIX) and not name.endswith("/")}
-        if actual != allowed:
-            raise RuntimeError(f"wheel catalog file inventory mismatch: extra={sorted(actual-allowed)}, missing={sorted(allowed-actual)}")
+        # Required-family acceptance is independent of producer selection.
+        loom_catalog.validate_archive(wheel, REPO_ROOT)
 
         moonshine_catalog.validate_archive(wheel, REPO_ROOT)
         moonshine_preparer.validate_archive(wheel)
@@ -266,6 +258,7 @@ def main() -> int:
     count, size = validate_wheel(args.wheel)
     if args.sdist:
         validate_pi_sdist(args.sdist)
+        validate_client_sdist(args.sdist)
         with tarfile.open(args.sdist) as source_archive:
             moonshine_catalog.validate_source_archive(source_archive, REPO_ROOT)
     print(f"Validated {args.wheel}: {count} native libraries, {size} bytes")

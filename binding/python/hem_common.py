@@ -16,10 +16,13 @@ class HemError(Exception):
 
     exit_code = 1
 
-    def __init__(self, message: str, *, accepted: Optional[bool] = None):
+    def __init__(self, message: str, *, accepted: Optional[bool] = None,
+                 status: Optional[int] = None, reason: Optional[str] = None):
         super().__init__(message)
         # True: acknowledged; False: known rejected; None: not established.
         self.accepted = accepted
+        # Optional transport facts, independent of human-facing diagnostics.
+        self.status, self.reason = status, reason
 
 
 class InvalidInput(HemError):

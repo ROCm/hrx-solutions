@@ -29,8 +29,8 @@ try{
  const config={schema_version:1,generation:randomUUID(),integration_id:randomUUID(),target,hem_root:state,endpoint_file:join(state,'clients','endpoints.json'),native_models_file:join(target,'models.yml')};
  const stanza=`  # loom-control omp begin ${config.integration_id} ${provider}\n  ${provider}:\n    auth: none\n  # loom-control omp end ${config.integration_id} ${provider}\n`;
  const manifest={schema_version:1,integration_version:1,enabled:true,generation:config.generation,integration_id:config.integration_id,target,artifacts:{},native_activation:{heading:null,path:config.native_models_file,providers:{[provider]:{ownership:'owned',sha256:createHash('sha256').update(stanza).digest('hex')}}}};
- const assetNames=['index.ts','installation.ts','discovery.ts','activation.ts','stream.ts','profile.json','package.json'];
- for(const name of assetNames)copyFileSync(join(assets,name),join(directory,name));
+ const assetNames=['index.ts','installation.ts','discovery.ts','native_protocol.ts','activation.ts','stream.ts','profile.json','package.json'];
+ for(const name of assetNames)copyFileSync(name==='native_protocol.ts'?join(assets,'..',name):join(assets,name),join(directory,name));
  writeFileSync(join(directory,'config.json'),JSON.stringify(config));
  for(const name of [...assetNames,'config.json'])manifest.artifacts[name]=createHash('sha256').update(readFileSync(join(directory,name))).digest('hex');
  const {validateInstallation}=await import(pathToFileURL(join(directory,'installation.ts')));

@@ -22,7 +22,8 @@ curl -fL https://github.com/bazelbuild/bazelisk/releases/download/v1.29.0/bazeli
 echo "5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992  $BAZEL" | sha256sum --check
 chmod +x "$BAZEL"
 
-HRX_SOURCE_DIR=$("$HRX_BUILD_PYTHON" -c 'from build_tools.wheel_tools.python_packaging import discover_bazel, discover_hrx_source; print(discover_hrx_source(discover_bazel()))')
+# Source discovery precedes ROCm fetching/configuration, so bootstrap has no build options.
+HRX_SOURCE_DIR=$("$HRX_BUILD_PYTHON" -c 'from build_tools.wheel_tools.python_packaging import BazelBuildContext, REPO_ROOT, bazel_environment, discover_bazel, discover_hrx_source; print(discover_hrx_source(BazelBuildContext(discover_bazel(), REPO_ROOT, (), bazel_environment())))')
 export HRX_SOURCE_DIR
 source .github/scripts/fetch_rocm_toolchain.sh
 "$CC" --version

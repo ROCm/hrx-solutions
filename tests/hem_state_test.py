@@ -91,6 +91,28 @@ class StateTest(unittest.TestCase):
         with self.assertRaisesRegex(HemError, "schema"):
             Registry(malformed)
 
+    def test_stored_record_keeps_json_admission_and_sql_revision_authority(self):
+        self.registry.create_server('saved', saved_settings={'device': 'cpu'})
+        with sqlite3.connect(self.registry.database) as database:
+            data = database.execute("SELECT data FROM servers WHERE id='saved'").fetchone()[0]
+            record = json.loads(data)
+            record.update(revision=-99, extra={'preserved': [1, True, None]})
+            data = json.dumps(record).replace('"phase": "stopped"', '"phase": "ignored", "phase": "stopped"')
+            self.assertEqual(data.count('"phase":'), 2)
+            database.execute("UPDATE servers SET revision=17,data=? WHERE id='saved'", (data,))
+        current = self.registry.get_server('saved')
+        self.assertEqual(current['revision'], 17)
+        self.assertEqual(current['phase'], 'stopped')
+        self.assertEqual(current['extra'], {'preserved': [1, True, None]})
+        # Unknown fields remain admitted, but their nested values must be finite.
+        record['extra']['nonfinite'] = float('nan')
+        with sqlite3.connect(self.registry.database) as database:
+            database.execute("UPDATE servers SET data=? WHERE id='saved'", (json.dumps(record),))
+        before = self.registry.database.read_bytes()
+        with self.assertRaisesRegex(HemError, 'corrupt state record; inventory retained'):
+            self.registry.get_server('saved')
+        self.assertEqual(self.registry.database.read_bytes(), before)
+
     def test_exception_and_process_death_roll_back_transaction(self):
         self.registry.create_server("saved", saved_settings={"original": True})
         with self.assertRaises(RuntimeError):

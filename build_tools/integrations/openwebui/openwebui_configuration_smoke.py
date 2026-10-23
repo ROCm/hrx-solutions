@@ -394,6 +394,7 @@ def main():
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--wheel', type=Path, required=True)
     parser.add_argument('--wheel-sha256', required=True)
+    parser.add_argument('--coordinator-owner', type=Path, help='private supervisor interpreter ownership handoff')
     parser.add_argument('--model08', type=Path, required=True)
     parser.add_argument('--webui-python', type=Path)
     parser.add_argument('--webui-backend', type=Path)

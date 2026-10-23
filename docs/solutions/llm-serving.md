@@ -191,9 +191,13 @@ incarnation has all of these values:
 | --- | --- |
 | `registration` | `"ready"` |
 | `parameter_operation` | `"idle"` |
-| `parameters.active` | `true` |
+| Primary activation | `parameters.primary.active == true` when `primary` exists; otherwise legacy `parameters.active == true` |
 | `status.admission` | `"drained"` |
 | `error` | Absent or `null` |
+
+The flat activation field is a compatibility fallback only when the `primary`
+key is absent. A null, malformed or inactive primary does not fall back to the
+flat field; an active auxiliary component alone does not prove readiness.
 
 While preparation is running, keep waiting within that budget. On an error,
 missing/replaced registration or timeout, stop here and inspect terminal A;

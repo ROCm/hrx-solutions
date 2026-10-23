@@ -7,19 +7,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
 import re
 import sys
 import tempfile
+from types import MappingProxyType
 from typing import Mapping, Optional
 
 from . import curated_catalog
-from .gguf import inspect_gguf_set
-from .hem_common import HemError, InvalidInput
+from .hem_common import Deadline, HemError, InvalidInput
 from .model_store import CatalogAssets, ModelFiles
-from .pipeline_validation import available_pipelines, catalog_modules, resolve_catalog
-from .qwen_validation import compare_gguf, compare_tokenizer, load_profile
+from .pipeline_validation import available_pipelines, catalog_modules, catalog_roots, resolve_catalog, text_definition
+from .qwen_validation import compare_profile, inspect_model, load_profile
 
 # Bounds in pinned configuration.c and Qwen prepare.loom, not memory-fit promises.
 # Meanings: pinned server/configuration.h and service/text/{model,packing}.h.
@@ -112,26 +113,16 @@ def select_pipeline(model: ModelFiles, pipeline: Optional[str] = None) -> str:
     if pipeline is not None and pipeline not in available_pipelines():
         raise InvalidInput(f"Unknown pipeline {pipeline!r}; choose from {', '.join(available_pipelines())}")
     try:
-        inspection = inspect_gguf_set(model.gguf_paths)
-        if model.weights not in model.gguf_paths or len(model.gguf_paths) > 1:
-            if not str(model.weights).endswith(".safetensors.index.json"):
-                raise ValueError("Fragmented weights require a .safetensors.index.json native index")
-            index = json.loads(Path(model.weights).read_text(encoding="utf-8"))
-            weight_map = index.get("weight_map") if isinstance(index, dict) else None
-            expected = {name: Path(path).absolute() for name, path in inspection.tensor_files.items()}
-            actual = ({name: (model.weights.parent / path).absolute() for name, path in weight_map.items()}
-                      if isinstance(weight_map, dict) and all(isinstance(path, str) for path in weight_map.values()) else {})
-            if actual != expected:
-                raise ValueError("Native weights index does not match inspected GGUF tensor mappings")
-        tokenizer = json.loads(Path(model.tokenizer).read_text(encoding="utf-8"))
+        inspection = inspect_model(model, native_index=True)
+        if inspection.tokenizer_error is not None:
+            raise ValueError(inspection.tokenizer_error)
     except (OSError, UnicodeError, ValueError) as exc:
         raise InvalidInput(f"Cannot inspect model assets: {exc}") from exc
     matches, diagnostics = [], []
     for identifier in choices:
         try:
             profile = load_profile(resolve_catalog(identifier))
-            problems = compare_gguf(inspection, profile) + compare_tokenizer(
-                model.tokenizer, profile, data=tokenizer)
+            problems = compare_profile(inspection, profile)
         except (OSError, ValueError) as exc:
             raise HemError(f"Cannot inspect packaged pipeline {identifier}: {exc}") from exc
         if problems:
@@ -145,43 +136,132 @@ def select_pipeline(model: ModelFiles, pipeline: Optional[str] = None) -> str:
     return matches[0]
 
 
+def _freeze_json(value):
+    """Copy finite JSON into recursively immutable snapshots."""
+    if isinstance(value, Mapping):
+        if any(type(key) is not str for key in value):
+            raise InvalidInput('Checked serving objects require string keys')
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(item) for item in value)
+    if value is None or type(value) in (str, int, bool):
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    raise InvalidInput('Checked serving values must be finite JSON')
+
+
+def _json_snapshot(value):
+    if isinstance(value, Mapping):
+        return {key: _json_snapshot(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_json_snapshot(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
+class CatalogIdentity:
+    pipeline: str
+    contract: str
+    relative_path: Path
+    tree_sha256: str
+
+
+def _catalog_snapshots(pipeline, deadline):
+    # Reuse native retention's complete-root names+content identity. Models are
+    # external inputs and never part of this digest.
+    from .hem_process import tree_identity
+    snapshots = {}
+    for candidate in catalog_roots(pipeline):
+        deadline.remaining()
+        if not candidate.is_dir():
+            continue
+        try:
+            root = candidate.resolve(strict=True)
+            root.relative_to(candidate.parent.resolve(strict=True))
+        except (OSError, ValueError) as error:
+            raise InvalidInput('Packaged catalog root escapes its package') from error
+        if root not in snapshots:
+            snapshots[root] = tree_identity(root, deadline)
+    return snapshots
+
+
+def _checked_catalog_identity(pipeline, contract, catalog, snapshots, deadline):
+    from .hem_process import tree_identity
+    if not isinstance(contract, str) or not contract:
+        raise InvalidInput('Checked catalog contract identity must be a nonempty string')
+    try:
+        selected = Path(catalog).resolve(strict=True)
+        matches = [(root, selected.relative_to(root)) for root in snapshots
+                   if selected.is_relative_to(root)]
+        if len(matches) != 1 or not selected.is_dir() or matches[0][1] == Path('.'):
+            raise ValueError('selected catalog has no authoritative root')
+        root, relative = matches[0]
+        if tree_identity(root, deadline) != snapshots[root]:
+            raise InvalidInput('Pipeline catalog changed during serving resolution')
+        return CatalogIdentity(pipeline, contract, relative, snapshots[root])
+    except (OSError, ValueError) as error:
+        raise InvalidInput('Selected pipeline is outside or missing from the packaged catalog') from error
+
+
 @dataclass(frozen=True)
 class ResolvedConfiguration:
     model: ModelFiles | CatalogAssets
     pipeline: str
     catalog: Path
-    settings: dict
-    sources: dict
+    settings: Mapping
+    sources: Mapping
+    definition: Mapping
+    catalog_identity: CatalogIdentity
+    dependencies: tuple[Path, ...]
 
-    @property
-    def dependencies(self) -> tuple[Path, ...]:
-        if isinstance(self.model, CatalogAssets):
-            return tuple(asset.path for asset in self.model.files)
-        # weights may be an index distinct from the GGUF members.
-        return tuple(dict.fromkeys((*self.model.gguf_paths, self.model.weights, self.model.tokenizer)))
+    def __post_init__(self):
+        for name in ('settings', 'sources', 'definition'):
+            object.__setattr__(self, name, _freeze_json(getattr(self, name)))
+        object.__setattr__(self, 'dependencies', tuple(dict.fromkeys(self.dependencies)))
+
+    def settings_document(self) -> dict:
+        return _json_snapshot(self.settings)
+
+    def sources_document(self) -> dict:
+        return _json_snapshot(self.sources)
+
+    def definition_document(self) -> dict:
+        return _json_snapshot(self.definition)
 
 
 def resolve(model: ModelFiles, overrides: Optional[Mapping] = None,
-            config_path: Optional[Path] = None, *, pipeline: Optional[str] = None) -> ResolvedConfiguration:
+            config_path: Optional[Path] = None, *, pipeline: Optional[str] = None,
+            deadline: Optional[Deadline] = None) -> ResolvedConfiguration:
     """Repeat structural qualification, then resolve flags > file > defaults.
 
     `overrides` contains explicit serving settings only (omit absent CLI values).
     `sources` records the winner for every submitted setting, including defaults.
     No writes, native calls, model hashing or registry reservations occur here.
     """
+    budget = deadline or Deadline.after()
+    budget.remaining()
     if isinstance(model, CatalogAssets):
         if config_path is not None or overrides:
             raise InvalidInput('Qwen serving settings and --config are unsupported for curated pipelines')
+        snapshots = _catalog_snapshots(model.pipeline, budget)
         catalog = curated_catalog.check_assets(model, pipeline)
         from .model_store import readable_file
         if any(not readable_file(asset.path) for asset in model.files):
             raise InvalidInput('Curated model assets are missing or unreadable')
         settings = {key: catalog.definition[key] for key in ('pending_requests', 'options')
                     if key in catalog.definition}
-        return ResolvedConfiguration(model, model.pipeline, catalog.directory, settings,
-                                     dict.fromkeys(settings, 'catalog'))
+        definition = curated_catalog.definition_for(catalog, model)
+        identity = _checked_catalog_identity(model.pipeline, catalog.contract, catalog.directory,
+                                             snapshots, budget)
+        resolved = ResolvedConfiguration(model, model.pipeline, catalog.directory, settings,
+                                         dict.fromkeys(settings, 'catalog'), definition, identity,
+                                         tuple(asset.path for asset in model.files))
+        budget.remaining()
+        return resolved
     file_settings = load_config(config_path)
     flags = _settings(overrides if overrides is not None else {}, "flags")
+    snapshots = _catalog_snapshots(pipeline, budget)
     selected = select_pipeline(model, pipeline)
     info = pipeline_info(selected)
     settings = dict(info["defaults"])
@@ -199,11 +279,50 @@ def resolve(model: ModelFiles, overrides: Optional[Mapping] = None,
         raise InvalidInput("prefill_capacity must not exceed context_capacity")
     if settings["prefill_capacity"] < (settings["mtp_depth"] or 0) + 1:
         raise InvalidInput("prefill_capacity must fit one anchor plus every MTP proposal")
-    return ResolvedConfiguration(model, selected, Path(info["catalog"]), settings, sources)
+    catalog = Path(info['catalog'])
+    try:
+        modules = catalog_modules(catalog)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise InvalidInput(f"Cannot resolve pipeline modules: {exc}") from exc
+    definition = text_definition(model, modules, rows=settings['rows'],
+                                 context_capacity=settings['context_capacity'],
+                                 pool_capacity=settings['pool_capacity'],
+                                 prefill_capacity=settings['prefill_capacity'],
+                                 draft_depth=settings['mtp_depth'] or 0)
+    identity = _checked_catalog_identity(selected, info['profile'], catalog, snapshots, budget)
+    dependencies = (*model.gguf_paths, model.weights, model.tokenizer)
+    resolved = ResolvedConfiguration(model, selected, catalog, settings, sources, definition, identity,
+                                     dependencies)
+    budget.remaining()
+    return resolved
+
+
+def _matching_catalog(resolved, catalog, deadline):
+    """Verify the same checked root/relative program closure, without selecting."""
+    from .hem_process import tree_identity
+    identity = resolved.catalog_identity
+    relative = identity.relative_path
+    if (identity.pipeline != resolved.pipeline or relative.is_absolute()
+            or not relative.parts or '..' in relative.parts):
+        raise InvalidInput('Checked pipeline catalog identity is inconsistent')
+    catalog = Path(catalog).absolute()
+    root = catalog
+    for _part in relative.parts:
+        root = root.parent
+    try:
+        root = root.resolve(strict=True)
+        selected = catalog.resolve(strict=True)
+        if not selected.is_dir() or selected.relative_to(root) != relative:
+            raise ValueError('selected catalog location differs')
+        if tree_identity(root, deadline) != identity.tree_sha256:
+            raise InvalidInput('Deployment catalog differs from the checked serving interpretation')
+    except (OSError, ValueError) as error:
+        raise InvalidInput('Deployment catalog is outside or missing from the checked root') from error
+    return catalog
 
 
 def deployment_document(resolved: ResolvedConfiguration, name: str, *,
-                        catalog: Path, device: int = 0) -> dict:
+                        catalog: Path, device: int = 0, deadline: Optional[Deadline] = None) -> dict:
     """Create the native drained document using an immutable retained catalog.
 
     The caller supplies a catalog independent of the deployment name, retaining
@@ -215,36 +334,25 @@ def deployment_document(resolved: ResolvedConfiguration, name: str, *,
         raise InvalidInput("Instance name must contain letters, digits, '.', '_' or '-'")
     if type(device) is not int or device < 0:
         raise InvalidInput("Device group index must be a nonnegative integer")
-    catalog = Path(catalog).absolute()
-    if isinstance(resolved.model, CatalogAssets):
-        definition = curated_catalog.load_catalog(resolved.pipeline, directory=catalog)
-        if definition.contract != resolved.model.contract:
-            raise InvalidInput('Retained catalog asset contract differs from the model record')
-        return {'name': name, 'device': device, 'admission': 'drained',
-                'base_directory': str(catalog),
-                'definition': curated_catalog.definition_for(definition, resolved.model)}
-    try:
-        modules = catalog_modules(catalog)
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise InvalidInput(f"Cannot resolve pipeline modules: {exc}") from exc
-    definition = {"kind": "text", "prepare": modules.prepare, "control": modules.control,
-                  "sources": list(modules.providers),
-                  "weights": str(resolved.model.weights.absolute()),
-                  "tokenizer": str(resolved.model.tokenizer.absolute()),
-                  **{key: resolved.settings[key] for key in DEFAULTS},
-                  "draft_depth": resolved.settings["mtp_depth"] or 0, "options": {}}
+    budget = deadline or Deadline.after()
+    budget.remaining()
+    catalog = _matching_catalog(resolved, catalog, budget)
+    definition = resolved.definition_document()
+    budget.remaining()
     return {"name": name, "device": device, "admission": "drained",
             "base_directory": str(catalog), "definition": definition}
 
 
 def export_deployment(model: ModelFiles, output: Path, name: str, *,
                       overrides: Optional[Mapping] = None, config_path: Optional[Path] = None,
-                      pipeline: Optional[str] = None) -> dict:
+                      pipeline: Optional[str] = None, deadline: Optional[Deadline] = None) -> dict:
     """Validate and atomically export, without registry access or native calls."""
-    resolved = resolve(model, overrides, config_path, pipeline=pipeline)
+    budget = deadline or Deadline.after()
+    resolved = resolve(model, overrides, config_path, pipeline=pipeline, deadline=budget)
     try:
-        document = deployment_document(resolved, name, catalog=resolved.catalog)
+        document = deployment_document(resolved, name, catalog=resolved.catalog, deadline=budget)
         output = Path(output).absolute()
+        budget.remaining()
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent,
                                          prefix=f".{output.name}.", delete=False) as stream:
             staging = Path(stream.name)
@@ -257,6 +365,7 @@ def export_deployment(model: ModelFiles, output: Path, name: str, *,
                 staging.unlink(missing_ok=True)
                 raise
         try:
+            budget.remaining()
             os.replace(staging, output)
             parent = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
@@ -269,4 +378,4 @@ def export_deployment(model: ModelFiles, output: Path, name: str, *,
         raise HemError(f"Cannot export deployment: {exc}") from exc
     print(EXPORT_RESPONSIBILITY, file=sys.stderr)
     return {"state": "exported", "completed": True, "instance": name,
-            "pipeline": resolved.pipeline, "output": str(output), "settings": dict(resolved.settings)}
+            "pipeline": resolved.pipeline, "output": str(output), "settings": resolved.settings_document()}

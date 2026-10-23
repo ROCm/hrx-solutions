@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-import re
 import stat
 import threading
 from typing import Optional, Sequence
@@ -290,11 +289,6 @@ class ServerLogSource(_TrackedLogSource):
         return LogBatch(tuple(entries))
 
 
-def _http_status(error: Exception) -> Optional[int]:
-    match = re.match(r"native HTTP ([0-9]{3})(?::|;)", str(error))
-    return int(match.group(1)) if match else None
-
-
 def _parse_native_batch(payload: bytes, selection: LogSelection,
                         previous_cursor: Optional[str]):
     if not payload.endswith(b"\n"):
@@ -391,7 +385,9 @@ class NativeModelLogSource(_TrackedLogSource):
                         model=self.selection.model, cursor=self._cursor,
                         max_response_bytes=MAX_NATIVE_LOG_BYTES)
                 except HemError as error:
-                    status = _http_status(error)
+                    # Only a complete native rejection invalidates a cursor;
+                    # observed headers on a malformed/oversized body do not.
+                    status = error.status if error.reason == "http_status" else None
                     if status in (400, 409) and sent_cursor:
                         self._cursor = None
                         self._reset_pending = True

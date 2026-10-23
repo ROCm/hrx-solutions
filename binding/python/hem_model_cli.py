@@ -65,9 +65,11 @@ def run(args, deadline):
     else:
         if args.command == "import":
             if args.assets_dir is not None:
+                hem_display.emit('Local acquisition/presence checks only; native loading remains unprobed')
                 hem_models.import_assets(registry, args.model, directory=args.assets_dir,
                                          alias=args.alias, pipeline=args.pipeline)
             else:
+                hem_display.emit('Local model acquisition and packaged pipeline validation (no native equivalent)')
                 hem_models.import_model(registry, args.model, ggufs=args.gguf,
                                         tokenizer=args.tokenizer, alias=args.alias,
                                         pipeline=args.pipeline)

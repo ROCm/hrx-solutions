@@ -1,15 +1,14 @@
 """Saved server definitions and bounded observations of owned native processes."""
 from __future__ import annotations
 
-import ipaddress
 from pathlib import Path
 import sys
 import time
 
 from . import hem_arguments as arguments, hem_display
-from .hem_common import Deadline, HemError, InvalidInput, UncertainOutcome, result
+from .hem_common import Deadline, HemError, InvalidInput, result
 from .hem_http import NativeClient
-from .hem_process import ProcessManager, read_logs
+from .hem_process import ProcessManager, read_logs, validate_launch_settings
 from .hem_state import Registry
 from .hem_shutdown import ShutdownManager
 from .hem_pi_endpoints import update_result
@@ -59,14 +58,9 @@ def _settings(args):
     # pick a GPU/backend or claim a port implicitly for a new saved definition.
     if not args.device or not args.device.strip() or not args.listen:
         raise InvalidInput("new server requires --device DEVICE and --listen LOOPBACK_HOST:PORT")
-    try:
-        host, port = args.listen.rsplit(':', 1)
-        host = host.strip('[]')
-        if not ipaddress.ip_address(host).is_loopback or not 0 < int(port) < 65536:
-            raise ValueError()
-    except (ValueError, AttributeError):
-        raise InvalidInput("managed server listen must be a numeric loopback host and nonzero port") from None
-    return dict(device=args.device, listen=args.listen)
+    settings = dict(device=args.device, listen=args.listen)
+    validate_launch_settings(settings)
+    return settings
 
 
 def _log_paths(record):
@@ -91,43 +85,15 @@ def _observed(state, **fields):
 
 
 def _observation(registry, manager, server_id, deadline):
-    """Reconcile local evidence, then report ownership and HTTP separately.
-
-    No native mutation, cleanup or process signal occurs here. Unknown ownership
-    retains evidence; a verified live process can have unhealthy/unreachable HTTP.
-    """
-    observed_at = time.time()
-    record = registry.get_server(server_id)
-    try:
-        record = manager.reconcile(server_id, deadline)
-    except HemError as error:
-        # An inaccessible server lock or failed observation must not suppress
-        # other servers in list. Retain its existing durable evidence.
-        hem_display.emit(str(error))
-        return _observed('unknown', completed=True, server=server_id, record=record,
-                      observed_at=observed_at, process_health='unknown', http_health='unknown',
-                      error=str(error), native=None)
-    base = dict(server=server_id, record=record, observed_at=observed_at, native=None)
-    if record['launch_token'] is None:
-        return _observed('stopped', completed=True, process_health='exited', http_health='not-running', **base)
-    try:
-        with manager.pin(record) as pinned:
-            try:
-                native = manager.client(record, pinned, deadline).status()
-            except HemError as error:
-                # Socket/procfs association uncertainty is not mere ill health.
-                if isinstance(error, UncertainOutcome):
-                    raise
-                pinned.verify(deadline)
-                hem_display.emit(str(error))
-                return _observed('unhealthy', completed=True, process_health='verified',
-                              http_health='unhealthy', error=str(error), **base)
-        base['native'] = native
-        return _observed(record['phase'], completed=True, process_health='verified', http_health='healthy', **base)
-    except HemError as error:
-        hem_display.emit(str(error))
-        return _observed('unknown', completed=True, process_health='unknown', http_health='unknown',
-                      error=str(error), **base)
+    """Project core's one lock-held observation without probing again."""
+    observation = manager.observe_and_reconcile(server_id, deadline)
+    fields = dict(server=server_id, record=observation.record,
+                  observed_at=observation.observed_at, native=observation.native,
+                  process_health=observation.process_health, http_health=observation.http_health)
+    if observation.error is not None:
+        hem_display.emit(observation.error)
+        fields['error'] = observation.error
+    return _observed(observation.state, completed=True, **fields)
 
 
 def _log_delta(snapshot, current):

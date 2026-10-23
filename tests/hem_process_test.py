@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import json
 import errno
+import fcntl
 import os
 from pathlib import Path
 import shutil
@@ -14,7 +15,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_bootstrap, hem_process
+from binding.python import hem_bootstrap, hem_process, hem_server_cli
 from binding.python._launcher import native_environment
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.hem_http import NativeClient
@@ -105,6 +106,63 @@ class ProcessTests(unittest.TestCase):
         build = hem_process.retain_payload(self.registry, name, 'test-token', self.package, Deadline.after(3))
         return self.registry.update_server(name, {'build': build}, expected_token='test-token',
                                            expected_revision=record['revision'])
+
+    def test_observation_returns_same_locked_evidence_without_second_cli_probe(self):
+        self.start()
+        for use_cli in (False, True):
+            with self.subTest(use_cli=use_cli):
+                previous = self.registry.get_server('one')
+                previous = self.registry.update_server(
+                    'one', {'phase': 'unknown'}, expected_token=previous['launch_token'],
+                    expected_revision=previous['revision'])
+                documents = []
+                original_client = self.manager.client
+
+                def tracked_client(record, pinned, budget):
+                    client = original_client(record, pinned, budget)
+                    original_status = client.status
+                    def status(**options):
+                        # A distinct descriptor cannot take the server flock
+                        # while the actual native observation is in progress.
+                        path = self.registry.lock('server', 'one').path
+                        descriptor = os.open(path, os.O_RDWR)
+                        try:
+                            with self.assertRaises(BlockingIOError):
+                                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        finally:
+                            os.close(descriptor)
+                        document = original_status(**options)
+                        documents.append(document)
+                        return document
+                    client.status = status
+                    return client
+
+                with patch.object(self.manager, 'pin', wraps=self.manager.pin) as pin, \
+                     patch.object(self.manager, 'client', side_effect=tracked_client):
+                    if use_cli:
+                        observed = hem_server_cli._observation(
+                            self.registry, self.manager, 'one', Deadline.after(2))
+                        record, native = observed['record'], observed['native']
+                    else:
+                        observed = self.manager.observe_and_reconcile('one', Deadline.after(2))
+                        record, native = observed.record, observed.native
+                    self.assertEqual(pin.call_count, 1)
+                self.assertEqual(len(documents), 1)
+                self.assertIs(native, documents[0])
+                self.assertEqual(record['phase'], 'running')
+                self.assertEqual(record['revision'], previous['revision'] + 1)
+                self.assertEqual(record, self.registry.get_server('one'))
+
+    def test_observation_lock_failure_is_unknown_without_changing_reconcile_contract(self):
+        saved = self.registry.create_server('one', saved_settings={})
+        with self.registry.lock('server', 'one'):
+            observed = self.manager.observe_and_reconcile('one', Deadline.after(.01))
+            self.assertEqual(observed.state, 'unknown')
+            self.assertEqual(observed.record, saved)
+            self.assertIsNone(observed.native)
+            with self.assertRaisesRegex(HemError, 'not reentrant'):
+                self.manager.reconcile('one', Deadline.after(.01))
+        self.assertEqual(self.registry.get_server('one'), saved)
 
     def test_two_servers_are_independent_reuse_and_shutdown(self):
         first = self.start()
@@ -343,11 +401,36 @@ class ProcessTests(unittest.TestCase):
         self.assertNotIn('/external', environment['LD_LIBRARY_PATH'])
         self.assertEqual(environment['IREE_HAL_AMDGPU_LIBHSA_PATH'], str(native / 'lib/libhsa-runtime64.so.1'))
 
+    def test_opaque_launch_selectors_reach_real_native_argv_unchanged(self):
+        # These prove Python forwarding policy, not qualification of a backend.
+        for index, selector in enumerate(('  opaque:device=β /custom  ', ' \t ')):
+            with self.subTest(selector=selector):
+                name = f'opaque-{index}'
+                settings = dict(self.settings(), device=selector)
+                self.registry.create_server(name, saved_settings=settings)
+                try:
+                    launched = self.manager.start(name, settings, Deadline.after(3))
+                finally:
+                    current = self.registry.get_server(name)
+                    if current['process']:
+                        self.owned.append((current['process'],
+                                           hem_process.identity(current['process']['pid'])['executable']))
+                self.assertEqual(launched['current_settings'], settings)
+                argv = Path(f"/proc/{launched['process']['pid']}/cmdline").read_bytes().split(b'\0')
+                self.assertEqual(argv[1], os.fsencode('--device=' + selector))
+                self.assertEqual(argv[2], os.fsencode('--listen=' + settings['listen']))
+
     def test_bad_managed_endpoint_and_unknown_capability_fail_closed(self):
         self.registry.create_server('one', saved_settings={})
         for listen in ('0.0.0.0:8080', 'localhost:8080', '127.0.0.1:0'):
             with self.assertRaises(InvalidInput):
                 self.manager.start('one', {'device': 'task', 'listen': listen}, Deadline.after(1))
+        for device in ('', False, 0, None):
+            with self.subTest(device=device), self.assertRaises(InvalidInput):
+                self.manager.start('one', dict(self.settings(), device=device), Deadline.after(1))
+        ipv6 = {'device': 'opaque', 'listen': '[::1]:00080'}
+        self.assertEqual(hem_process.validate_launch_settings(ipv6), 'http://[::1]:80')
+        self.assertEqual(ipv6, {'device': 'opaque', 'listen': '[::1]:00080'})
         with patch('os.pidfd_open', side_effect=PermissionError('restricted')):
             with self.assertRaises(UncertainOutcome):
                 with hem_process.PinnedProcess(hem_process.identity(os.getpid())):

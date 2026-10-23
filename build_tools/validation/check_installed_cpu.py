@@ -26,12 +26,12 @@ HELPERS = ('gguf_fixtures', 'hem_lifecycle_fixture')
 # Installer concurrency fixtures import source-only test helpers in children.
 # Keep those in source CPU discovery; installed CLI cases still exercise the
 # real installed installer through its public entry point.
-CONTRACTS = ('hem_process_test', 'hem_model_cli_test', 'hem_server_cli_test',
+CONTRACTS = ('hem_operation_targets_test', 'hem_process_test', 'hem_model_cli_test', 'hem_server_cli_test',
              'hem_instance_cli_test', 'hem_shutdown_test', 'hem_help_test',
              'hem_render_test', 'hem_contracts_test', 'hem_config_test', 'pipeline_catalog_test', 'hem_instances_test',
              'hem_pi_contracts_test',
              'hem_pi_state_test', 'hem_pi_endpoints_test', 'hem_pi_cli_test', 'hem_clients_endpoints_test',
-             'hem_omp_cli_test', 'hem_omp_installer_test', 'curated_assets_test', 'moonshine_acquisition_test')
+             'hem_client_documents_test', 'hem_omp_cli_test', 'hem_omp_installer_test', 'curated_assets_test', 'moonshine_acquisition_test')
 
 
 def digest(path):

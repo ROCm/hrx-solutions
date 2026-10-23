@@ -86,12 +86,11 @@ class PiContractTest(unittest.TestCase):
 
     def test_offline_is_independent_of_durable_configuration_success(self):
         response = PiResult("configured", configured=True, changed=True, completed=True,
-                            accepted=True, available=[],
-                            servers=[{"server": "local", "state": "offline"}])
+                            accepted=True, availability="not_observed")
         code, body, _, _ = self.invoke(response=response)
         self.assertEqual(code, 0)
         self.assertTrue(body["configured"])
-        self.assertEqual(body["available"], [])
+        self.assertEqual(body["availability"], "not_observed")
 
     def test_existing_failure_codes_and_acceptance_are_preserved(self):
         cases = [(HemError("known failure", accepted=False), 1),

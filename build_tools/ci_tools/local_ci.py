@@ -109,7 +109,7 @@ class Runner:
         if args.cpu_only:
             for name in ('gpu', 'openwebui'):
                 self.summary['stages'][name] = {'status': 'skipped', 'reason': 'explicit --cpu-only'}
-        self.child = None
+        self.active = None
         self.interrupted = None
         self.current = None
         self.manifest = None
@@ -132,12 +132,15 @@ class Runner:
                        'log': str(self.run / f'{self.current}.log')}
             self.summary['cleanup'] = cleanup
             self.summary['stages'][self.current]['cleanup'] = cleanup
-        if self.child and self.child.poll() is None:
-            # Shared build/model wrappers reconcile their own native/container work.
-            if self.current in ('build', 'gpu', 'openwebui'):
-                self.child.send_signal(number)
-            else:
-                os.killpg(self.child.pid, number)
+        active = self.active
+        if active is not None:
+            child, cooperative = active
+            if child.poll() is None:
+                # The command declares whether it reconciles detached work.
+                if cooperative:
+                    child.send_signal(number)
+                else:
+                    os.killpg(child.pid, number)
 
     def command(self, command, cwd=None, env=None, cooperative=False):
         if self.interrupted:
@@ -147,10 +150,10 @@ class Runner:
         command_env = dict(self.env)
         if env:
             command_env.update(env)
-        self.child = subprocess.Popen(list(map(str, command)), cwd=cwd or self.snapshot,
+        child = subprocess.Popen(list(map(str, command)), cwd=cwd or self.snapshot,
                                       env=command_env, stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT, start_new_session=True)
-        child = self.child
+        self.active = (child, cooperative)
         if self.interrupted:
             if cooperative:
                 child.send_signal(self.interrupted)
@@ -183,7 +186,7 @@ class Runner:
         code = child.returncode
         thread.join(timeout=5)
         child.stdout.close()
-        self.child = None
+        self.active = None
         if cooperative:
             cleanup_path = self.run / f'{self.current}-cleanup.json'
             if cleanup_path.is_file():

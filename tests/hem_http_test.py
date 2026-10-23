@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
-from binding.python.hem_http import NativeClient, active_ready, registration, retired
+from binding.python.hem_http import NativeResponse, NativeClient, active_ready, registration, retired
 
 from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
 
@@ -87,6 +87,7 @@ class TransportTest(unittest.TestCase):
                     client.post("/v1/models/register", self.body)
                 self.assertEqual(caught.exception.exit_code, 4)
                 self.assertIs(caught.exception.accepted, accepted)
+                self.assertEqual(caught.exception.status, status)
                 self.assertEqual(len(requests), 1)
 
     def test_ownership_budget_expiry_never_transmits(self):
@@ -139,6 +140,8 @@ class TransportTest(unittest.TestCase):
             with self.assertRaises(DeadlineExpired) as caught:
                 client.post("/v1/models/register", self.body)
             self.assertTrue(caught.exception.accepted)
+            self.assertEqual(caught.exception.status, 202)
+            self.assertEqual(caught.exception.reason, "response_incomplete")
 
     def test_known_rejection_includes_native_diagnostic(self):
         with fixture(lambda h, _: reply(h, {"error": "already exists"}, 409)) as (endpoint, requests):
@@ -147,6 +150,8 @@ class TransportTest(unittest.TestCase):
             self.assertEqual(caught.exception.exit_code, 1)
             self.assertIs(caught.exception.accepted, False)
             self.assertIn("already exists", str(caught.exception))
+            self.assertEqual(caught.exception.status, 409)
+            self.assertEqual(caught.exception.reason, "http_status")
             self.assertEqual(len(requests), 1)
 
     def test_invalid_json_does_not_erase_acknowledged_acceptance(self):
@@ -158,6 +163,35 @@ class TransportTest(unittest.TestCase):
             with self.assertRaises(HemError) as caught:
                 NativeClient(endpoint, emit=lambda _: None).post("/v1/models/register", self.body).json()
             self.assertIs(caught.exception.accepted, True)
+            self.assertEqual(caught.exception.status, 202)
+            self.assertEqual(caught.exception.reason, "invalid_json")
+
+    def test_direct_response_json_failure_retains_status_and_acceptance(self):
+        for status, accepted in ((200, None), (202, True), (409, False)):
+            with self.subTest(status=status), self.assertRaises(HemError) as caught:
+                NativeResponse(status, b"invalid", accepted).json()
+            self.assertEqual(caught.exception.status, status)
+            self.assertEqual(caught.exception.reason, "invalid_json")
+            self.assertIs(caught.exception.accepted, accepted)
+
+    def test_connection_refusal_is_distinct_from_lost_observation(self):
+        # Reserve the port without listening: deterministic refusal, no shared service.
+        with socket.socket() as reserved:
+            reserved.bind(("127.0.0.1", 0))
+            url = f"http://127.0.0.1:{reserved.getsockname()[1]}"
+            with self.assertRaises(HemError) as caught:
+                NativeClient(url, emit=lambda _: None).status()
+            self.assertEqual(caught.exception.reason, "connection_refused")
+            self.assertIsNone(caught.exception.status)
+            self.assertIsNone(caught.exception.accepted)
+        def drop(handler, _records):
+            handler.connection.shutdown(socket.SHUT_RDWR)
+        with fixture(drop) as (endpoint, _requests):
+            with self.assertRaises(HemError) as caught:
+                NativeClient(endpoint, emit=lambda _: None).status()
+            self.assertEqual(caught.exception.reason, "connection_failed")
+            self.assertIsNone(caught.exception.status)
+            self.assertIsNone(caught.exception.accepted)
 
     def test_error_diagnostics_redact_explicit_credentials(self):
         with fixture(lambda h, _: reply(h, {"error": "secret-token invalid"}, 400)) as (endpoint, _):

@@ -10,7 +10,8 @@ import unittest
 from unittest.mock import patch
 
 from binding.python import hem_config as config, hem_cli
-from binding.python.hem_common import InvalidInput
+from binding.python.gguf import inspect_gguf_set
+from binding.python.hem_common import Deadline, DeadlineExpired, InvalidInput
 from binding.python.model_store import ModelFiles
 from tests.gguf_fixtures import expected_tensors, lifecycle_profile, profile, write_matching_gguf
 
@@ -148,8 +149,16 @@ class HemConfigTest(unittest.TestCase):
         write_matching_gguf(first, contract=contract, missing=names[::2])
         write_matching_gguf(second, contract=contract, missing=names[1::2])
         model = ModelFiles(first, self.tokenizer, (first, second))
-        inspection = config.inspect_gguf_set(model.gguf_paths)
+        inspection = inspect_gguf_set(model.gguf_paths)
         index = self.root / 'parts.safetensors.index.json'
+        with self.assertRaisesRegex(InvalidInput, 'require a .safetensors.index.json'):
+            config.select_pipeline(model)
+        index.unlink(missing_ok=True)
+        with self.assertRaisesRegex(InvalidInput, 'Cannot inspect model assets'):
+            config.select_pipeline(replace(model, weights=index, fragments=model.gguf_paths))
+        index.write_text('invalid')
+        with self.assertRaisesRegex(InvalidInput, 'Cannot inspect model assets'):
+            config.select_pipeline(replace(model, weights=index, fragments=model.gguf_paths))
         index.write_text(json.dumps({'weight_map':{name:path.name for name,path in inspection.tensor_files.items()}}))
         model = replace(model, weights=index, fragments=model.gguf_paths)
         resolved = config.resolve(model)
@@ -163,13 +172,17 @@ class HemConfigTest(unittest.TestCase):
         output = self.root / 'export.json'
         stderr = io.StringIO()
         resolved = self.resolve()
+        budget = Deadline.after()
         with patch.object(config,'deployment_document',wraps=config.deployment_document) as document, \
+             patch.object(config,'resolve',wraps=config.resolve) as resolution, \
              patch.object(config,'select_pipeline',wraps=config.select_pipeline) as validation, \
              redirect_stderr(stderr):
-            result = config.export_deployment(self.models['qwen-08b'], output,'chat-small')
+            result = config.export_deployment(self.models['qwen-08b'], output,'chat-small', deadline=budget)
         self.assertTrue(result['completed'])
         validation.assert_called_once()
         document.assert_called_once()
+        self.assertIs(document.call_args.kwargs['deadline'], budget)
+        self.assertIs(resolution.call_args.kwargs['deadline'], budget)
         self.assertEqual(json.loads(output.read_text()), config.deployment_document(resolved,'chat-small',catalog=resolved.catalog))
         self.assertIn('does not reserve',stderr.getvalue())
         self.assertIn('compatible server',stderr.getvalue())
@@ -180,6 +193,22 @@ class HemConfigTest(unittest.TestCase):
             config.export_deployment(self.models['qwen-08b'],output,'../bad')
         staging.assert_not_called()
         self.assertEqual(output.read_bytes(), original)
+
+    def test_export_expiry_before_publication_preserves_existing_output(self):
+        output = self.root / 'timed-export.json'
+        output.write_text('previous export')
+        clock = [0.0]
+        budget = Deadline(1.0, clock=lambda: clock[0])
+        dump = json.dump
+        def expire(*args, **kwargs):
+            answer = dump(*args, **kwargs)
+            clock[0] = 2.0
+            return answer
+        with patch.object(config.json, 'dump', side_effect=expire):
+            with self.assertRaises(DeadlineExpired):
+                config.export_deployment(self.models['qwen-08b'], output, 'chat-small', deadline=budget)
+        self.assertEqual(output.read_text(), 'previous export')
+        self.assertFalse(list(output.parent.glob('.timed-export.json.*')))
 
     def test_pipeline_cli_exposes_profiles_capabilities_and_defaults(self):
         for argv in (['pipeline','list','--json'],['pipeline','show','qwen-08b','--json']):

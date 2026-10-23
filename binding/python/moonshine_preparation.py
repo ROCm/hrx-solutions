@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -13,7 +14,7 @@ import threading
 
 from .hem_common import HemError
 from . import model_download
-from .model_store import readable_file
+from .model_store import NamedAsset, PreparationResult, prepared_outputs, readable_file, ModelImportError
 from .moonshine_preparer_identity import FILES as TOOL_FILES, RELATIVE, REVISION
 
 TIMEOUT = 300
@@ -89,31 +90,61 @@ def preflight():
         raise HemError(f'{GUIDANCE} Preparation preflight failed: {error}') from error
 
 
-def prepare(registry, record):
-    """Return completed private rotary output, never a helper launch document."""
-    parent = registry.root / 'preparation-attempts' / record['id']
-    try:
-        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        attempt = Path(tempfile.mkdtemp(prefix='attempt-', dir=parent))
-    except OSError as error:
-        raise HemError(f'Could not reserve private preparation output; incomplete acquisition retained: {error}') from error
-    output = attempt / 'output'  # Upstream requires a nonexistent output path.
+# The fixed helper resolves this reviewed model descriptor through offline HF
+# cache. Explicit inputs must match it; a recipe cannot choose helper authority.
+_INPUT_REPO = 'moonshine-ai/moonshine-streaming-tiny'
+_INPUT_REVISION = 'f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a'
+_INPUT_FILES = ('model.safetensors', 'tokenizer.json', 'config.json')
+GENERATED = (('rotary', 'rotary.safetensors'),)
+
+
+def _check_inputs(inputs):
+    expected = {('huggingface', _INPUT_REPO, _INPUT_REVISION, name) for name in _INPUT_FILES}
+    actual = {(item.kind, item.repo_id, item.revision, item.filename) for item in inputs}
+    if len(inputs) != len(expected) or actual != expected:
+        raise HemError('Moonshine preparation inputs differ from its reviewed pinned descriptor')
+    for item in inputs:
+        source = dict(repo_id=item.repo_id, revision=item.revision, filename=item.filename)
+        if item.path != model_download._cache_path(source) or not readable_file(item.path):
+            raise HemError('Moonshine preparation requires its explicit readable pinned cache inputs')
+
+
+def prepare(inputs, attempt, deadline):
+    """Consume explicit inputs in caller scratch; return one complete output set."""
+    directory, output = attempt.directory, attempt.output
     arguments = [sys.executable, str(tool_directory() / 'prepare_assets.py'),
                  '--output', str(output), '--name', 'moonshine-streaming-tiny', '--offline']
+    # Refuse unsafe caller scratch before opening diagnostic paths through it.
+    try:
+        info = directory.lstat()
+        if (not directory.is_absolute() or directory.resolve() != directory
+                or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077 or os.path.lexists(output)):
+            raise ValueError()
+    except (OSError, ValueError, RuntimeError) as error:
+        raise HemError('Moonshine preparation requires a private fresh caller-owned attempt') from error
     result = {'tool_revision': REVISION, 'completed': False}
     try:
-        with (attempt / 'stdout.log').open('wb') as stdout, (attempt / 'stderr.log').open('wb') as stderr:
-            code = _run(arguments, timeout=TIMEOUT, stdout=stdout, stderr=stderr)
+        _check_inputs(inputs)
+        with attempt.stdout.open('wb') as stdout, attempt.stderr.open('wb') as stderr:
+            code = _run(arguments, timeout=min(TIMEOUT, deadline.remaining()), stdout=stdout, stderr=stderr)
         if code:
-            raise HemError(f'HRX Moonshine preparation exited {code}; incomplete acquisition retained; inspect {attempt}')
+            raise HemError(f'HRX Moonshine preparation exited {code}; incomplete acquisition retained; inspect {directory}')
+        deadline.remaining()
         if any(not readable_file(output / name) for name in
                ('model.safetensors', 'tokenizer.json', 'config.json', 'rotary.safetensors',
                 'provenance.json', 'model.json')):
-            raise HemError(f'HRX preparation did not complete its outputs; inspect {attempt}')
+            raise HemError(f'HRX preparation did not complete its outputs; inspect {directory}')
+        completed = PreparationResult(directory, (NamedAsset('rotary', 'rotary.safetensors',
+                                                             output / 'rotary.safetensors'),))
+        prepared_outputs(attempt, completed, GENERATED)
         result['completed'] = True
-        return output / 'rotary.safetensors'
-    except (OSError, subprocess.TimeoutExpired) as error:
+        return completed
+    except (OSError, subprocess.TimeoutExpired, ModelImportError) as error:
         result['error'] = str(error)
-        raise HemError(f'HRX Moonshine preparation failed; incomplete acquisition retained; inspect {attempt}: {error}') from error
+        raise HemError(f'HRX Moonshine preparation failed; incomplete acquisition retained; inspect {directory}: {error}') from error
+    except BaseException as error:
+        result['error'] = str(error)
+        raise
     finally:
-        (attempt / 'receipt.json').write_text(json.dumps(result, indent=2) + '\n')
+        attempt.receipt.write_text(json.dumps(result, indent=2) + '\n')

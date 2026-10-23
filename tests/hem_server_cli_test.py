@@ -142,6 +142,7 @@ class ServerCliTest(unittest.TestCase):
         unhealthy, _ = self.invoke('status', 'one', expected=1)
         self.assertEqual(unhealthy['state'], 'unhealthy')
         self.assertEqual(unhealthy['process_health'], 'verified')
+        self.assertEqual(unhealthy['record']['phase'], 'unknown')
         failed, _ = self.invoke('start', 'one', expected=4)
         self.assertIsNone(failed['accepted'])
         registry = Registry(self.state)
@@ -193,8 +194,20 @@ class ServerCliTest(unittest.TestCase):
                 follow.terminate()
                 follow.communicate(timeout=3)
 
+    def test_new_definition_forwards_opaque_selector_without_trimming(self):
+        selector = '  opaque:device=β /custom  '
+        launched, _ = self.invoke('start', '--name', 'one', '--device', selector,
+                                  '--listen', f'127.0.0.1:{available_port()}')
+        self.assertEqual(launched['record']['saved_settings']['device'], selector)
+        self.assertEqual(launched['record']['current_settings']['device'], selector)
+        argv = Path(f"/proc/{launched['process']['pid']}/cmdline").read_bytes().split(b'\0')
+        self.assertEqual(argv[1], os.fsencode('--device=' + selector))
+
     def test_invalid_new_settings_missing_server_and_shutdown(self):
-        for args in (('start','--name','bad'), ('start','--name','bad','--device','task','--listen','0.0.0.0:8080')):
+        for args in (('start','--name','bad'),
+                     ('start','--name','bad','--device','task','--listen','0.0.0.0:8080'),
+                     ('start','--name','bad','--device','','--listen','127.0.0.1:8080'),
+                     ('start','--name','bad','--device',' \t ','--listen','127.0.0.1:8080')):
             data, _ = self.invoke(*args, expected=2)
             self.assertEqual(data['state'], 'failed')
             self.assertFalse(self.state.exists())

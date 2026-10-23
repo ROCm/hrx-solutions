@@ -13,8 +13,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_cli, hem_pi_cli
-from binding.python.hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
+from binding.python import hem_cli, hem_pi_cli, hem_pi
+from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.hem_pi_contracts import MANIFEST_PATH
 from binding.python.hem_state import Registry
 
@@ -213,8 +213,8 @@ class PiCliTest(unittest.TestCase):
     def test_disable_never_qualifies_runtime_and_stronger_refusals_are_preserved(self):
         self.invoke()
         args = hem_cli.parse_args(["pi", "configure", "--disable"])
-        with patch.dict(os.environ, self.env), patch.object(hem_pi_cli, "inspect_runtime", side_effect=AssertionError("runtime probe forbidden")):
-            body = hem_pi_cli.run(args, hem_pi_cli.Deadline.after())
+        with patch.dict(os.environ, self.env), patch.object(hem_pi, "inspect_runtime", side_effect=AssertionError("runtime probe forbidden")):
+            body = hem_pi_cli.run(args, Deadline.after())
         self.assertEqual(body["state"], "disabled")
         self.invoke()
         (self.bin / "pi").unlink()
@@ -223,16 +223,16 @@ class PiCliTest(unittest.TestCase):
         self.invoke("--disable", "--pi-dir", str(self.base / "other"), expected=2)
         self.assertEqual(before, self.snapshot())
         args = hem_cli.parse_args(["pi", "configure", "--check"])
-        with patch.dict(os.environ, self.env), patch.object(hem_pi_cli, "configure_pi", side_effect=UncertainOutcome("uncertain ownership")):
+        with patch.dict(os.environ, self.env), patch.object(hem_pi, "_configure_owned", side_effect=UncertainOutcome("uncertain ownership")):
             with self.assertRaises(UncertainOutcome):
-                hem_pi_cli.run(args, hem_pi_cli.Deadline.after())
+                hem_pi_cli.run(args, Deadline.after())
 
     def test_check_inaccessible_runtime_retains_passive_configuration_findings(self):
         self.invoke()
         args = hem_cli.parse_args(["pi", "configure", "--check"])
         before = self.snapshot()
-        with patch.dict(os.environ, self.env), patch.object(hem_pi_cli, "_metadata", side_effect=PermissionError("selected Pi metadata inaccessible")), redirect_stderr(io.StringIO()):
-            body = hem_pi_cli.run(args, hem_pi_cli.Deadline.after())
+        with patch.dict(os.environ, self.env), patch.object(hem_pi, "_metadata", side_effect=PermissionError("selected Pi metadata inaccessible")), redirect_stderr(io.StringIO()):
+            body = hem_pi_cli.run(args, Deadline.after())
         self.assertEqual(body.exit_code, 1)
         self.assertTrue(body["configured"])
         self.assertIn("metadata inaccessible", body["runtime_compatibility"]["reason"])
@@ -344,53 +344,95 @@ class PiCliTest(unittest.TestCase):
         self.invoke(expected=2)
         self.assertEqual(before, self.snapshot())
 
-    def test_offline_server_does_not_fail_install_and_prints_actual_get(self):
-        listener = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
-        port = listener.server_port
-        listener.server_close()
-        Registry(self.root).create_server("offline", saved_settings=dict(device="task", listen=f"127.0.0.1:{port}"))
-        body, stderr = self.invoke()
-        self.assertTrue(body["configured"])
-        self.assertEqual(body["available"], [])
-        self.assertEqual(body["servers"][0]["state"], "unavailable")
-        self.assertIn(f"http://127.0.0.1:{port}/v1/models", stderr)
-        self.assertIn("curl --fail-with-body --silent --show-error --request GET", " ".join(stderr.replace("\\\n", " ").split()))
-
-    def test_native_join_gets_both_resources_and_reports_only_ready_models(self):
-        row = dict(id="tiny", object="model", context_length=8192, limits=dict(max_output_tokens=8192),
-            input_modalities=["text"], output_modalities=["text"], loom=dict(incarnation=1, registration="ready", kind="text",
-            endpoint="/v1/chat/completions", tokenize=True, parameter_operation="idle", parameters=dict(primary=dict(active=True)), status=dict(admission="open",phase="idle")))
+    def test_setup_and_check_leave_native_discovery_to_runtime(self):
         requests = []
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(inner):
                 requests.append(inner.path)
-                data = json.dumps(dict(object="list", data=[row])).encode()
-                inner.send_response(200)
-                inner.send_header("Content-Length",str(len(data)))
+                inner.send_response(500)
                 inner.end_headers()
-                inner.wfile.write(data)
             def log_message(*args):
                 pass
-        server = http.server.ThreadingHTTPServer(("127.0.0.1",0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        Registry(self.root).create_server("native", saved_settings=dict(device="task",listen=f"127.0.0.1:{server.server_port}"))
-        body, stderr = self.invoke()
-        self.assertEqual(requests, ["/v1/models", "/v1/status"])
-        self.assertEqual(body["available"], [dict(provider="loom-hem-bmF0aXZl",id="tiny")])
-        self.assertIn("/v1/status", stderr)
-        row["id"] = "x" * 300
-        body, _ = self.invoke("--check")
-        self.assertEqual(body["available"][0]["id"], row["id"])
-        row["loom"]["parameters"]["primary"]["active"] = False
-        before = self.snapshot()
-        body, _ = self.invoke("--check")
-        self.assertEqual(body["available"], [])
-        self.assertEqual(before, self.snapshot())
+        Registry(self.root).create_server("native", saved_settings=dict(device="task", listen=f"127.0.0.1:{server.server_port}"))
+        for args in ((), ("--check",)):
+            body, stderr = self.invoke(*args)
+            self.assertTrue(body["configured"])
+            self.assertEqual(body["availability"], "not_observed")
+            for removed in ("servers", "available", "availability_reason"):
+                self.assertNotIn(removed, body)
+            self.assertNotIn("curl ", stderr)
+        self.assertEqual(requests, [])
 
-    def test_malformed_metadata_and_inventory_fail_cleanly(self):
+    def test_direct_entry_qualifies_before_writes_and_check_stays_passive(self):
+        self.node("22.18.0")
+        before = self.snapshot()
+        with patch.dict(os.environ, self.env):
+            with self.assertRaisesRegex(InvalidInput, "Node"):
+                hem_pi.configure_pi(self.root, self.target, Deadline.after())
+            checked = hem_pi.configure_pi(self.root, self.target, Deadline.after(), check=True)
+            self.assertEqual(checked["runtime_compatibility"]["state"], "unqualified")
+            self.assertEqual(checked.exit_code, 1)
+            disabled = hem_pi.configure_pi(self.root, self.target, Deadline.after(), disable=True)
+            self.assertEqual(disabled["runtime_compatibility"]["state"], "not_checked")
+        self.assertEqual(before, self.snapshot())
+        self.node("22.22.1")
+        with patch.dict(os.environ, self.env):
+            result = hem_pi.configure_pi(self.root, self.target, Deadline.after())
+        self.assertTrue(result["configured"])
+        self.assertEqual(result["runtime"]["version"], "1.3.0")
+
+    def test_fixed_dispatch_preserves_explicit_namespace_mode_and_deadline(self):
+        from binding.python.hem_integrations import configure_integration
+        deadline = Deadline.after()
+        for mode in ("configure", "check", "disable"):
+            with patch.object(hem_pi, "configure_pi", return_value={}) as owner:
+                configure_integration("pi", self.root, deadline, mode=mode, pi_dir=self.target)
+                owner.assert_called_once_with(self.root, self.target, deadline,
+                    check=mode == "check", disable=mode == "disable")
+        for integration, mode in (("other", "configure"), ("pi", "other")):
+            with patch.object(hem_pi, "configure_pi") as owner:
+                with self.assertRaises(InvalidInput):
+                    configure_integration(integration, self.root, deadline, mode=mode)
+                owner.assert_not_called()
+
+    def test_assets_and_new_reservation_identity_are_selected_once(self):
+        with patch.dict(os.environ, self.env), patch.object(hem_pi, "bundled_assets", wraps=hem_pi.bundled_assets) as assets, patch.object(hem_pi.uuid, "uuid4", wraps=hem_pi.uuid.uuid4) as identity:
+            result = hem_pi.configure_pi(self.root, self.target, Deadline.after())
+        self.assertTrue(result["configured"])
+        assets.assert_called_once_with()
+        identity.assert_called_once_with()
+
+    def test_disable_after_snapshot_cannot_reuse_retired_generation(self):
+        with patch.dict(os.environ, self.env):
+            hem_pi.configure_pi(self.root, self.target, Deadline.after())
+            old_identity = json.loads((self.target / MANIFEST_PATH).read_text())["integration_id"]
+            snapshot = hem_pi.passive_snapshot
+
+            def snapshot_then_disable(root, deadline):
+                observed = snapshot(root, deadline)
+                # Deterministically retire the observed generation before the
+                # outer configure can acquire its mutation lock.
+                with patch.object(hem_pi, "passive_snapshot", side_effect=snapshot):
+                    disabled = hem_pi.configure_pi(root, self.target, deadline, disable=True)
+                self.assertEqual(disabled["state"], "disabled")
+                return observed
+
+            with patch.object(hem_pi, "passive_snapshot", side_effect=snapshot_then_disable), patch.object(hem_pi, "set_target", wraps=hem_pi.set_target) as reserve:
+                with self.assertRaisesRegex(InvalidInput, "reservation changed"):
+                    hem_pi.configure_pi(self.root, self.target, Deadline.after())
+                reserve.assert_not_called()
+            self.assertFalse((self.target / MANIFEST_PATH).exists())
+            self.assertIsNone(snapshot(self.root, Deadline.after())["pi_target"])
+            fresh = hem_pi.configure_pi(self.root, self.target, Deadline.after())
+            self.assertTrue(fresh["configured"])
+            new_identity = json.loads((self.target / MANIFEST_PATH).read_text())["integration_id"]
+            self.assertNotEqual(new_identity, old_identity)
+
+    def test_malformed_metadata_fails_cleanly(self):
         for field in ("exports", "dependencies"):
             original = self.metadata[field]
             self.metadata[field] = []
@@ -400,25 +442,21 @@ class PiCliTest(unittest.TestCase):
             self.assertEqual(before, self.snapshot())
             self.metadata[field] = original
         self.write_metadata()
-        with self.assertRaises(ValueError):
-            hem_pi_cli._available(dict(object="list", data=[dict(id="x",object="model",loom={"status":["bad"]})]),
-                                  dict(object="list",data=[dict(id="x",object="model",loom={"status":["bad"]})]))
-
     def test_shared_projection_guard_runs_before_installer_writes(self):
         args = hem_cli.parse_args(["pi", "configure"])
         before = self.snapshot()
-        with patch.dict(os.environ,self.env), patch.object(hem_pi_cli,"project_endpoints",side_effect=InvalidInput("endpoint projection exceeds1MiB")), patch.object(hem_pi_cli,"configure_pi") as installer:
-            with self.assertRaisesRegex(InvalidInput,"exceeds1MiB"):
-                hem_pi_cli.run(args, hem_pi_cli.Deadline.after())
+        with patch.dict(os.environ, self.env), patch.object(hem_pi, "project_endpoints", side_effect=InvalidInput("endpoint projection exceeds1MiB")), patch.object(hem_pi, "_configure_owned") as installer:
+            with self.assertRaisesRegex(InvalidInput, "exceeds1MiB"):
+                hem_pi_cli.run(args, Deadline.after())
             installer.assert_not_called()
-        self.assertEqual(before,self.snapshot())
+        self.assertEqual(before, self.snapshot())
 
     def test_missing_packaged_source_is_known_failure_without_writes(self):
         args = hem_cli.parse_args(["pi", "configure"])
         before = self.snapshot()
-        with patch.dict(os.environ,self.env), patch.object(hem_pi_cli,"bundled_assets",side_effect=FileNotFoundError("missing")):
+        with patch.dict(os.environ,self.env), patch.object(hem_pi,"bundled_assets",side_effect=FileNotFoundError("missing")):
             with self.assertRaises(HemError) as raised:
-                hem_pi_cli.run(args, hem_pi_cli.Deadline.after())
+                hem_pi_cli.run(args, Deadline.after())
         self.assertEqual(raised.exception.exit_code, 1)
         self.assertIs(raised.exception.accepted, False)
         self.assertEqual(before, self.snapshot())
@@ -449,9 +487,9 @@ with patch.object(hem_pi, 'set_target', side_effect=error):
         for error, code, accepted in ((HemError("rejected",accepted=False),1,False),
             (DeadlineExpired("pending",accepted=True),3,True), (UncertainOutcome("unknown"),4,None),
             (OSError("replace failed"),4,None)):
-            with self.subTest(code=code), patch.dict(os.environ,self.env), patch.object(hem_pi_cli,"inspect_runtime", return_value={}), patch.object(hem_pi_cli,"configure_pi",side_effect=error):
+            with self.subTest(code=code), patch.dict(os.environ,self.env), patch.object(hem_pi,"inspect_runtime", return_value={}), patch.object(hem_pi,"_configure_owned",side_effect=error):
                 with redirect_stderr(io.StringIO()), self.assertRaises(HemError) as raised:
-                    hem_pi_cli.run(args, hem_pi_cli.Deadline.after())
+                    hem_pi_cli.run(args, Deadline.after())
                 self.assertEqual(raised.exception.exit_code,code)
                 self.assertIs(raised.exception.accepted,accepted)
 

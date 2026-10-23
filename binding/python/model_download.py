@@ -92,6 +92,37 @@ def _sources(recipe: dict) -> list[dict]:
     return sources
 
 
+def acquisition_inputs(sources):
+    """Snapshot source identity separately from runtime filenames or preparation."""
+    return tuple(model_store.AcquisitionInput(
+        f'source-{index}', _cache_path(source), source['kind'], source['repo_id'],
+        source['revision'], source['filename']) for index, source in enumerate(sources))
+
+
+def runtime_mappings(recipe, sources, *, mappings=None):
+    """Admit explicit input-to-path associations, never expand repeated roles.
+
+    Existing serialized recipes use their exact source filename as the runtime
+    locator. Adapt that legacy association once; nonidentity mappings must be
+    explicit rather than guessed from a role or basename. An unselected input in
+    an explicit mapping set remains preparation-only.
+    """
+    catalog = curated_catalog.load_catalog(recipe['pipeline'])
+    declared = {asset['path']: asset['role'] for asset in catalog.assets}
+    generated = {item['path'] for item in recipe.get('generated', ())}
+    by_id = {f'source-{index}': source for index, source in enumerate(sources)}
+    if mappings is None:
+        mappings = tuple(model_store.RuntimeMapping(source['role'], source['filename'], 'reference',
+                                                   input_id=input_id) for input_id, source in by_id.items())
+    for mapping in mappings:
+        source = by_id.get(mapping.input_id)
+        if (source is None or mapping.generated_role is not None or mapping.ownership != 'reference'
+                or mapping.logical_path in generated or declared.get(mapping.logical_path) != mapping.role
+                or source['role'] != mapping.role):
+            raise model_store.ModelImportError('Named source mapping must select its declared runtime path and role, not a generated output')
+    return tuple(mappings)
+
+
 def _check_sources(sources):
     for source in sources:
         if not isinstance(source['revision'], str) or not _COMMIT.fullmatch(source["revision"]):
@@ -123,8 +154,8 @@ def _redact(value: str) -> str:
     return re.sub(r"hf_[A-Za-z0-9]+", "[REDACTED]", value)
 
 
-def _run_hf(command: list[str]) -> str:
-    """Stream both CLI channels to stderr and retain bounded stdout metadata."""
+def _run_hf(command: list[str]) -> None:
+    """Stream and drain both CLI channels to stderr without retaining output."""
     hem_display.emit(hem_display.command(command, secrets=[
         argument for argument in command if _redact(argument) != argument]))
     environment = os.environ.copy()
@@ -137,16 +168,14 @@ def _run_hf(command: list[str]) -> str:
                                    text=True, env=environment, errors="replace")
     except FileNotFoundError as exc:
         raise model_store.ModelImportError("Hugging Face CLI 'hf' is required for downloads; install huggingface_hub with its CLI, then run 'hf auth login' for gated repositories. See the setup documentation for Python 3.9.") from exc
-    output = []
-    output_size = 0
     last_update = time.monotonic()
     finished = threading.Event()
     def heartbeat():
         while not finished.wait(5):
             if time.monotonic() - last_update >= 5:
                 _progress("Waiting for Hugging Face CLI…")
-    def pump(stream, capture):
-        nonlocal output_size, last_update
+    def pump(stream):
+        nonlocal last_update
         pending = []
         while True:
             character = stream.read(1)
@@ -158,19 +187,14 @@ def _run_hf(command: list[str]) -> str:
                 line = _redact("".join(pending))
                 sys.stderr.write(line)
                 sys.stderr.flush()
-                if capture and output_size < 1024 * 1024:
-                    output.append(line)
-                    output_size += len(line)
                 pending = []
         if pending:
             line = _redact("".join(pending))
             sys.stderr.write(line)
             sys.stderr.flush()
-            if capture and output_size < 1024 * 1024:
-                output.append(line)
         stream.close()
-    workers = [threading.Thread(target=pump, args=(process.stdout, True), daemon=True),
-               threading.Thread(target=pump, args=(process.stderr, False), daemon=True)]
+    workers = [threading.Thread(target=pump, args=(process.stdout,), daemon=True),
+               threading.Thread(target=pump, args=(process.stderr,), daemon=True)]
     monitor = threading.Thread(target=heartbeat, daemon=True)
     monitor.start()
     for worker in workers:
@@ -188,7 +212,6 @@ def _run_hf(command: list[str]) -> str:
             worker.join()
     if returncode:
         raise model_store.ModelImportError(f"hf download failed (exit {returncode}); see the streamed error above. Check repository access with 'hf auth login', pinned filenames, cache permissions, and connectivity.")
-    return "".join(output)
 
 
 def _progress(message: str) -> None:

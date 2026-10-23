@@ -212,3 +212,119 @@ network. Validation prints results; `github` manages release assets/checksums,
 and PyPI status inspects the exact release wheel's availability. The release
 workflow owns actual PyPI upload. Release preparation/publication are explicit
 operations, not validation shortcuts.
+
+## Host wheel builds
+
+The optional host route builds a `py3-none-linux_x86_64` wheel without Docker or
+repair. It requires Linux x86-64, an immutable ROCm/TheRock SDK, the actual pinned
+Bazel executable from `.bazelversion` (not Bazelisk), and a standalone task-owned
+build venv. Every invocation captures current source into a new external run
+directory and starts a fresh private Bazel root, repository caches and Loom state.
+Without an explicit `--cache-dir`, disk and remote action caches are disabled.
+This is host acceptance; it makes no manylinux portability or full-CI claim.
+
+Prepare the venv once outside the checkout, using paths without whitespace:
+
+```sh
+BUILD_VENV=/absolute/task/build-venv
+env -u PYTHONPATH -u PYTHONHOME PYTHONNOUSERSITE=1 python3 -m venv "$BUILD_VENV"
+env -u PYTHONPATH -u PYTHONHOME PYTHONNOUSERSITE=1 \
+  "$BUILD_VENV/bin/python" -m pip install --no-cache-dir \
+  'setuptools>=77' 'wheel>=0.45' 'packaging>=24.2' 'build>=1.2'
+```
+
+Provision the actual pinned Bazel binary separately in a task-owned tools
+namespace; any acquisition cost belongs outside build timings. The runner
+validates the existing venv and imports without installing or upgrading packages.
+It requires system/user site packages disabled and no nonempty setuptools system
+`distutils.cfg`. It rejects inherited platform/toolchain/packaging overrides,
+local `setup.cfg`, `.bazelrc.local`, module overrides and uncommitted changes to
+Bazel routing files. An existing `.bazelrc.configured` must exactly match setup's
+configuration for the supplied SDK. It excludes Python import/native runtime
+path overrides while retaining HOME, XDG and credentials. User distutils config
+is disabled through the build frontend's `--global-option=--no-user-cfg` setting.
+
+```sh
+RUN=/absolute/new/host-wheel-run
+bash build_tools/build-wheel.sh --fast \
+  --rocm /absolute/immutable/sdk --venv "$BUILD_VENV" \
+  --run-dir "$RUN" --bazel /absolute/tools/pinned-bazel
+```
+
+All selected paths must be absolute, external and without whitespace; `RUN` must
+not exist or overlap the SDK, venv or Bazel. Outputs include `source-manifest.json`,
+`source/`, `wheel/`, `native-metrics/`, phase logs and `summary.json` with source identity, selected
+interpreter/dependency/compiler/Bazel identities, wheel hash, timing, exits and
+owned Bazel shutdown evidence. The existing backend retains its native Bazel
+profile and build-event stream under `native-metrics/`; these support analysis
+and execution attribution within the frontend build interval. Packaging and
+native work can overlap, so the frontend interval alone is not native time.
+Failures retain the run directory and the first
+error; unresolved cleanup fails the build. Keep retained evidence and resolve
+owned work before manually removing any output root.
+
+Optional disk action-cache reuse is a developer opt-in for the **same stable
+host, SDK and toolchain**. It retains fresh source/output/server/repository roots,
+package staging and wheel validation. It does not make the host hermetic or prove
+complete SDK/system equivalence:
+
+```sh
+bash build_tools/build-wheel.sh --fast \
+  --rocm /absolute/immutable/sdk --venv "$BUILD_VENV" \
+  --run-dir /absolute/new/cached-run --bazel /absolute/tools/pinned-bazel \
+  --cache-dir /absolute/task/private-cache
+```
+
+The cache directory must be dedicated, external, same-user, mode0700 and without
+symlink components or overlaps with the source/run/SDK/venv/Bazel. A new directory
+is created privately. Its exclusive nonblocking lease is held until owned work
+has retired; a concurrent invocation using the same cache fails. Selected host,
+Bazel/compiler binary and SDK path/receipt identities must match. These bounded
+records do not identify all headers, libraries, compiler resources or SDK bytes.
+Bazel's declared action inputs/configuration handle ordinary source changes;
+source commit and packaged Python bytes are not global cache keys.
+
+**Use a fresh cache or clear the retired cache after changing external SDK
+contents, compiler resources/configuration, system headers/libraries/tools or
+interpreters, or after any uncertain unmanaged host change or cache modification.**
+Keep those inputs stable during each build. Reusing the same paths or recorded
+binary hashes does not remove this manual invalidation obligation. Remote caches
+and execution stay disabled; inherited cache selections and container compiler
+stamps are excluded. Completed disk-cache actions can be reused after an ordinary
+failed build once its owned cleanup completes.
+
+`--cache-mode read-write` is the default when `--cache-dir` is supplied.
+`--cache-dir PATH --cache-mode disabled` performs the same lease/identity work
+with disk action reads/writes disabled, for a matched control. `--cache-mode`
+requires `--cache-dir`. Both explicit modes use equivalent empty compiler-input
+stamps; per-run summaries record the effective mode, selections and native
+configuration. Include all lease/identity/capture/build/validation/shutdown costs
+when comparing the same candidate's disabled, population, warm and Python-marker
+runs. The earlier cold measurement is historical evidence, not a matched control.
+
+If an invocation is interrupted or cleanup is unresolved, the retained
+`active.json` blocks reuse. Inspect its run directory and exact owner PID/start
+identity. Confirm all work belonging to that invocation has retired, including
+its private Bazel server through that run's launcher; PID absence alone does not
+prove its descendants retired, and a reused PID is not authority to stop anything.
+Only after that proof may the task owner remove `active.json` or clear the cache.
+The runner never automatically adopts an unresolved lease, deletes a live output
+root or stops unrelated work. Cache and run evidence remain external.
+
+Run the existing installed wheel check separately, outside the source checkout,
+with the verified build venv first on PATH so its `python3` creates the fresh
+installation venv. Use a distinct, nonexistent destination and the exact wheel
+reported by the build:
+
+```sh
+cd /absolute/task
+PATH="$BUILD_VENV/bin:/usr/bin:/bin" \
+  bash "$RUN/source/build_tools/check-wheel.sh" \
+  "$RUN/wheel/EXACT_WHEEL_NAME.whl" /absolute/new/installed-venv
+```
+
+Record installed-check status/interpreter evidence separately from build success.
+The build command checks archive contents, filename/internal host tags and source
+integrity; the installed command checks existing public/payload/native-library,
+catalog/helper and CPU contracts. Neither replaces the mandatory default full
+container/GPU/Pi local CI gate before landing.

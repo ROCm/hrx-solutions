@@ -82,6 +82,29 @@ def _json(value):
         raise InvalidInput(f"state must be finite JSON: {error}") from error
 
 
+def decode_record(table, data, revision, identities):
+    """Decode current inventory using the SQL identity evidence supplied by reader.
+
+    Pure record admission only: no Registry initialization, SQL or filesystem
+    effects. The caller's SQL revision overrides any serialized revision.
+    """
+    try:
+        data = json.loads(data)
+        if not isinstance(data, dict):
+            raise ValueError("record is not an object")
+        _json(data)  # also reject non-finite values accepted by json.loads
+        if any(data.get(column) != value for column, value in identities.items()):
+            raise ValueError("record identity does not match inventory key")
+        required = {"models": {"assets", "provenance", "directory", "pipeline", "validation", "pending"},
+                    "servers": {"saved_settings", "launch_token", "phase", "pending"},
+                    "instances": {"model_id", "settings", "document", "dependencies", "incarnation", "pending"}}
+        if not required[table].issubset(data):
+            raise ValueError("record is missing current fields")
+    except (ValueError, TypeError, InvalidInput) as error:
+        raise HemError("corrupt state record; inventory retained") from error
+    return dict(data, revision=revision)
+
+
 def _sync_dir(path):
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -276,21 +299,7 @@ class Registry:
         row = connection.execute(f"SELECT revision,data FROM {table} WHERE {where}", key).fetchone()
         if row is None:
             raise HemError(f"unknown {table[:-1]}: {'/'.join(key)}")
-        try:
-            data = json.loads(row[1])
-            if not isinstance(data, dict):
-                raise ValueError("record is not an object")
-            _json(data)  # also reject non-finite values accepted by json.loads
-            if any(data.get(column) != value for column, value in zip(columns, key)):
-                raise ValueError("record identity does not match inventory key")
-            required = {"models": {"assets", "provenance", "directory", "pipeline", "validation", "pending"},
-                        "servers": {"saved_settings", "launch_token", "phase", "pending"},
-                        "instances": {"model_id", "settings", "document", "dependencies", "incarnation", "pending"}}
-            if not required[table].issubset(data):
-                raise ValueError("record is missing current fields")
-        except (ValueError, TypeError, InvalidInput) as error:
-            raise HemError("corrupt state record; inventory retained") from error
-        return dict(data, revision=row[0])
+        return decode_record(table, row[1], row[0], dict(zip(columns, key)))
 
     @staticmethod
     def _write(connection, table, key, record, expected_revision):

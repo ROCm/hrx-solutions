@@ -11,9 +11,10 @@ import time
 import unittest
 from unittest.mock import patch
 
-from binding.python.hem_common import HemError
+from binding.python.hem_common import HemError, UncertainOutcome
+from tests.hem_lifecycle_fixture import fixture
 from binding.python.hem_state import Registry
-from binding.python import hem_tui_provider
+from binding.python import hem_tui_provider, hem_state
 
 
 def tree_state(root):
@@ -49,14 +50,20 @@ class LocalServiceProviderTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_absent_namespace_is_empty_and_remains_absent(self):
         provider = hem_tui_provider.LocalServiceProvider(self.root)
-        self.assertEqual(await provider.list_services(), ())
+        with patch.object(Registry, '__init__', side_effect=AssertionError('passive Registry init')), patch.object(
+                hem_state, '_migrate', side_effect=AssertionError('passive migration')):
+            self.assertEqual(await provider.list_services(), ())
         self.assertFalse(self.root.exists())
 
     async def test_existing_inventory_read_performs_no_authored_writes(self):
         registry = Registry(self.root)
         registry.create_server("stopped", saved_settings={"device": "test"})
         before = tree_state(self.root)
-        observations = await hem_tui_provider.LocalServiceProvider(self.root).list_services()
+        with patch.object(Registry, '__init__', side_effect=AssertionError('passive Registry init')), patch.object(
+                Registry, 'lock', side_effect=AssertionError('passive resource lock')), patch.object(
+                hem_state, '_migrate', side_effect=AssertionError('passive migration')), patch.object(
+                hem_state, '_directory', side_effect=AssertionError('passive directory creation')):
+            observations = await hem_tui_provider.LocalServiceProvider(self.root).list_services()
         self.assertEqual([(row.name, row.state) for row in observations],
                          [("stopped", "stopped")])
         self.assertEqual(tree_state(self.root), before)
@@ -75,6 +82,36 @@ class LocalServiceProviderTest(unittest.IsolatedAsyncioTestCase):
                           ("model", "chat", "ready")])
         self.assertEqual(rows[1].server, "local")
         self.assertEqual(rows[1].incarnation, 17)
+
+    async def test_socket_association_uncertainty_is_unknown_and_passive(self):
+        class UnassociatedProcess:
+            def __init__(self, *_args, **_kwargs):
+                pass
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                pass
+            def connection(self, *_args):
+                raise UncertainOutcome("socket association is unknown")
+            def verify(self, *_args):
+                pass
+
+        registry = Registry(self.root)
+        row = self.running_server(registry, "local", "launch-one")
+        registry.create_instance("local", "launch-one", "chat", incarnation=17)
+        with fixture() as (url, requests):
+            registry.update_server('local', {'endpoint': url}, expected_token=row['launch_token'],
+                                   expected_revision=row['revision'])
+            before = tree_state(self.root)
+            read_snapshot = hem_tui_provider._read_snapshot
+            with patch.object(hem_tui_provider, 'PinnedProcess', UnassociatedProcess), \
+                 patch.object(hem_tui_provider, '_read_snapshot', wraps=read_snapshot) as snapshots:
+                rows = await hem_tui_provider.LocalServiceProvider(self.root).list_services()
+            self.assertEqual(snapshots.call_count, 2)
+            self.assertEqual([(row.kind, row.state) for row in rows],
+                             [('server', 'unknown'), ('model', 'unknown')])
+            self.assertEqual(requests, [])  # Refused before transmitting HTTP.
+            self.assertEqual(tree_state(self.root), before)
 
     async def test_failed_observation_preserves_other_rows(self):
         registry = Registry(self.root)
@@ -153,6 +190,24 @@ class LocalServiceProviderTest(unittest.IsolatedAsyncioTestCase):
             connection.close()
         with self.assertRaisesRegex(HemError, "schema constraints"):
             await hem_tui_provider.LocalServiceProvider(other).list_services()
+
+    async def test_sql_server_token_must_match_json_even_when_foreign_keys_are_valid(self):
+        registry = Registry(self.root)
+        self.running_server(registry, 'local', 'launch-one')
+        registry.create_instance('local', 'launch-one', 'chat', incarnation=17)
+        with sqlite3.connect(registry.database) as database:
+            data = json.loads(database.execute("SELECT data FROM servers WHERE id='local'").fetchone()[0])
+            data['launch_token'] = 'different-json-token'
+            database.execute("UPDATE servers SET data=? WHERE id='local'", (json.dumps(data),))
+            self.assertIsNone(database.execute('PRAGMA foreign_key_check').fetchone())
+        # Registry supplies only the SQL id; TUI has additional SQL token proof.
+        self.assertEqual(registry.get_server('local')['launch_token'], 'different-json-token')
+        before = tree_state(self.root)
+        with patch.object(Registry, '__init__', side_effect=AssertionError('passive Registry init')), patch.object(
+                hem_tui_provider, '_observe_server', side_effect=AssertionError('corrupt inventory observed')):
+            with self.assertRaisesRegex(HemError, 'corrupt state record; inventory retained'):
+                await hem_tui_provider.LocalServiceProvider(self.root).list_services()
+        self.assertEqual(tree_state(self.root), before)
 
     async def test_inventory_row_cap_fails_read_only_and_within_budget(self):
         registry = Registry(self.root)

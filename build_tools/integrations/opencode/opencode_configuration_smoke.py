@@ -220,16 +220,19 @@ class ConfigurationGate:
         expected = dict([self.activate('a', 'oc-qwen-a'), self.activate('c', 'oc-qwen-b')])
         configured = self.command()
         assert configured['configured'], configured
+        assert 'policy_conflicts' not in configured and 'policy_warnings' not in configured, configured
+        assert 'host policy is unassessed' in configured['guidance'], configured
         installed = self.target / 'plugins/loom-control-opencode'
         from hrx_solutions.hem_opencode import bundled_assets
         source = gate.args.source / 'binding/python/opencode_plugin'
         for name, data in bundled_assets().items():
-            assert data == (source / name).read_bytes() == (installed / name).read_bytes(), name
+            assert data == (source.parent / name if name == "native_protocol.ts" else source / name).read_bytes() == (installed / name).read_bytes(), name
         before = snapshot(self.target)
         repeated = self.command()
         assert repeated['changed'] is False and snapshot(self.target) == before
         checked = self.command('--check')
         assert checked['configured'] and snapshot(self.target) == before
+        assert 'policy_conflicts' not in checked and 'policy_warnings' not in checked, checked
         self.start_client()
         try:
             self.models(expected)

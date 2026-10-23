@@ -42,6 +42,24 @@ class MoonshineCatalogTest(unittest.TestCase):
             catalog.stage(destination,self.products(),self.root,decoder=Path('fixture'))
         return destination
 
+    def test_bound_query_retains_four_artifact_parser_and_rejections(self):
+        outputs={}
+        for name in catalog.ARTIFACTS:
+            path=self.root/'bazel-bin'/catalog.RELATIVE/name
+            path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'LOOMfixture')
+            outputs[name]=path
+        def query(target):
+            self.assertEqual(target,catalog.TARGET)
+            return tuple(outputs.values())
+        self.assertEqual(catalog.query_outputs(query),outputs)
+        paths=tuple(outputs.values())
+        for invalid in (paths[:-1],paths+paths[:1],paths+(self.root/'extra.loombc',)):
+            with self.assertRaisesRegex(ValueError,'Missing|Unexpected|duplicate'):
+                catalog.query_outputs(lambda target:invalid)
+        paths[0].write_bytes(b'bad')
+        with self.assertRaisesRegex(ValueError,'invalid Moonshine'):
+            catalog.query_outputs(query)
+
     def test_exact_four_artifacts_and_physically_owned_sixteen_inputs(self):
         self.assertEqual(len({source for group in self.groups.values() for source in group}),16)
         self.assertEqual(set(self.groups),set(catalog.ARTIFACTS))
