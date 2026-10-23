@@ -42,6 +42,9 @@ class InstalledPayloadTest(unittest.TestCase):
             'pipeline_validation.py',
 ):
             self.files[name] = (source / name).read_bytes()
+        for relative in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'):
+            self.files[relative] = (source / relative).read_bytes()
         from build_tools.validation.check_installed_cpu import CLI_FILES
         for name in CLI_FILES:
             self.files[name] = (source / name).read_bytes()
@@ -123,7 +126,9 @@ class InstalledPayloadTest(unittest.TestCase):
                                ('models/fixture.py', 'hrx_solutions.models.fixture'),
                                ('models/__init__.py', 'hrx_solutions.models'),
                                ('cli/fixture.py', 'hrx_solutions.cli.fixture'),
-                               ('cli/__init__.py', 'hrx_solutions.cli')):
+                               ('cli/__init__.py', 'hrx_solutions.cli'),
+                               ('tui/fixture.py', 'hrx_solutions.tui.fixture'),
+                               ('tui/__init__.py', 'hrx_solutions.tui')):
             with self.subTest(relative=relative):
                 authored = source / relative
                 authored.parent.mkdir(parents=True, exist_ok=True)

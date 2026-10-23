@@ -11,12 +11,12 @@ import stat
 import threading
 from typing import Optional, Sequence
 
-from .hem_common import Deadline, HemError, InvalidInput
-from .hem_http import NativeClient, registration
-from .hem_process import PinnedProcess, _confirmed_exit
-from .hem_state import _name
+from ..hem_common import Deadline, HemError, InvalidInput
+from ..hem_http import NativeClient, registration
+from ..hem_process import PinnedProcess, _confirmed_exit
+from ..hem_state import _name
 from .hem_tui_provider import _read_snapshot
-from .runtime_paths import state_root
+from ..runtime_paths import state_root
 
 MAX_LOG_BATCH_BYTES = 256 * 1024
 MAX_NATIVE_LOG_BYTES = 1024 * 1024

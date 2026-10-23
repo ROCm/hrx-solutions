@@ -179,6 +179,9 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
             'pipeline_validation.py',
 ):
             self.files[name] = (source / name).read_bytes()
+        for relative in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'):
+            self.files[relative] = (source / relative).read_bytes()
         from build_tools.validation.check_installed_cpu import CLI_FILES
         for name in CLI_FILES:
             self.files[name] = (source / name).read_bytes()

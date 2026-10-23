@@ -72,6 +72,9 @@ for name in (
     module = importlib.import_module("hrx_solutions." + name)
     expected = package_root / (name.replace(".", "/") + ".py" if name != "cli" else "cli/__init__.py")
     assert Path(module.__file__).resolve() == expected.resolve()
+for name in ('__init__', 'hem_tui', 'hem_tui_details', 'hem_tui_logs', 'hem_tui_provider'):
+    module = importlib.import_module('hrx_solutions.tui' + ('' if name == '__init__' else '.' + name))
+    assert Path(module.__file__).resolve() == package_root / 'tui' / (name + '.py')
 entrypoints = {entry.name: entry.value for entry in
                importlib.metadata.distribution("hrx-solutions").entry_points
                if entry.group == "console_scripts"}

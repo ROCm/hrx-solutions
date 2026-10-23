@@ -39,7 +39,7 @@ STABLE_RUNTIME_NAMES = {
 ROCM_LIBRARY_PREFIXES = ("libamd", "libhsa", "libroc")
 HEM_MODULES = (
     "hem_integrations", "hem_client_documents", "hem_openwebui_wire", "hem_openwebui_receipts",
-    "hem_bootstrap", "hem_cli", "hem_common", "hem_tui",
+    "hem_bootstrap", "hem_cli", "hem_common",
     "hem_display", "hem_http", "hem_instances", "hem_operation_targets", "hem_process",
     "hem_shutdown", "hem_state", "hem_pi_assets",
     "hem_pi_contracts", "hem_pi", "hem_pi_endpoints",
@@ -72,6 +72,9 @@ CLI_FILES = (
     'cli/hem_opencode_cli.py',
     'cli/hem_openwebui_cli.py',
 )
+
+TUI_MODULES = ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py')
 
 PI_ASSETS = ("index.ts", "discovery.ts", "budgets.ts", "stream.ts",
              "profile.json", "package.json")
@@ -122,7 +125,7 @@ def validate_pi_sdist(path: Path) -> None:
 def validate_client_sdist(path: Path) -> None:
     """Client generations are materialized from these exact authored resources."""
     with tarfile.open(path) as archive:
-        for name in CLIENT_ASSETS:
+        for name in (*CLIENT_ASSETS, *TUI_MODULES):
             suffix = "/binding/python/" + name
             matches = [member for member in archive.getmembers() if member.name.endswith(suffix)]
             if len(matches) != 1 or not matches[0].isfile():
@@ -217,7 +220,7 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         required_files.update(PACKAGE_PREFIX + "models/" + name + ".py" for name in MODEL_MODULES)
         required_files.update(PACKAGE_PREFIX + name for name in CLI_FILES)
         required_files.update(PACKAGE_PREFIX + "pi_extension/" + name for name in PI_ASSETS)
-        required_files.update(PACKAGE_PREFIX + name for name in CLIENT_ASSETS)
+        required_files.update(PACKAGE_PREFIX + name for name in (*CLIENT_ASSETS, *TUI_MODULES))
         required_files.update(target.split(":")[0].replace(".", "/") + ".py"
                               for target in REQUIRED_ENTRY_POINTS.values())
         for architecture in ("qwen_27b", "qwen_08b"):
@@ -250,7 +253,7 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             if wheel.read(member) != expected:
                 raise RuntimeError("wheel Pi asset differs from reviewed source: " + member)
 
-        for name in CLIENT_ASSETS:
+        for name in (*CLIENT_ASSETS, *TUI_MODULES):
             member = PACKAGE_PREFIX + name
             expected = (REPO_ROOT / "binding/python" / name).read_bytes()
             if wheel.namelist().count(member) != 1 or wheel.read(member) != expected:

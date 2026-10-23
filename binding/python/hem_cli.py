@@ -88,7 +88,7 @@ def main(argv=None):
         # Downloads and follow streams intentionally have no lifecycle budget.
         deadline = Deadline.after(args.timeout) if hasattr(args, "timeout") else None
         if args.resource == "tui":
-            from . import hem_tui
+            from .tui import hem_tui
             return hem_tui.run(args, deadline)
         response = DOMAINS[args.resource].run(args, deadline)
     except HemError as error:

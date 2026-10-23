@@ -12,11 +12,11 @@ import threading
 from typing import Optional
 from urllib.parse import quote
 
-from .hem_common import Deadline, DeadlineExpired, HemError
-from .hem_http import NativeClient
-from .hem_process import PinnedProcess, observe_server
-from .runtime_paths import state_root
-from .hem_state import _validate_schema, decode_record
+from ..hem_common import Deadline, DeadlineExpired, HemError
+from ..hem_http import NativeClient
+from ..hem_process import PinnedProcess, observe_server
+from ..runtime_paths import state_root
+from ..hem_state import _validate_schema, decode_record
 
 MAX_INVENTORY_ROWS = 4096
 MAX_INVENTORY_BYTES = 8 * 1024 * 1024

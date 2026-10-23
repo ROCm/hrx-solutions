@@ -99,6 +99,9 @@ def verify_wheel_payload(wheel, package):
             assert target.is_file() and digest(target) == expected, f'installed wheel mismatch: {name}'
             checked[relative] = expected
     assert set(CLI_FILES) <= checked.keys(), 'wheel is missing required CLI modules'
+    for name in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'):
+        assert name in checked, f'wheel is missing TUI module: {name}'
     assert '__init__.py' in checked and '_native/bin/loom-serve' in checked
     assert any(name.startswith('loom-pipeline/') for name in checked)
     return {'wheel': str(wheel), 'wheel_sha256': digest(wheel), 'installed_files': checked}
@@ -115,6 +118,7 @@ def source_parity(source_root, package):
             parts = parts[:-1]
         module = importlib.import_module('.'.join(('hrx_solutions', *parts)))
         installed = Path(module.__file__).resolve()
+        assert installed.is_relative_to(package.resolve()), f'import escaped installed package: {module}'
         assert installed == (package / relative).resolve(), f'import escaped installed package: {module}'
         assert source.read_bytes() == installed.read_bytes(), f'stale installed module: {source}'
         checked[str(source.relative_to(source_root))] = digest(source)

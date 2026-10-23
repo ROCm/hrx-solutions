@@ -10,7 +10,7 @@ from binding.python import hem_cli
 
 class TuiCliTest(unittest.TestCase):
     def test_cli_dispatch_and_help(self):
-        with patch("binding.python.hem_tui.run", return_value=0) as run:
+        with patch("binding.python.tui.hem_tui.run", return_value=0) as run:
             self.assertEqual(hem_cli.main(["tui"]), 0)
             run.assert_called_once()
         output = io.StringIO()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from binding.python import hem_tui, hem_tui_details
+from binding.python.tui import hem_tui, hem_tui_details
 
 
 class TuiDetailsTest(unittest.TestCase):

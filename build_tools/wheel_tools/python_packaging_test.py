@@ -435,6 +435,9 @@ class PackagingTest(unittest.TestCase):
                         for name in wheel_validation.CLIENT_ASSETS})
         for name in ('pipeline_validation.py','runtime_paths.py','loom_serve.py','models/__init__.py', *(name+'.py' for name in HEM_MODULES), *('models/'+name+'.py' for name in MODEL_MODULES), *wheel_validation.CLI_FILES):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
+        for name in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'):
+            members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         version=read_package_version()
         prefix=f'hrx_solutions-{version}.dist-info/'
         members[prefix+'METADATA']=(f'Metadata-Version: 2.1\nName: hrx-solutions\nVersion: {version}\nRequires-Python: >=3.9\nRequires-Dist: textual<2,>=0.47\nDescription-Content-Type: text/markdown\n\n'+(packaging.REPO_ROOT/'PYPI_README.md').read_text()).encode()
@@ -463,10 +466,12 @@ class PackagingTest(unittest.TestCase):
             self.assertFalse((packaging.REPO_ROOT/'binding/python'/directory/'native_protocol.ts').exists())
 
     def test_wheel_requires_each_client_resource_and_exact_reviewed_bytes_once(self):
-        for name in wheel_validation.CLIENT_ASSETS:
+        for name in (*wheel_validation.CLIENT_ASSETS, *('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py')):
             with self.subTest(missing=name), self.assertRaisesRegex(RuntimeError,'missing setup assets'):
                 validate_wheel(self.wheel(missing='hrx_solutions/'+name))
-        for selected in ('native_protocol.ts', *wheel_validation.CLI_FILES):
+        for selected in ('native_protocol.ts', *wheel_validation.CLI_FILES, *('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py')):
             for failure in ('changed','duplicate'):
                 with self.subTest(failure=failure):
                     wheel=self.wheel()
@@ -485,7 +490,8 @@ class PackagingTest(unittest.TestCase):
                         validate_wheel(wheel)
 
     def test_sdist_requires_each_exact_regular_client_resource_once(self):
-        for assets, validator in ((wheel_validation.CLIENT_ASSETS, wheel_validation.validate_client_sdist),
+        for assets, validator in (((*wheel_validation.CLIENT_ASSETS, *('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py')), wheel_validation.validate_client_sdist),
                                   (wheel_validation.CLI_FILES, wheel_validation.validate_cli_sdist)):
             for selected in assets:
                 for failure in (None, 'missing', 'changed', 'symlink', 'duplicate'):
@@ -640,7 +646,8 @@ class PackagingTest(unittest.TestCase):
         command.ensure_finalized()
         command.run()
         expected = {'models/__init__.py', *('models/'+name+'.py' for name in MODEL_MODULES),
-                    *wheel_validation.CLI_FILES}
+                    *wheel_validation.CLI_FILES, *('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py')}
         staged = Path(command.build_lib) / 'hrx_solutions'
         self.assertTrue(expected <= {path.relative_to(staged).as_posix()
                                      for path in staged.rglob('*.py')})
