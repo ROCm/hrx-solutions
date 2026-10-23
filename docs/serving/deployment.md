@@ -26,8 +26,8 @@ keep JSON escaping valid for quotes or backslashes in paths.
 | `options` | Source-owned preparation/request defaults; `{}` in this example. Native configuration does not interpret arbitrary source option keys. |
 
 The wheel contains exactly one complete `pipeline.loombc` per declared model
-specification: Qwen 0.8B and 27B. The adjacent `pipeline.json` descriptor and
-`compatibility.json` identify and validate the selected module. All three
+specification: Qwen 0.8B and 27B. The adjacent `pipeline.json` descriptor identifies the selected variant and
+checks the compiled module hash. All three
 executable locators in this example select the same artifact; preparation also
 loads its embedded weight policy from that artifact. Preserve the selected
 catalog and external weights/tokenizer for the registration lifetime. No
@@ -48,18 +48,13 @@ retirement; stop the server before replacing the installed wheel.
 
 ## Assets
 
-The `qwen-08b` compatibility profile is
-`qwen35-08b-ud-q5-k-xl-v1`, installed beside the bytecode modules as
-`qwen_08b/compatibility.json`. The pinned download coordinates in the walkthrough
-identify its known asset set. Checkpoint and tokenizer repositories/revisions
-are independent.
-
-The contract describes architecture metadata, tensor shapes/types and tokenizer
-configuration, including a canonical tokenizer hash. A similar filename or
-quantization label is insufficient. This manual does not add a structural
-validation CLI or claim a full checkpoint payload hash. Native preparation can
-catch loading failures; a short successful request does not establish arbitrary
-checkpoint support, numerical correctness or agent quality.
+The authored recipe at
+`qwen_08b/recipes/qwen35-08b-q5-k-xl.json` pins checkpoint and tokenizer
+coordinates independently. Its pipeline binding supplies program integrity and
+supported configuration. Local format/index and asset checks are not tensor-shape
+qualification. Native preparation/loading reports incompatibility; a successful
+short request does not establish arbitrary checkpoint support, numerical
+correctness or coding-agent quality.
 
 `hf download --local-dir models` places files in the selected directory. If you
 instead reference symlinks into a shared HF cache, eviction or moving the cache

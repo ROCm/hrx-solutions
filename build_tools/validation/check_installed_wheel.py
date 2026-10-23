@@ -39,17 +39,14 @@ for name in (
     module = importlib.import_module("hrx_solutions." + name)
     assert Path(module.__file__).resolve().parent == package_root
 for name in (
-    'curated_catalog',
     'gguf',
     'hem_config',
     'hem_models',
-    'hem_model_operations',
     'model_download',
     'model_store',
     'moonshine_preparation',
     'moonshine_preparer_identity',
-    'pipeline_validation',
-    'qwen_validation',
+    'recipe_types', 'recipes', 'pipelines', 'pipelines_qwen', 'pipelines_moonshine',
 ):
     module = importlib.import_module("hrx_solutions.models." + name)
     assert Path(module.__file__).resolve().parent == package_root / "models"
@@ -167,39 +164,62 @@ provenance = verify_wheel_payload(args.wheel.resolve(strict=True), package_root)
 assert (package_root / "_native/bin/loom-serve").is_file()
 assert (package_root / "_native/share/loom-serve/LICENSE").is_file()
 assert not (package_root / "_native/bin/loom-qwen-epoch-check").exists()
+from hrx_solutions.models import recipes as authored_recipes, pipelines as pipeline_bindings, modalities
+from hrx_solutions.models.hem_config import effective_settings
+from hrx_solutions.models.recipe_types import PreparedModel, PreparedArtifact
 from hrx_solutions.models.gguf import inspect_gguf
-from hrx_solutions.models.qwen_validation import load_profile
-from hrx_solutions.models.pipeline_validation import resolve_catalog, catalog_modules
-catalog_root = package_root / "loom-pipeline/llm"
-for pipeline, architecture in (("qwen", "qwen_27b"), ("qwen-08b", "qwen_08b")):
-    catalog = catalog_root / "qwen" / architecture
-    assert resolve_catalog(pipeline) == catalog
-    modules = catalog_modules(catalog)
-    assert all(name.endswith(".loombc") for name in (modules.prepare, modules.control, modules.weights, *modules.providers))
-    contract = load_profile(catalog)
-    assert contract["metadata"]["general.architecture"] == "qwen35"
-    assert (modules.prepare, modules.control, modules.weights, modules.providers) == (
-        "pipeline.loombc", "pipeline.loombc", "pipeline.loombc", ("pipeline.loombc",))
-    artifact = catalog / "pipeline.loombc"
-    descriptor = json.loads((catalog / "pipeline.json").read_text())
-    assert descriptor == {"format": 1, "variant": contract["identifier"],
-                          "module": "pipeline.loombc", "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest()}
-    assert {p.name for p in catalog.iterdir()} == {"pipeline.loombc", "pipeline.json", "compatibility.json"}
-assert (package_root / "loom-pipeline/llm/LICENSE-APACHE-2.0").is_file()
-assert not list(package_root.rglob("*.loom"))
-import struct
+from build_tools.validation.recipe_inventory import validate_installed, EXPECTED_RECIPES
 import tempfile
-from hrx_solutions.models.pipeline_validation import ModelFiles, validate_model
-with tempfile.TemporaryDirectory() as directory:
-    weights = Path(directory) / "model.gguf"
-    tokenizer = Path(directory) / "tokenizer.json"
-    weights.write_bytes(b"GGUF" + struct.pack("<IQQ", 3, 0, 0) + bytes(8))
-    tokenizer.write_text('{"model": {}}')
-    assert inspect_gguf(weights).version == 3
-    for pipeline in ("qwen", "qwen-08b"):
-        result = validate_model(ModelFiles(weights, tokenizer), pipeline)
-        assert not result.compatible
-        assert "Missing required metadata" in result.message
+import struct
+
+validate_installed(package_root, authored_recipes.parse)
+expected_ids = {value[0] for value in EXPECTED_RECIPES.values()}
+assert {recipe.id for recipe in authored_recipes.list()} == expected_ids
+assert {recipe.id for recipe in authored_recipes.list('chat')} == {'qwen35-08b-q5-k-xl', 'qwen38-27b-q5-k-xl'}
+assert {recipe.id for recipe in authored_recipes.list('asr')} == {'moonshine-streaming-tiny'}
+# Exercise the real parser -> binding -> effective settings -> modality definition
+# chain with typed prepared file references. This is pure setup, not acquisition
+# or a claim that these synthetic paths are usable for native inference.
+with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    for identifier in sorted(expected_ids):
+        recipe = authored_recipes.load(identifier)
+        binding = pipeline_bindings.get(recipe.pipeline)
+        descriptor = binding.describe()
+        assert descriptor.id == recipe.pipeline and descriptor.modality == recipe.modality
+        for entry in descriptor.bundle.files:
+            path = package_root / entry.path
+            path.resolve(strict=True).relative_to(package_root)
+            assert path.is_file() and not path.is_symlink(), entry.path
+        assert all(name.endswith('.loombc') for name in
+                   (descriptor.programs.prepare, descriptor.programs.control,
+                    *(descriptor.programs.providers if recipe.modality == 'chat' else descriptor.programs.sources)))
+        prepared = PreparedModel('wheel-setup', recipe.id, recipe.identity, recipe.pipeline, directory,
+            tuple(PreparedArtifact(a.id, a.role, a.format, a.path, directory / a.path,
+                                   'owned' if a.source.kind == 'generated' else 'hf-cache')
+                  for a in recipe.artifacts))
+        settings, sources = effective_settings(recipe, descriptor)
+        policy = modalities.get(recipe.modality)
+        policy.validate(settings, descriptor)
+        definition = policy.service_definition(settings, prepared, descriptor.programs)
+        assert definition['kind'] == descriptor.protocol.native_kind
+        assert definition['prepare'] == descriptor.programs.prepare
+        assert definition['control'] == descriptor.programs.control
+        if recipe.modality == 'chat':
+            assert definition['rows'] == 4 and definition['context_capacity'] == 8192
+            assert definition['pool_capacity'] == 32768 and definition['prefill_capacity'] == 128
+            assert definition['draft_depth'] == (3 if recipe.pipeline == 'qwen' else 0)
+            assert definition['weights'] == str(directory / 'model.gguf')
+            assert definition['tokenizer'] == str(directory / 'tokenizer.json')
+        else:
+            assert definition['pending_requests'] == 4 and definition['options'] == {}
+            assert definition['assets'] == str(directory)
+    weights = directory / 'minimal.gguf'
+    weights.write_bytes(b'GGUF' + struct.pack('<IQQ', 3, 0, 0) + bytes(8))
+    assert inspect_gguf(weights).version == 3  # generic format admission remains
+assert (package_root / 'loom-pipeline/llm/LICENSE-APACHE-2.0').is_file()
+assert not list(package_root.rglob('*.loom'))
+assert not list((package_root / 'loom-pipeline').rglob('compatibility.json'))
 # --help does not load HSA. Check the installed runtime API without
 # requiring a GPU or allowing host runtime overrides.
 import os
@@ -241,13 +261,15 @@ def invoke(*arguments, expected=0, timeout=15):
 pipelines, _ = invoke("pipeline", "list")
 pipeline_entries = {item["pipeline"]:item for item in pipelines["items"]}
 assert set(pipeline_entries) == {"qwen", "qwen-08b", "moonshine-streaming-tiny"}
-for identifier in ("qwen", "qwen-08b"):
-    assert "compatibility" in pipeline_entries[identifier] and "mtp" in pipeline_entries[identifier]["capabilities"]
-recognition = pipeline_entries["moonshine-streaming-tiny"]
-assert recognition["kind"] == "recognition" and recognition["check_kind"] == "acquisition-presence"
-assert recognition["defaults"] == {"pending_requests":4,"options":{}}
-assert {asset["path"] for asset in recognition["assets"]} == {"model.safetensors","tokenizer.json","config.json","rotary.safetensors"}
-assert "compatibility" not in recognition
+for identifier in ('qwen', 'qwen-08b'):
+    entry = pipeline_entries[identifier]
+    assert entry['modality'] == 'chat' and entry['protocol']['operation'] == 'chat'
+    assert set(entry['parameters']) == {'rows', 'context_capacity', 'pool_capacity', 'prefill_capacity', 'mtp', 'mtp_depth'}
+recognition = pipeline_entries['moonshine-streaming-tiny']
+assert recognition['modality'] == 'asr' and recognition['protocol']['operation'] == 'transcription'
+assert recognition['parameters']['pending_requests']['value'] == 4
+assert recognition['parameters']['options']['value'] == {}
+assert set(recognition['parameters']) == {'pending_requests', 'options'}
 recipes, _ = invoke("model", "available")
 for recipe in recipes["items"]:
     preview, diagnostic = invoke("model", "download", recipe["id"], "--id", "preview", "--dry-run")

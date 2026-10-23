@@ -49,6 +49,23 @@ class LocalServiceProviderTest(unittest.IsolatedAsyncioTestCase):
              "build": {"executable": {"device": 1, "inode": 2}}},
             expected_token=token, expected_revision=row["revision"])
 
+    async def test_saved_model_pipeline_is_joined_in_read_only_log_snapshot(self):
+        from binding.python.models import hem_models
+        from binding.python.hem_common import Deadline
+        from binding.python.tui.hem_tui_logs import LogSelection, _records
+        from tests.gguf_fixtures import write_gguf
+        weights = self.root.parent / 'weights.gguf'; write_gguf(weights, tensors=[('fixture', [1], 0, 0)])
+        tokenizer = weights.with_suffix('.json'); tokenizer.write_text('{}')
+        registry = Registry(self.root)
+        hem_models.import_model(registry, 'local', ggufs=[weights], tokenizer=tokenizer, pipeline='qwen-08b')
+        self.running_server(registry, 'server', 'launch')
+        registry.create_instance('server', 'launch', 'chat', model_id='local', incarnation=17)
+        before = tree_state(self.root)
+        with patch.object(Registry, '__init__', side_effect=AssertionError('passive Registry init')):
+            _, row = _records(self.root, LogSelection('model', 'server', 'launch', 'chat', 17), Deadline.after())
+        self.assertEqual(row['pipeline'], 'qwen-08b')
+        self.assertEqual(tree_state(self.root), before)
+
     async def test_absent_namespace_is_empty_and_remains_absent(self):
         provider = hem_tui_provider.LocalServiceProvider(self.root)
         with patch.object(Registry, '__init__', side_effect=AssertionError('passive Registry init')), patch.object(

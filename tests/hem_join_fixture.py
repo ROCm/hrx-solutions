@@ -1,11 +1,10 @@
 """CPU-only public CLI/process/HTTP/SQLite join fixture.
 
 The private package is a copy of the intended source checkout, not an installed
-wheel qualification. Only the synthetic tokenizer fingerprint is substituted;
-GGUF/profile validation, native bootstrap, ownership proof and CLI are real.
+wheel qualification. The assets are tiny format-valid GGUF/JSON fixtures; native bootstrap, ownership
+proof and CLI are real. No tensor-profile qualification or native inference is claimed.
 The ELF extends the component fixture with deterministic external barriers.
 """
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,7 +16,7 @@ import time
 
 from binding.python.control import hem_process, hem_state
 from binding.python.hem_common import Deadline, UncertainOutcome
-from tests.gguf_fixtures import install_lifecycle_profile, lifecycle_profile, write_matching_gguf
+from tests.gguf_fixtures import write_gguf
 from tests.hem_lifecycle_fixture import INSTANCES_NATIVE as NATIVE
 from tests.hem_lifecycle_fixture import port, wait_exit
 
@@ -63,7 +62,6 @@ class JoinFixture:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
         shutil.copytree(checkout / 'loom-pipeline', self.package / 'loom-pipeline')
-        install_lifecycle_profile(self.package / 'loom-pipeline')
         (self.package / '_native/bin').mkdir(parents=True)
         (self.package / '_native/lib').mkdir()
         shutil.copy2(binary, self.package / '_native/bin/loom-serve')
@@ -71,12 +69,7 @@ class JoinFixture:
         self.environment = dict(os.environ, LOOM_SERVE_DIR=str(self.state), PYTHONNOUSERSITE='1')
         self.environment.pop('PYTHONPATH', None)
         self.environment.pop('PYTHONHOME', None)
-        digest = hashlib.sha256(b'{"model":{"fixture":true}}').hexdigest()
-        self.script = (
-            'from hrx_solutions import hem_cli; from hrx_solutions.models import hem_config; '
-            'original=hem_config.load_profile; '
-            f'hem_config.load_profile=lambda catalog: dict(original(catalog), tokenizer_canonical_sha256={digest!r}); '
-            'raise SystemExit(hem_cli.main())')
+        self.script = 'from hrx_solutions import hem_cli; raise SystemExit(hem_cli.main())'
         self.children = []
         self.owned = []
         self.controls = {}
@@ -121,7 +114,7 @@ class JoinFixture:
 
     def acquire(self):
         weights, tokenizer = self.root / 'weights.gguf', self.root / 'tokenizer.json'
-        write_matching_gguf(weights, contract=lifecycle_profile())
+        write_gguf(weights, tensors=[('fixture', [1], 0, 0)])
         tokenizer.write_text('{"model":{"fixture":true}}')
         return self.cli('model', 'import', 'tiny', '--gguf', str(weights), '--tokenizer', str(tokenizer),
                         '--alias', '--pipeline', 'qwen-08b')

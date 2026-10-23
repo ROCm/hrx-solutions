@@ -124,26 +124,29 @@ class HelpTest(unittest.TestCase):
                     self.assertFalse(response['completed'])
                     self.assertNotIn('For details:', errors)
 
-    def test_reference_matches_validation_and_pipeline_metadata(self):
+    def test_argument_parsing_does_not_read_pipeline_or_recipe_files(self):
+        with patch.object(hem_config.pipelines, 'get', side_effect=AssertionError('parser selected pipeline')), \
+             patch.object(hem_config.recipes, 'load', side_effect=AssertionError('parser loaded recipe')):
+            hem_cli.parse_args(['model', 'import', 'example', '--gguf', 'weights.gguf',
+                                '--tokenizer', 'tokenizer.json', '--pipeline', 'qwen-08b'])
+            hem_cli.parse_args(['model', 'download', 'example', '--id', 'local', '--pipeline', 'qwen-08b'])
+
+    def test_reference_uses_selected_descriptor_and_four_layer_precedence(self):
         for command in ('start', 'export'):
             _, output, _ = self.invoke(['instance', command, '--help'])
-            for key, (default, maximum, _) in hem_config.SETTINGS.items():
-                self.assertIn(f'{key}: integer 1..{maximum}; default {default}', output)
-                self.assertEqual(hem_config.LIMITS[key], maximum)
-                if key != 'mtp_depth':
-                    self.assertEqual(hem_config.DEFAULTS[key], default)
-            for term in ('flat JSON', 'Flags override file', 'pipeline defaults',
-                         'Duplicate/unknown keys', 'null', 'nonfinite', 'memory fit',
-                         'prefill_capacity', 'disabled MTP'):
+            for term in ('flat JSON', 'flags override file', 'recipe configuration',
+                         'descriptor defaults', 'Duplicate/unknown keys', 'null',
+                         'nonfinite', 'memory fit', 'final effective configuration'):
                 self.assertIn(term, output)
-        for pipeline in ('qwen', 'qwen-08b'):
-            info = hem_config.pipeline_info(pipeline)
-            self.assertEqual(info['defaults']['rows'], hem_config.SETTINGS['rows'][0])
-            supported = info['capabilities']['mtp']
-            self.assertEqual(info['defaults']['mtp_depth'],
-                             hem_config.SETTINGS['mtp_depth'][0] if supported else None)
-            self.assertEqual(info['limits']['mtp_depth'],
-                             hem_config.LIMITS['mtp_depth'] if supported else None)
+            self.assertNotIn('Qwen only', output)
+            self.assertNotIn('curated entries reject', output)
+        for identifier in ('qwen', 'qwen-08b', 'moonshine-streaming-tiny'):
+            info = hem_config.pipeline_info(identifier)
+            self.assertIn('parameters', info)
+            self.assertIn('protocol', info)
+            self.assertNotIn('compatibility', info)
+            self.assertTrue(all('state' in parameter and 'type' in parameter
+                                for parameter in info['parameters'].values()))
 
     def test_download_pipeline_defaults_to_recipe_instead_of_auto_selection(self):
         _, output, _ = self.invoke(['model', 'download', '--help'])
@@ -155,7 +158,7 @@ class HelpTest(unittest.TestCase):
             with self.subTest(resource=resource, command=command):
                 _, output, _ = self.invoke([resource, command, '--help'])
                 output = ' '.join(output.split())
-                self.assertIn('unique compatible pipeline', output)
+                self.assertIn('must agree with the selected model recipe', output)
                 self.assertNotIn("recipe's declared pipeline", output)
 
 

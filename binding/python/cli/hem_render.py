@@ -7,7 +7,6 @@ import shlex
 import shutil
 import textwrap
 
-from ..models.hem_config import SETTINGS
 from ..control.hem_http import primary_parameters
 
 
@@ -88,7 +87,7 @@ def warnings(data):
 def settings(data, width):
     return table(['Setting', 'Submitted value'],
                  [(key, 'Not applicable' if key == 'mtp_depth' and data.get('mtp') is False else data[key])
-                  for key in (*SETTINGS, 'mtp', *(key for key in data if key not in SETTINGS and key != 'mtp'))
+                  for key in data
                   if key in data], width)
 
 
@@ -105,118 +104,74 @@ def model_state(data):
     state = data.get('state')
     if state == 'ready' and data.get('check_kind') == 'acquisition-presence':
         return 'Acquisition complete (native unprobed)'
-    return 'Structurally valid' if state == 'ready' else text(state)
+    return 'Acquisition complete (native unprobed)' if state == 'ready' else text(state)
 
 
 def model(args, data, width):
     command = args.command
     if command == 'available':
-        rows = [(item.get('id'), item.get('description'), item.get('pipeline')) for item in data.get('items', [])]
+        rows = [(item.get('id'), item.get('name'), item.get('pipeline')) for item in data.get('items', [])]
         return ['Download recipes (external checkpoints; not local inventory).',
-                table(['Recipe', 'Description', 'Pipeline'], rows, width) if rows else 'No download recipes are packaged.',
+                table(['Recipe', 'Name', 'Pipeline'], rows, width) if rows else 'No download recipes are packaged.',
                 'For existing files: loom-control model import --help']
     if command == 'list':
         items = data.get('items', [])
-        if not items:
-            return ['No local models are registered.', 'Discover download recipes: loom-control model available']
-        return [table(['Model', 'Asset / validation state', 'Pipeline'],
-                      [(item.get('model', item.get('id')), model_state(item), item.get('pipeline') or item.get('intended_pipeline')) for item in items], width),
+        return [table(['Model', 'Asset state', 'Pipeline'],
+                      [(item.get('model', item.get('id')), model_state(item),
+                        item.get('pipeline') or item.get('intended_pipeline')) for item in items], width)
+                if items else 'No local models are registered. Discover recipes: loom-control model available',
                 *[f'{item.get("model", item.get("id"))}: {warnings(item)}' for item in items if warnings(item)]]
-    identifier = data.get('model', getattr(args, 'model', None))
-    if data.get('dry_run'):
+    identifier = data.get('model', data.get('model_id', getattr(args, 'model', None)))
+    if data.get('state') == 'preview':
         return [f'Preview for {identifier}: no files acquired and no model record created.',
-                details([('Recipe', (data.get('recipe') or {}).get('id')),
+                details([('Recipe', data.get('recipe_id')), ('Pipeline', data.get('pipeline')),
                          ('Offline cache only', data.get('offline'))]),
-                *[details([('Asset', item.get('filename')), ('Cached', item.get('cached')),
-                           ('Cache path', item.get('cache_path'))]) for item in data.get('files', [])],
-                *[details([('Required generated asset', item.get('path')), ('Role', item.get('role'))])
-                  for item in data.get('generated', [])]]
-    if data.get('check_kind') == 'acquisition-presence':
-        lines = [f'Model {identifier}: {model_state(data)}.', warnings(data),
-                 details([('Pipeline', data.get('intended_pipeline', data.get('pipeline'))),
-                          ('Check', 'Acquisition completion and file presence'),
-                          ('Native readiness', 'Unprobed')])]
-        lines.extend(details([('Role', asset.get('role')), ('Asset', asset.get('logical_path')),
-                              ('Path', asset.get('path'))]) for asset in data.get('named_assets', []))
-        lines.append('Local acquisition checks do not prove native loading or inference readiness.')
-        if 'instances' in data:
-            lines.append('Referencing instances: ' + str(len(data['instances'])))
-        return lines
-    lead = (f'Model {identifier}: {model_state(data)}.' if command == 'show' else
-            f'Model {identifier}: {model_state(data)} after {command}.')
-    if command != 'show':
-        if data.get('state') == 'ready':
-            verb = {'import': 'imported', 'download': 'downloaded', 'validate': 'validated'}[command]
-            lead = f'Model {identifier} {verb}; structural validation passed.'
-        lines = [lead, warnings(data), details([('Pipeline', data.get('pipeline'))])]
-        if command in ('import', 'download'):
-            modes = {asset.get('ownership') for asset in data.get('assets', [])}
-            storage = ('References immutable external files; keep them available.' if modes == {'reference'} else
-                       'Copied into owned model storage.' if modes == {'owned'} else 'Unknown')
-            lines.append(details([('Storage', storage), ('Weights', data.get('weights')),
-                                  ('Tokenizer', data.get('tokenizer'))]))
-            if command == 'import':
-                lines.extend(Literal('Imported source: ' + text(asset.get('source_path'))) for asset in data.get('assets', []))
-            lines.append('Inspect assets: ' + shlex.join(['loom-control', 'model', 'show', identifier or 'MODEL']))
-        lines.append('Structural validation does not prove inference readiness or device memory fit.')
-        return lines
-    lines = [lead, warnings(data), details([('Pipeline', data.get('pipeline')),
-             ('Assets accessible', data.get('accessible')), ('Directory', data.get('directory')),
-             ('Weights', data.get('weights')), ('Tokenizer', data.get('tokenizer'))])]
-    lines.extend(Literal('Fragment: ' + text(path)) for path in data.get('fragments', []))
-    for asset in data.get('assets', []):
-        lines.append(details([('Asset', asset.get('logical_path')), ('Storage', asset.get('ownership')),
-                              ('Source', asset.get('source_path'))]))
+                *[details([('Artifact', item.get('id')), ('Destination', item.get('logical_path')),
+                           ('Cached', item.get('cached')), ('Cache path', item.get('cache_path')),
+                           ('Ownership', item.get('ownership'))]) for item in data.get('artifacts', [])]]
     provenance = data.get('provenance') or {}
-    if provenance:
-        recipe = provenance.get('recipe') or {}
-        lines.append(details([('Acquisition', provenance.get('kind')), ('Recipe', recipe.get('id')),
-                              ('Checkpoint revision', (recipe.get('gguf') or {}).get('revision')),
-                              ('Tokenizer revision', (recipe.get('tokenizer') or {}).get('revision'))]))
-    if command in ('validate', 'import', 'download') or data.get('state') == 'ready':
-        lines.append('Structural validation does not prove inference readiness or device memory fit.')
+    lines = [f'Model {identifier}: {model_state(data)}.', warnings(data),
+             details([('Pipeline', data.get('intended_pipeline', data.get('pipeline'))),
+                      ('Recipe', provenance.get('recipe_id')), ('Declaration SHA256', provenance.get('recipe_identity')),
+                      ('Directory', data.get('directory')), ('Check', 'Acquisition completion and file presence'), ('Native readiness', 'Unprobed')])]
+    for artifact in data.get('artifacts', []):
+        lines.append(details([('Artifact', artifact.get('id')), ('Role', artifact.get('role')),
+                              ('Format', artifact.get('format')), ('Destination', artifact.get('logical_path')),
+                              ('Path', artifact.get('path')), ('Ownership', artifact.get('ownership'))]))
+    lines.extend(Literal('Source: ' + text(asset.get('source_path'))) for asset in data.get('assets', []) if asset.get('source_path') is not None)
+    lines.append('Prepared asset checks do not prove native inference readiness or device memory fit.')
     if 'instances' in data:
-        lines.append('Referencing instances:\n' + table(['Instance', 'Server', 'Incarnation'],
-            [(item.get('name'), item.get('server_id'), item.get('incarnation')) for item in data['instances']], width)
-            if data['instances'] else 'Referencing instances: None')
+        lines.append('Referencing instances: ' + str(len(data['instances'])))
     return lines
 
 
 def pipeline(args, data, width):
     if args.command == 'list':
         items = data.get('items', [])
-        return [table(['Pipeline', 'Profile / kind', 'MTP supported'],
-                      [(item.get('pipeline'), item.get('profile', item.get('kind')), (item.get('capabilities') or {}).get('mtp'))
-                       for item in items], width) if items else 'No pipelines are packaged.',
-                'Inspect defaults and limits: loom-control pipeline show PIPELINE']
-    if data.get('check_kind') == 'acquisition-presence':
-        return [details([('Pipeline', data.get('pipeline')), ('Kind', data.get('kind')),
-                         ('Asset contract', data.get('asset_contract')), ('Catalog', data.get('catalog'))]),
-                table(['Role', 'File', 'Required'],
-                      [(item['role'], item['path'], item['required']) for item in data.get('assets', [])], width),
-                'Fixed native defaults: ' + json.dumps(data.get('defaults', {}), sort_keys=True),
-                'Acquisition/presence checks only; native preparation/loading is authoritative.',
-                'Qwen serving flags and --config do not apply.']
-    defaults, limits = data.get('defaults', {}), data.get('limits', {})
+        return [table(['Pipeline', 'Modality', 'Operation'],
+                      [(item.get('pipeline'), item.get('modality'),
+                        item.get('protocol', {}).get('operation')) for item in items], width)
+                if items else 'No pipelines are packaged.',
+                'Inspect parameters and limits: loom-control pipeline show PIPELINE']
     rows = []
-    for key in (*SETTINGS, 'mtp'):
-        supported = (data.get('capabilities') or {}).get('mtp')
-        default = ('Not applicable' if key == 'mtp_depth' and defaults.get(key) is None else text(defaults.get(key)))
-        limit = ('Boolean' if key == 'mtp' else 'Not applicable' if key == 'mtp_depth' and not supported
-                 else f'1..{limits[key]}' if limits.get(key) is not None else 'Unknown')
-        rows.append((key, default, limit))
-    compatibility = data.get('compatibility') or {}
-    metadata = compatibility.get('metadata') or {}
-    catalog = data.get('catalog')
-    return [details([('Pipeline', data.get('pipeline')), ('Profile', data.get('profile')),
-                     ('MTP supported', (data.get('capabilities') or {}).get('mtp'))]),
-            table(['Setting', 'Default', 'Permitted range'], rows, width),
-            *[f'{key}: {entry[2]}.' for key, entry in SETTINGS.items()],
-            details([('Architecture', metadata.get('general.architecture')),
-                     ('Layers', metadata.get('qwen35.block_count')),
-                     ('Tokenizer fingerprint', compatibility.get('tokenizer_canonical_sha256')),
-                     ('Catalog', catalog), ('Contract', str(catalog).rstrip('/') + '/compatibility.json' if catalog else None)]),
-            'Full compatibility metadata: loom-control pipeline show ' + shlex.quote(data.get('pipeline', 'PIPELINE')) + ' --json',
+    for name, parameter in data.get('parameters', {}).items():
+        state = parameter['state']
+        value = parameter.get('value') if state == 'fixed' else parameter.get('default')
+        constraints = parameter.get('constraints', {})
+        restriction = (parameter.get('reason', '') if state == 'unsupported' else
+                       'Fixed assertion' if state == 'fixed' else
+                       ', '.join(f'{key}={json.dumps(value)}' for key, value in constraints.items() if value is not None))
+        if parameter.get('active_when'):
+            restriction += ' active when ' + json.dumps(parameter['active_when'], sort_keys=True)
+        rows.append((name, state, parameter['type'],
+                     'Absent' if state == 'unsupported' else json.dumps(value, sort_keys=True), restriction))
+    protocol = data.get('protocol', {})
+    return [details([('Pipeline', data.get('pipeline')), ('Modality', data.get('modality')),
+                     ('Operation', protocol.get('operation')), ('Endpoint', protocol.get('endpoint')),
+                     ('Request encoding', protocol.get('request_encoding')),
+                     ('Raw log events', data.get('telemetry', {}).get('raw_events')), ('Catalog', data.get('catalog'))]),
+            table(['Parameter', 'State', 'Type', 'Default / fixed value', 'Constraints'], rows, width),
+            'Packaged support is not acquired-model or native readiness.',
             'Valid capacities do not guarantee device memory fit.']
 
 

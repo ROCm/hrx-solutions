@@ -15,6 +15,7 @@ TARGET = '//loom-pipeline:moonshine_bytecode'
 RELATIVE = 'recognition/moonshine/streaming_tiny'
 ARTIFACTS = ('prepare.loombc', 'control.loombc', 'weights.loombc', 'providers.loombc')
 DATA = ('catalog.json', 'sources.json', 'LICENSE.moonshine', 'LICENSE-APACHE-2.0')
+RECIPES = ('recipes/moonshine-streaming-tiny.json',)
 REVISION = '61417137f334cfa828b38d6e9b0f2d7190503f16'
 
 
@@ -133,11 +134,12 @@ def stage(destination, outputs, repository, *, decoder):
     destination.mkdir(parents=True)
     for name in ARTIFACTS:
         shutil.copyfile(outputs[name],destination/name)
-    for name in DATA[1:]:
+    for name in (*DATA[1:], *RECIPES):
+        (destination/name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(root/name,destination/name)
     (destination/'catalog.json').write_text(json.dumps(installed_definition(json.loads((root/'catalog.json').read_text())),indent=2)+'\n')
     (destination/'artifacts.json').write_text(json.dumps(metadata,indent=2,sort_keys=True)+'\n')
-    return sorted(destination.iterdir())
+    return sorted(path for path in destination.rglob("*") if path.is_file())
 
 
 def stage_package(package_root, outputs, repository, *, decoder):
@@ -149,10 +151,12 @@ def validate_archive(archive, repository, *, prefix='hrx_solutions/loom-pipeline
     groups = validate_sources(repository)
     root = repository / 'loom-pipeline' / RELATIVE
     prefix += RELATIVE+'/'
-    expected = {prefix+name for name in (*ARTIFACTS,*DATA,'artifacts.json')}
+    expected = {prefix+name for name in (*ARTIFACTS,*DATA,*RECIPES,'artifacts.json')}
     actual = {name for name in archive.namelist() if name.startswith('hrx_solutions/loom-pipeline/recognition/') and not name.endswith('/')}
     if actual != expected:
         raise ValueError('Moonshine installed catalog allowlist mismatch')
+    if any(archive.namelist().count(name) != 1 for name in expected):
+        raise ValueError('Moonshine installed catalog duplicate member')
     metadata = json.loads(archive.read(prefix+'artifacts.json'))
     expected_metadata = {'format':1,'policy':'weights.loombc',
         'files':{name:digest(archive.read(prefix+name)) for name in ARTIFACTS},
@@ -161,7 +165,7 @@ def validate_archive(archive, repository, *, prefix='hrx_solutions/loom-pipeline
         raise ValueError('Moonshine installed artifact integrity/closure metadata mismatch')
     if json.loads(archive.read(prefix+'catalog.json')) != installed_definition(json.loads((root/'catalog.json').read_text())):
         raise ValueError('Moonshine installed native configuration differs from curated source')
-    if any(archive.read(prefix+name) != (root/name).read_bytes() for name in DATA[1:]):
+    if any(archive.read(prefix+name) != (root/name).read_bytes() for name in (*DATA[1:], *RECIPES)):
         raise ValueError('Moonshine installed source/notice provenance differs from authored input')
 
 
@@ -169,7 +173,7 @@ def validate_source_archive(archive, repository):
     """Require owned authored inputs/notices and exclude engineering payloads."""
     groups = validate_sources(repository)
     root = repository / 'loom-pipeline' / RELATIVE
-    files = {source for group in groups.values() for source in group} | set(DATA)
+    files = {source for group in groups.values() for source in group} | set(DATA) | set(RECIPES)
     for name in files:
         suffix = '/loom-pipeline/'+RELATIVE+'/'+name
         matches = [member for member in archive.getmembers() if member.name.endswith(suffix)]

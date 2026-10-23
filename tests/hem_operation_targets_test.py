@@ -11,7 +11,10 @@ import unittest
 from unittest.mock import Mock, patch
 
 from binding.python.control import hem_operation_targets as targets, hem_process, hem_state
-from binding.python.models import hem_model_operations as operations
+from binding.python.models import modalities
+
+def operation_profile(operation):
+    return modalities.get({"chat": "chat", "transcription": "asr"}[operation]).PROTOCOL
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.control.hem_state import Registry
 
@@ -20,7 +23,7 @@ DIGESTS = dict(native_sha256='a' * 64, payload_sha256='b' * 64, catalog_sha256='
 
 
 def status(operation='transcription', *, incarnation=7):
-    profile = operations.operation_profile(operation)
+    profile = operation_profile(operation)
     return dict(object='list', server={}, data=[dict(id='narrator-west',
         input_modalities=list(profile.input_modalities), output_modalities=list(profile.output_modalities),
         loom=dict(kind=profile.native_kind, endpoint=profile.endpoint, incarnation=incarnation,
@@ -76,10 +79,10 @@ class OperationTargetsTest(unittest.TestCase):
         self.registry.update_server('studio', changes, expected_token=row['launch_token'], expected_revision=row['revision'])
 
     def test_profiles_are_inert_and_finite(self):
-        code = "from binding.python.models import hem_model_operations; import sys; assert not any(name.endswith(('hem_state', 'hem_config', 'hem_models', 'hem_openwebui')) for name in sys.modules)"
+        code = "from binding.python.models import modalities; modalities.get('chat'); modalities.get('asr'); import sys; assert not any(name.endswith(('hem_state', 'hem_config', 'hem_models', 'hem_openwebui')) for name in sys.modules)"
         subprocess.run([sys.executable, '-c', code], check=True)
-        with self.assertRaises(ValueError):operations.operation_profile('synthesis')
-        with self.assertRaises(FrozenInstanceError):operations.CHAT.endpoint = '/elsewhere'
+        with self.assertRaises(KeyError):operation_profile('synthesis')
+        with self.assertRaises(FrozenInstanceError):modalities.get("chat").PROTOCOL.endpoint = '/elsewhere'
 
     def test_current_operations_keep_exact_identity_and_original_deadline(self):
         for operation in ('chat', 'transcription'):
@@ -90,7 +93,7 @@ class OperationTargetsTest(unittest.TestCase):
                 lock.assert_called_once_with('server', 'studio', deadline=self.deadline)
                 self.assertEqual((target.server_id, target.instance_name, target.origin, target.launch_token,
                                   target.incarnation), ('studio', 'narrator-west', 'http://127.0.0.1:18080', 'launch-a', 7))
-                self.assertEqual(target.profile, operations.operation_profile(operation))
+                self.assertEqual(target.profile, operation_profile(operation))
                 self.assertEqual(target.build_identity, tuple(DIGESTS.items()))
                 self.assertEqual((target.registration, target.parameter_operation, target.primary_active,
                                   target.error, target.admission), ('ready', 'idle', True, None, 'open'))

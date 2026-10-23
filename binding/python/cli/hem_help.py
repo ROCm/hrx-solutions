@@ -8,7 +8,8 @@ from __future__ import annotations
 import argparse
 import textwrap
 
-from ..models.hem_config import SETTINGS, EXPORT_RESPONSIBILITY
+from ..models.hem_config import EXPORT_RESPONSIBILITY
+from .hem_arguments import SERVING_OPTIONS
 from ..hem_common import DEFAULT_TIMEOUT
 
 RESOURCES = {
@@ -17,8 +18,8 @@ RESOURCES = {
     'opencode': 'Owned OpenCode 2 configuration for local managed servers.',
     'tui': 'Interactive, read-only terminal dashboard for Loom Serve.',
     'pi': 'Owned Pi coding-agent configuration for local managed servers.',
-    'model': 'Checkpoint files acquired or imported locally; Qwen structural or curated presence checks.',
-    'pipeline': 'Packaged model implementation, compatibility rules and serving defaults.',
+    'model': 'Checkpoint files acquired or imported locally; prepared-asset checks do not prove native readiness.',
+    'pipeline': 'Packaged modality parameters, protocol, artifact requirements and programs.',
     'server': 'Saved device/listener settings and the managed native process.',
     'instance': 'A model loaded on a server, with its submitted serving configuration.',
 }
@@ -31,14 +32,14 @@ ACTIONS = {
     'model': {
         'available': ('Discover downloadable recipes (not local inventory).', 'model available'),
         'download': ('Acquire pinned assets; use recipe preparation and applicable local checks, not native readiness.', 'model download qwen35-08b-q5-k-xl --id qwen08'),
-        'import': ('Copy existing GGUF/tokenizer or curated --assets-dir files; --alias keeps immutable references.', 'model import qwen08 --gguf weights.gguf --tokenizer tokenizer.json --alias'),
-        'validate': ('Repeat Qwen structural or curated acquisition/presence checks; does not prove native readiness.', 'model validate qwen08 --pipeline qwen-08b'),
+        'import': ('Copy existing GGUF/tokenizer or prepared --assets-dir files; --alias keeps immutable references.', 'model import qwen08 --gguf weights.gguf --tokenizer tokenizer.json --alias --pipeline qwen-08b'),
+        'validate': ('Repeat selected recipe and prepared-asset checks; does not prove native readiness.', 'model validate qwen08 --pipeline qwen-08b'),
         'list': ('List registered local models and asset accessibility.', 'model list'),
         'show': ('Inspect assets, validation and referencing instances.', 'model show qwen08'),
     },
     'pipeline': {
         'list': ('List packaged pipelines and their capabilities.', 'pipeline list'),
-        'show': ('Inspect exact defaults, limits, capabilities and compatibility rules; no GPU or local model required.', 'pipeline show qwen-08b\nloom-control pipeline show moonshine-streaming-tiny'),
+        'show': ('Inspect parameter states, defaults, constraints and protocol; no GPU or local model required.', 'pipeline show qwen-08b\nloom-control pipeline show moonshine-streaming-tiny'),
     },
     'server': {
         'start': ('Start a new named server, or reuse saved settings. New processes start empty; prior instances are not reloaded.', 'server start --name local --device amdgpu --listen 127.0.0.1:8080\nloom-control server start local'),
@@ -80,23 +81,18 @@ Bare root/resource commands show text guidance, even with --json.
 
 
 def configuration_reference():
-    lines = ['Configuration (Qwen only; curated entries reject --config and these flags):',
-             '  --config accepts a flat JSON object. Flags override file values, which',
-             '  override pipeline defaults. Accepted keys and numeric ranges:']
-    for key, (default, maximum, _) in SETTINGS.items():
-        suffix = 'when supported/enabled; otherwise not applicable' if key == 'mtp_depth' else ''
-        lines.append(f'  {key}: integer 1..{maximum}; default {default} {suffix}'.rstrip())
-    lines.extend([
-        '  mtp: boolean; default is pipeline-dependent and requires MTP support.',
-        '  Example file: {"rows": 4, "context_capacity": 8192}',
-        '  Exact defaults/capabilities: loom-control pipeline show PIPELINE',
-        '  prefill_capacity must be <= context_capacity and >= mtp_depth + 1',
-        '  (at least 1 when MTP is disabled). Explicit mtp_depth conflicts with',
-        '  disabled MTP. Unsupported pipelines reject enabling MTP.',
-        '  Duplicate/unknown keys, null, wrong types and nonfinite numbers fail.',
-        '  Valid capacities do not guarantee device memory fit.',
+    return "\n".join([
+        'Configuration applies through the selected recipe and pipeline descriptor.',
+        '  --config accepts a flat JSON object. Explicit flags override file values,',
+        '  then recipe configuration, then descriptor defaults.',
+        '  Inspect exact types, fixed/unsupported values, defaults and limits:',
+        '    loom-control pipeline show PIPELINE',
+        '  Duplicate/unknown keys, null, wrong types and nonfinite values fail.',
+        '  Each supplied layer is checked; a later override cannot repair bad input.',
+        '  Cross-setting rules apply to the final effective configuration.',
+        '  A later disabled MTP removes inherited mtp_depth; depth explicitly',
+        '  supplied with disabled MTP is rejected. Valid capacities do not prove memory fit.',
     ])
-    return '\n'.join(lines)
 
 
 def describe(root, domains):
@@ -139,13 +135,13 @@ def _arguments(parser, resource, command):
         'instance': 'Instance name on the selected server, distinct from the local model ID.',
         'pipeline': ('Packaged pipeline ID to inspect (see pipeline list).' if resource == 'pipeline' else
                      "Packaged pipeline ID; omitted uses the recipe's declared pipeline (see model available)." if resource == 'model' and command == 'download' else
-                     'Packaged pipeline ID; omitted selects the unique compatible pipeline (see pipeline list).'),
+                     'Packaged pipeline ID; must agree with the selected model recipe (see pipeline list).'),
         'recipe': 'Download recipe ID from loom-control model available.',
         'id': 'Required local model ID for this download; distinct from the recipe ID.',
         'offline': 'Use only files already present in the download CLI cache; missing cached assets fail.',
-        'dry_run': 'Preview acquisition commands; acquire no files and create no model record.',
+        'dry_run': 'Preview declared destinations and cache presence; acquire no files and create no model record.',
         'gguf': 'One or more matching GGUF fragment paths; copied by default.',
-        'assets_dir': 'Complete caller-prepared files for an explicit curated --pipeline; copy by default or --alias. No preparation or fetch.',
+        'assets_dir': 'Complete caller-prepared files for an explicit --pipeline; copy by default or --alias. No preparation or fetch.',
         'tokenizer': 'Matching tokenizer.json path; copied by default.',
         'alias': 'Reference immutable external files instead of copying; they must remain available.',
         'name': ('Required name for a new saved server; use positional SERVER for a saved start.' if resource == 'server' else
@@ -161,12 +157,11 @@ def _arguments(parser, resource, command):
         'no_wait': 'Return after stop acceptance; retirement is not yet confirmed. Inspect instance status.',
         'follow': 'Follow logs until Ctrl-C; ends observation without stopping the service.',
         'output': 'Required deployment JSON output path; does not start a server. Retain referenced dependencies through retirement.',
-        'config': 'Flat JSON serving configuration path; flags override file, then pipeline defaults. See reference below.',
+        'config': 'Flat JSON serving configuration; flags override file, recipe values and descriptor defaults. See reference below.',
         'mtp': 'Enable multi-token prediction (propose tokens for verification), or disable it with --no-mtp; default depends on pipeline support.',
     }
-    for key, (default, maximum, description) in SETTINGS.items():
-        default_text = f'{default} when supported/enabled' if key == 'mtp_depth' else str(default)
-        helps[key] = f'{description}; range 1..{maximum}, default {default_text}. JSON key: {key}.'
+    for key in SERVING_OPTIONS:
+        helps[key] = f'Explicit {key.replace("_", " ")}; accepted values depend on the selected descriptor. JSON key: {key}.'
     if resource == 'omp':
         helps.update(check='Inspect activation and runtime compatibility separately; no writes or client execution.',
                      disable='Remove unchanged owned files and native entries without OMP or Bun; preserve edits.',
@@ -192,6 +187,6 @@ def _arguments(parser, resource, command):
             continue
         group = ('Output' if action.dest in ('json', 'output', 'follow') else
                  'Lifecycle' if action.dest in ('timeout', 'abort', 'no_wait') else
-                 'Serving configuration' if action.dest in (*SETTINGS, 'config', 'mtp', 'pipeline') else 'Targeting')
+                 'Serving configuration' if action.dest in (*SERVING_OPTIONS, 'config', 'mtp', 'pipeline') else 'Targeting')
         parser._optionals._group_actions.remove(action)
         groups[group]._group_actions.append(action)

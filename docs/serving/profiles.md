@@ -39,7 +39,7 @@ and [CLI](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent
 ## Qwen3.8 27B extension
 
 The packaged `qwen` pipeline lives at `loom-pipeline/llm/qwen/qwen_27b`.
-Its `compatibility.json` pins checkpoint/tokenizer independently; use its own
+Its `recipes/qwen38-27b-q5-k-xl.json` pins checkpoint/tokenizer independently; use its own
 `pipeline.json` descriptor and single `pipeline.loombc`, keeping all preparation,
 control and provider definitions together. The small-model example does not qualify 27B memory fit or agent
 use on the same hardware.

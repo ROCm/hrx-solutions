@@ -11,11 +11,16 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Mapping
 
 from ..hem_common import HemError
 from . import model_download
-from .model_store import NamedAsset, PreparationResult, prepared_outputs, readable_file, ModelImportError
-from .moonshine_preparer_identity import FILES as TOOL_FILES, RELATIVE, REVISION
+from .model_store import readable_file
+from .recipe_types import GeneratedArtifact, HFSource
+from .moonshine_preparer_identity import (
+    FILES as TOOL_FILES, RELATIVE, REVISION,
+    INPUT_REPOSITORY, INPUT_REVISION, INPUT_FILES, GENERATED_FILES,
+)
 
 TIMEOUT = 300
 GRACE = 5
@@ -72,7 +77,9 @@ def _run(arguments, *, timeout, stdout, stderr):
             signal.signal(signal.SIGTERM, previous)
 
 
-def preflight():
+def preflight(*, deadline=None):
+    if deadline is not None:
+        deadline.remaining()
     if sys.version_info < (3, 12):
         raise HemError(GUIDANCE)
     root = tool_directory()
@@ -83,35 +90,28 @@ def preflight():
         with tempfile.TemporaryFile() as errors:
             code = _run([sys.executable, '-c',
                          'from huggingface_hub import hf_hub_download; from safetensors import TensorSpec, serialize'],
-                        timeout=30, stdout=subprocess.DEVNULL, stderr=errors)
+                        timeout=30 if deadline is None else min(30, deadline.remaining()),
+                        stdout=subprocess.DEVNULL, stderr=errors)
         if code:
             raise HemError(GUIDANCE)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise HemError(f'{GUIDANCE} Preparation preflight failed: {error}') from error
 
 
-# The fixed helper resolves this reviewed model descriptor through offline HF
-# cache. Explicit inputs must match it; a recipe cannot choose helper authority.
-_INPUT_REPO = 'moonshine-ai/moonshine-streaming-tiny'
-_INPUT_REVISION = 'f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a'
-_INPUT_FILES = ('model.safetensors', 'tokenizer.json', 'config.json')
-GENERATED = (('rotary', 'rotary.safetensors'),)
-
-
 def _check_inputs(inputs):
-    expected = {('huggingface', _INPUT_REPO, _INPUT_REVISION, name) for name in _INPUT_FILES}
-    actual = {(item.kind, item.repo_id, item.revision, item.filename) for item in inputs}
-    if len(inputs) != len(expected) or actual != expected:
+    if not isinstance(inputs, Mapping) or set(inputs) != set(INPUT_FILES):
         raise HemError('Moonshine preparation inputs differ from its reviewed pinned descriptor')
-    for item in inputs:
-        source = dict(repo_id=item.repo_id, revision=item.revision, filename=item.filename)
-        if item.path != model_download._cache_path(source) or not readable_file(item.path):
+    for name, path in inputs.items():
+        source = HFSource(INPUT_REPOSITORY, INPUT_REVISION, name)
+        if (not isinstance(path, Path) or not path.is_absolute()
+                or path != model_download._cache_path(source) or not readable_file(path)):
             raise HemError('Moonshine preparation requires its explicit readable pinned cache inputs')
 
 
 def prepare(inputs, attempt, deadline):
     """Consume explicit inputs in caller scratch; return one complete output set."""
-    directory, output = attempt.directory, attempt.output
+    directory = Path(attempt)
+    output = directory / 'output'
     arguments = [sys.executable, str(tool_directory() / 'prepare_assets.py'),
                  '--output', str(output), '--name', 'moonshine-streaming-tiny', '--offline']
     # Refuse unsafe caller scratch before opening diagnostic paths through it.
@@ -126,7 +126,7 @@ def prepare(inputs, attempt, deadline):
     result = {'tool_revision': REVISION, 'completed': False}
     try:
         _check_inputs(inputs)
-        with attempt.stdout.open('wb') as stdout, attempt.stderr.open('wb') as stderr:
+        with (directory / 'stdout.log').open('wb') as stdout, (directory / 'stderr.log').open('wb') as stderr:
             code = _run(arguments, timeout=min(TIMEOUT, deadline.remaining()), stdout=stdout, stderr=stderr)
         if code:
             raise HemError(f'HRX Moonshine preparation exited {code}; incomplete acquisition retained; inspect {directory}')
@@ -135,16 +135,21 @@ def prepare(inputs, attempt, deadline):
                ('model.safetensors', 'tokenizer.json', 'config.json', 'rotary.safetensors',
                 'provenance.json', 'model.json')):
             raise HemError(f'HRX preparation did not complete its outputs; inspect {directory}')
-        completed = PreparationResult(directory, (NamedAsset('rotary', 'rotary.safetensors',
-                                                             output / 'rotary.safetensors'),))
-        prepared_outputs(attempt, completed, GENERATED)
+        generated = []
+        for role, format, name in GENERATED_FILES:
+            path = output / name
+            if output.is_symlink() or path.is_symlink() or not readable_file(path):
+                raise HemError('Moonshine generated output is missing or aliased outside its attempt')
+            path.resolve(strict=True).relative_to(output.resolve(strict=True))
+            output.resolve(strict=True).relative_to(directory)
+            generated.append(GeneratedArtifact(role, format, name, path))
         result['completed'] = True
-        return completed
-    except (OSError, subprocess.TimeoutExpired, ModelImportError) as error:
+        return tuple(generated)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         result['error'] = str(error)
         raise HemError(f'HRX Moonshine preparation failed; incomplete acquisition retained; inspect {directory}: {error}') from error
     except BaseException as error:
         result['error'] = str(error)
         raise
     finally:
-        attempt.receipt.write_text(json.dumps(result, indent=2) + '\n')
+        (directory / 'receipt.json').write_text(json.dumps(result, indent=2) + '\n')

@@ -75,11 +75,11 @@ flowchart TD
 | Responsibility | Owner and navigation |
 | --- | --- |
 | Command grammar and presentation | [`hem_cli.py`](../../binding/python/hem_cli.py) and resource CLI modules parse inputs and render outcomes. The legacy [`_launcher.py`](../../binding/python/_launcher.py) retains its own defaults and native argument forwarding. |
-| Durable state and passive decoding | [`hem_state.py`](../../binding/python/hem_state.py) owns records, transactions, revision checks and resource locks. Its pure `decode_record` is shared with [`hem_tui_provider.py`](../../binding/python/hem_tui_provider.py), whose bounded, read-only snapshots do not migrate or reconcile state. A second snapshot detects changes during observation. |
-| Acquisition and preparation | [`hem_models.py`](../../binding/python/hem_models.py) coordinates publication and retry; [`model_store.py`](../../binding/python/model_store.py) owns asset mappings. Model-owned helpers such as [`moonshine_preparation.py`](../../binding/python/moonshine_preparation.py) prepare trusted files. File preparation is separate from native activation. |
-| Serving interpretation | [`hem_config.py`](../../binding/python/hem_config.py) produces recursively immutable checked settings, definitions, sources and dependencies. Export and managed launch retain that interpretation, verifying catalog root identity and rebasing its envelope without selecting defaults again. [`pipeline_validation.py`](../../binding/python/pipeline_validation.py) assembles text definitions from explicit settings shared with the legacy launcher. |
+| Durable state and passive decoding | [`hem_state.py`](../../binding/python/control/hem_state.py) owns records, transactions, revision checks and resource locks. Its pure `decode_record` is shared with [`hem_tui_provider.py`](../../binding/python/hem_tui_provider.py), whose bounded, read-only snapshots do not migrate or reconcile state. A second snapshot detects changes during observation. |
+| Acquisition and preparation | [`hem_models.py`](../../binding/python/models/hem_models.py) coordinates publication and retry; [`model_store.py`](../../binding/python/models/model_store.py) owns asset mappings. Model-owned helpers such as [`moonshine_preparation.py`](../../binding/python/moonshine_preparation.py) prepare trusted files. File preparation is separate from native activation. |
+| Serving interpretation | [`hem_config.py`](../../binding/python/models/hem_config.py) produces recursively immutable checked settings, definitions, sources and dependencies. Export and managed launch retain that interpretation, verifying catalog root identity and rebasing its envelope without selecting defaults again. The selected CHAT/ASR modality constructs native definitions from those settings and prepared artifacts; the native launcher passes deployment arguments through. |
 | Operation eligibility and integration effects | Eligibility comes from finite catalog kind/modality and fresh native facts, with integration-specific policy. [`hem_integrations.py`](../../binding/python/integrations/hem_integrations.py) dispatches to complete Pi, OpenCode, OMP and WebUI owners. Those owners control their configuration and remote effects. See [connection commands](#connect-pi-once). |
-| Process and native lifecycle | [`hem_process.py`](../../binding/python/hem_process.py) owns launch validation, process/socket identity and locked observation/reconciliation. [`hem_instances.py`](../../binding/python/hem_instances.py) coordinates model registration and dependency retention. [`hem_http.py`](../../binding/python/hem_http.py) owns structured transport failures, acceptance uncertainty and native readiness/retirement predicates. Presentation observations do not grant later mutation authority: transitions revalidate ownership and registration identity. |
+| Process and native lifecycle | [`hem_process.py`](../../binding/python/control/hem_process.py) owns launch validation, process/socket identity and locked observation/reconciliation. [`hem_instances.py`](../../binding/python/control/hem_instances.py) coordinates model registration and dependency retention. [`hem_http.py`](../../binding/python/control/hem_http.py) owns structured transport failures, acceptance uncertainty and native readiness/retirement predicates. Presentation observations do not grant later mutation authority: transitions revalidate ownership and registration identity. |
 | Native execution and model policy | Packaged [pipeline catalogs](../../loom-pipeline/) supply model binding and policy. HRX, pinned by [`MODULE.bazel`](../../MODULE.bazel), implements admission, scheduling, resource borrowing, HTTP control and device execution. See the [native lifecycle](../serving/lifecycle.md) and [LLM internals](../../loom-pipeline/llm/README.md). |
 | Build and independent acceptance | [`python_packaging.py`](../../build_tools/wheel_tools/python_packaging.py) binds build/query context and stages native deliverables. [`package_families.py`](../../build_tools/model_tools/package_families.py) composes fixed model-owned producers. Independent wheel checks validate expected contents; a host build alone does not qualify installed serving or GPU/Pi behavior. See [build tools](../../build_tools/README.md). |
 
@@ -114,7 +114,7 @@ finite audio contract.
 | Platform | Linux x86-64, Python 3.9 or newer, a supported AMD GPU and compatible driver. The source pipelines have been exercised on gfx1100 and gfx1151; other devices need validation. |
 | Chat | Streaming chat, greedy generation (`stream: true`, `temperature: 0`); the Qwen policy rejects thinking mode. |
 | Speculation | MTP defaults to depth three on 27B; 0.8B does not support MTP. |
-| Validation | CPU inspection of GGUF metadata, tensor shapes/types and tokenizer configuration. This is structural qualification, without inference or full checkpoint hashing. |
+| Validation | Recipe identity, required artifacts, preparation receipts and packaged program integrity. Native loading judges model compatibility; local checks do not prove inference readiness. |
 
 Install the [wheel](../../README.md#install-from-pypi) in a virtual environment.
 The inference machine needs GPU-accessible memory for weights, retained state
@@ -161,13 +161,12 @@ files; omit it to copy files into owned storage. Multiple fragments can follow
 such as `tokenizer.json` separate. Inspection shows both scoped and external
 locations. Never move, modify or evict an aliased file while it may be in use.
 
-Qwen import and download perform the existing structural checks before marking
-a model ready. Qwen selects a unique compatible pipeline; `--pipeline` constrains
-import/validation or overrides the recipe selection subject to those checks. An
-unknown or ambiguous Qwen match blocks serving; names alone do not establish
-compatibility. Curated Moonshine instead checks completed acquisition and asset
-presence; native preparation/loading is authoritative. Its recipe has a fixed
-named pipeline, and a different `--pipeline` override is rejected. Completed assets and an inspectable invalid/incomplete
+Qwen and Moonshine use the same authored recipe and prepared-artifact path.
+Recipes declare their pipeline; `--pipeline` must agree with that declaration.
+Imports select an unambiguous packaged recipe, using `--pipeline` when needed;
+model names and tensor shapes do not infer a pipeline. Local checks retain
+file-format/index safety, required assets, generated-output receipts and program
+integrity. Native loading reports model incompatibility. Completed assets and an inspectable invalid/incomplete
 record survive failure. Repeating the same acquisition can retry; conflicting
 assets under an existing ID are refused. Use another ID for a different asset
 set. There are no replacement, deletion or shared-cache pruning commands.
@@ -181,8 +180,7 @@ loom-control model validate qwen08 --pipeline qwen-08b
 Inventory reports accessibility and validation state, including broken aliases;
 it does not imply the model is loaded. `show` includes paths, ownership,
 provenance and current referencing instances. Every start and export repeats the
-applicable local checks. For Qwen these are structural checks; for Moonshine they
-are acquisition/presence checks, including the original generated-asset receipt.
+selected recipe/artifact checks, including generated-asset receipts where required.
 A locally ready model is not yet a loaded native instance.
 
 ## Moonshine speech recognition
@@ -313,7 +311,9 @@ Loom Control is changing registrations.
 
 ## Configure an instance
 
-Flags override the JSON configuration file, which overrides pipeline defaults.
+Explicit flags override the JSON configuration file, then authored recipe values,
+then selected descriptor defaults. `pipeline show` exposes the same parameter
+states, types and constraints for chat and recognition.
 Server device/listener settings are separate from per-instance capacities.
 
 | Flag / JSON key | Meaning | Default | Range |
@@ -330,10 +330,11 @@ are not a memory-fit guarantee. Prefill capacity must not exceed context
 capacity and must fit one anchor plus the MTP depth (at least one token without
 MTP). Unknown or duplicate JSON keys, null, wrong types, nonfinite numbers,
 unsupported MTP and contradictory resolved settings fail with diagnostics.
-For example, explicitly setting depth while MTP resolves disabled is ambiguous
-and rejected, even when depth came from the file and `--no-mtp` from flags.
-Remove the explicit depth or enable supported MTP. A default depth is simply
-suppressed when MTP is disabled.
+A later `--no-mtp` removes inherited recipe/file depth. Explicit depth supplied
+at the same or a higher layer than the winning disabled MTP is rejected. The
+0.8B pipeline always rejects explicit depth, including null. Every supplied
+layer receives field checks; cross-setting rules apply only after all layers
+merge. A file with context64 and a later prefill32 override is therefore valid.
 
 For an optional 27B profile, create a flat JSON file:
 
@@ -405,7 +406,7 @@ such lifecycle budget. Timeouts preserve evidence; they do not imply rollback.
 
 Results use readable text by default: inventories are tables or labeled records,
 inspection groups relevant facts, and actions report concise outcomes. Missing
-observations remain unknown; structural model validation never claims inference
+observations remain unknown; local prepared-asset checks never claim inference
 readiness. Log snapshots are direct text; following writes each observed chunk
 to stderr without repeating a final snapshot on human stdout.
 

@@ -1,268 +1,366 @@
-"""Acquisition/storage contracts use tiny synthetic files; no model downloads."""
+"""Common acquisition contracts with actual authored recipes and controlled HF I/O."""
 from contextlib import redirect_stderr
-import hashlib
+from dataclasses import replace
 import io
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from binding.python.control import hem_state
-from binding.python.models import hem_models as models, hem_config
-from binding.python.hem_common import HemError, InvalidInput
-from tests.gguf_fixtures import write_gguf, write_matching_gguf, profile
+from binding.python.models import hem_models as models, model_download, recipes, pipelines
+from binding.python.models.recipe_types import (GeneratedArtifact, GeneratedSource, HFSource,
+    PreparedModel, PreparationRequirement, GeneratedOutput, BundleManifest)
+from binding.python.hem_common import Deadline, HemError
+from tests.gguf_fixtures import write_gguf
 
 
-class HemModelsTest(unittest.TestCase):
+class Binding:
+    """Faithful acquisition-only binding; concrete policy is tested by its owner."""
+    def __init__(self, pipeline, modality, artifacts):
+        self.id, self.modality, self.artifacts = pipeline, modality, artifacts
+        outputs = tuple(GeneratedOutput(a.role, a.format, a.path) for a in artifacts
+                        if isinstance(a.source, GeneratedSource))
+        self.preparation = PreparationRequirement((), outputs) if outputs else None
+        self.events = []
+        self.catalog = None
+
+    def describe(self):
+        return SimpleNamespace(id=self.id, modality=self.modality, preparation=self.preparation,
+                               bundle=BundleManifest(self.catalog, ()))
+
+    def validate_artifacts(self, artifacts):
+        if artifacts != self.artifacts:
+            raise HemError('unsupported artifact tuple')
+
+    def preflight(self, plan, deadline):
+        self.events.append('preflight')
+        deadline.remaining()
+
+    def prepare(self, plan, inputs, attempt, deadline):
+        self.events.append('prepare')
+        deadline.remaining()
+        assert set(inputs) == {a.id for a in plan.inputs}
+        result = []
+        for a in plan.generated:
+            path = attempt / 'output' / a.path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'generated')
+            result.append(GeneratedArtifact(a.role, a.format, a.path, path))
+        return tuple(result)
+
+
+class AcquisitionFixture:
     def setUp(self):
-        # Acquisition fixtures explicitly control offline behavior; a caller's
-        # real-model offline policy must not change mocked retry expectations.
-        offline = patch.dict(os.environ, {'HF_HUB_OFFLINE': '0'})
-        offline.start()
-        self.addCleanup(offline.stop)
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.cache = self.root / 'cache'
+        self.environment = patch.dict(os.environ, {'HF_HUB_CACHE': str(self.cache), 'HF_HUB_OFFLINE': '0'})
+        self.environment.start(); self.addCleanup(self.environment.stop)
         self.registry = hem_state.Registry(self.root / 'state')
+        source = Path(__file__).resolve().parents[1] / 'loom-pipeline'
+        self.declarations = {p.stem: recipes.parse(p.read_bytes()) for p in source.glob('**/recipes/*.json')}
+        self.bindings = {r.pipeline: Binding(r.pipeline, r.modality, r.artifacts)
+                         for r in self.declarations.values()}
+        for path in source.glob('**/recipes/*.json'):
+            recipe = recipes.parse(path.read_bytes())
+            self.bindings[recipe.pipeline].catalog = str(path.parent.parent.relative_to(source))
+        self.selector = patch.object(pipelines, 'get', side_effect=lambda key: self.bindings[key])
+        self.selector.start(); self.addCleanup(self.selector.stop)
+        self.recipe = self.declarations['qwen35-08b-q5-k-xl']
+        self.network = patch.object(model_download, '_run_hf', side_effect=AssertionError('unexpected network'))
+        self.fetch = self.network.start(); self.addCleanup(self.network.stop)
+        self.output = redirect_stderr(io.StringIO())
+        self.output.__enter__(); self.addCleanup(self.output.__exit__, None, None, None)
         self.gguf = self.root / 'input.gguf'
         write_gguf(self.gguf, tensors=[('tiny', [1], 0, 0)])
         self.tokenizer = self.root / 'tokenizer.json'
         self.tokenizer.write_text('{"model":{"fixture":true}}')
-        self.qualifier = patch.object(hem_config, 'select_pipeline', return_value='qwen-08b')
-        self.select = self.qualifier.start()
-        self.addCleanup(self.qualifier.stop)
-        self.output = redirect_stderr(io.StringIO())
-        self.output.__enter__()
-        self.addCleanup(self.output.__exit__, None, None, None)
+
+    def cached(self, recipe=None):
+        for a in (recipe or self.recipe).artifacts:
+            if isinstance(a.source, HFSource):
+                path = model_download._cache_path(a.source)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'opaque HF input')
 
     def acquire(self, name='tiny', **kwargs):
+        kwargs.setdefault('pipeline', self.recipe.pipeline)
         return models.import_model(self.registry, name, ggufs=[self.gguf], tokenizer=self.tokenizer, **kwargs)
 
+    def download(self, name='downloaded', **kwargs):
+        return models.download(self.registry, self.recipe.id, model_id=name, **kwargs)
+
+
+class HemModelsTest(AcquisitionFixture, unittest.TestCase):
     def test_owned_copy_and_immutable_retry(self):
         row = self.acquire()
         target = Path(row['directory']) / 'model.gguf'
-        self.assertFalse(target.is_symlink())
         original = target.read_bytes()
-        self.gguf.write_bytes(b'changed external input')
-        again = self.acquire()
+        self.gguf.write_bytes(b'changed source')
+        self.acquire()
+        self.assertFalse(target.is_symlink())
         self.assertEqual(target.read_bytes(), original)
-        self.assertEqual(len(self.registry.list_models()), 1)
-        self.assertEqual(again['assets'], row['assets'])
         self.assertEqual(models.show(self.registry, 'tiny')['state'], 'ready')
+        self.assertEqual(len(self.registry.list_models()), 1)
 
     def test_alias_ownership_and_independent_tokenizers(self):
         first = self.acquire('first', alias=True)
-        second_tokenizer = self.root / 'other' / 'tokenizer.json'
-        second_tokenizer.parent.mkdir()
-        second_tokenizer.write_text('{"different":true}')
-        second = models.import_model(self.registry, 'second', ggufs=[self.gguf], tokenizer=second_tokenizer, alias=True)
-        for row, token in ((first, self.tokenizer), (second, second_tokenizer)):
+        other = self.root / 'other.json'; other.write_text('{}')
+        second = models.import_model(self.registry, 'second', ggufs=[self.gguf], tokenizer=other,
+                                     pipeline=self.recipe.pipeline, alias=True)
+        for row, token in ((first, self.tokenizer), (second, other)):
             path = Path(row['directory']) / 'tokenizer.json'
-            self.assertTrue(path.is_symlink())
-            self.assertEqual(path.resolve(), token)
-        self.assertEqual(self.tokenizer.read_text(), '{"model":{"fixture":true}}')
+            self.assertTrue(path.is_symlink()); self.assertEqual(path.resolve(), token)
         self.assertEqual(len(models.inventory(self.registry)), 2)
 
     def test_conflicting_id_preserves_original(self):
         self.acquire()
         before = self.registry.get_model('tiny')
-        other = self.root / 'other.gguf'
-        other.write_bytes(b'other')
+        other = self.root / 'other.gguf'; other.write_bytes(b'other')
         with self.assertRaisesRegex(HemError, 'different mappings'):
-            models.import_model(self.registry, 'tiny', ggufs=[other], tokenizer=self.tokenizer)
-        self.assertEqual(self.registry.get_model('tiny'), before)
-
-    def test_invalid_and_ambiguous_assets_are_published_and_retryable(self):
-        for name, diagnostic in [('invalid', 'incompatible'), ('ambiguous', 'Ambiguous compatible pipelines')]:
-            self.select.side_effect = InvalidInput(diagnostic)
-            with self.assertRaisesRegex(InvalidInput, diagnostic):
-                self.acquire(name)
-            row = self.registry.get_model(name)
-            self.assertEqual(row['pending']['stage'], 'published-invalid')
-            self.assertTrue((Path(row['directory']) / 'model.gguf').is_file())
-            self.assertEqual(models.show(self.registry, name)['state'], 'invalid')
-            self.select.side_effect = None
-            self.acquire(name)
-            self.assertIsNone(self.registry.get_model(name)['pending'])
+            models.import_model(self.registry, 'tiny', ggufs=[other], tokenizer=self.tokenizer,
+                                pipeline=self.recipe.pipeline)
+        self.assertEqual(before, self.registry.get_model('tiny'))
 
     def test_missing_alias_inspectable_and_revalidation_fails(self):
-        self.acquire(alias=True)
-        self.gguf.unlink()
+        self.acquire(alias=True); self.gguf.unlink()
         self.assertEqual(models.show(self.registry, 'tiny')['state'], 'missing')
-        with self.assertRaisesRegex(InvalidInput, 'missing'):
+        with self.assertRaisesRegex(HemError, 'missing'):
             models.validate(self.registry, 'tiny')
         self.assertFalse(self.registry.get_model('tiny')['validation']['valid'])
-        self.assertTrue((self.registry.root / 'models/tiny/model.gguf').is_symlink())
 
     def test_incomplete_copy_retry_reuses_completed_members(self):
-        contents = self.gguf.read_bytes()
-        self.tokenizer.unlink()
-        with self.assertRaisesRegex(HemError, 'incomplete acquisition retained'):
-            self.acquire()
-        row = self.registry.get_model('tiny')
-        stage = Path(row['pending']['path'])
-        inode = (stage / 'model.gguf').stat().st_ino
-        self.gguf.unlink()
-        self.tokenizer.write_text('{}')
-        self.acquire()
-        target = self.registry.root / 'models/tiny/model.gguf'
-        self.assertEqual(target.stat().st_ino, inode)
-        self.assertEqual(target.read_bytes(), contents)
-
-    def test_atomic_partial_copy_is_not_reused(self):
-        def fail(incoming, stream, **kwargs):
-            stream.write(b'partial')
-            raise OSError('interrupted copy')
-        with patch.object(models.shutil, 'copyfileobj', side_effect=fail):
+        copy = models.shutil.copyfileobj
+        def fail_second(source, destination, **kwargs):
+            if source.name == str(self.tokenizer):
+                raise OSError('interrupted')
+            return copy(source, destination, **kwargs)
+        with patch.object(models.shutil, 'copyfileobj', side_effect=fail_second):
             with self.assertRaisesRegex(HemError, 'interrupted'):
                 self.acquire()
-        row = self.registry.get_model('tiny')
-        self.assertFalse((Path(row['pending']['path']) / 'model.gguf').exists())
-        (Path(row['pending']['path']) / '.model.gguf.partial').write_bytes(b'abrupt death')
+        row = self.registry.get_model('tiny'); stage = Path(row['pending']['path'])
+        inode = (stage / 'model.gguf').stat().st_ino
         self.acquire()
-        self.assertFalse((Path(row['directory']) / '.model.gguf.partial').exists())
+        self.assertEqual((Path(row['directory']) / 'model.gguf').stat().st_ino, inode)
+
+    def test_atomic_partial_copy_is_not_reused(self):
+        def fail(source, destination, **kwargs):
+            destination.write(b'incomplete'); raise OSError('interrupted')
+        with patch.object(models.shutil, 'copyfileobj', side_effect=fail):
+            with self.assertRaises(HemError): self.acquire()
+        row = self.registry.get_model('tiny'); stage = Path(row['pending']['path'])
+        self.assertFalse((stage / 'model.gguf').exists())
+        self.acquire()
         self.assertEqual((Path(row['directory']) / 'model.gguf').read_bytes(), self.gguf.read_bytes())
 
     def test_crash_after_rename_resumes_without_adopting_orphan(self):
-        original = self.registry.update_model
+        update = self.registry.update_model
         def crash(model_id, changes, **kwargs):
-            if changes.get('pending') == {'stage': 'qualification'}:
-                raise RuntimeError('crash after rename')
-            return original(model_id, changes, **kwargs)
+            if changes.get('pending') == {'stage': 'qualification'}: raise RuntimeError('crash')
+            return update(model_id, changes, **kwargs)
         with patch.object(self.registry, 'update_model', side_effect=crash):
-            with self.assertRaisesRegex(RuntimeError, 'crash after rename'):
-                self.acquire()
+            with self.assertRaisesRegex(RuntimeError, 'crash'): self.acquire()
         row = self.registry.get_model('tiny')
         self.assertFalse(Path(row['pending']['path']).exists())
-        self.assertTrue(Path(row['directory']).exists())
         self.acquire()
         self.assertEqual(models.show(self.registry, 'tiny')['state'], 'ready')
-        orphan = self.registry.root / 'models/orphan'
-        orphan.mkdir()
-        with self.assertRaisesRegex(HemError, 'untracked'):
-            self.acquire('orphan')
 
-    def test_fragment_index_is_scoped_and_has_native_suffix(self):
-        second = self.root / 'second.gguf'
-        write_gguf(second, tensors=[('other', [1], 0, 0)])
-        row = models.import_model(self.registry, 'split', ggufs=[self.gguf, second], tokenizer=self.tokenizer, alias=True)
-        files = models.model_files(self.registry, 'split')
-        self.assertTrue(str(files.weights).endswith('.safetensors.index.json'))
-        self.assertEqual(json.loads(files.weights.read_text())['weight_map'], {
-            'tiny': 'model-00001-of-00002.gguf', 'other': 'model-00002-of-00002.gguf'})
-        self.assertTrue(all(path.suffix == '.gguf' for path in files.gguf_paths))
-        self.assertEqual(Path(row['directory']), files.weights.parent)
-
-    def test_bad_fragment_mapping_retains_invalid_assets(self):
-        second = self.root / 'duplicate.gguf'
-        second.write_bytes(self.gguf.read_bytes())
-        with self.assertRaises(InvalidInput):
-            models.import_model(self.registry, 'split', ggufs=[self.gguf, second], tokenizer=self.tokenizer)
-        self.assertEqual(self.registry.get_model('split')['pending']['stage'], 'published-invalid')
-        self.assertTrue((self.registry.root / 'models/split/model-00002-of-00002.gguf').exists())
-        for inputs in ([self.gguf, self.gguf], [self.tokenizer]):
-            with self.assertRaises(InvalidInput):
-                models.import_model(self.registry, 'bad', ggufs=inputs, tokenizer=self.tokenizer)
-
-    def recipe(self):
-        return dict(id='fixture', pipeline='qwen-08b', gguf=dict(repo_id='test/weights', revision='a'*40, filenames=['weights.gguf']),
-                    tokenizer=dict(repo_id='test/tokenizer', revision='b'*40, filename='tokenizer.json'))
-
-    def download(self, **kwargs):
-        return models.download(self.registry, 'fixture', model_id='downloaded', **kwargs)
-
-    def cache(self, source):
-        return models.model_download._cache_path(source)
-
-    def test_offline_preserves_record_without_network_and_retry_uses_cache(self):
-        with patch.dict(os.environ, {'HF_HUB_CACHE': str(self.root / 'cache')}), \
-             patch.object(models.model_download, 'recipe_by_id', return_value=self.recipe()), \
-             patch.object(models.model_download, '_run_hf') as network:
-            with self.assertRaisesRegex(HemError, 'Offline cache is missing'):
-                self.download(offline=True)
-            self.assertEqual(self.registry.get_model('downloaded')['pending']['stage'], 'staging')
-            for source in models.model_download._sources(self.recipe()):
-                path = self.cache(source)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(self.gguf.read_bytes() if source['role'] == 'gguf' else self.tokenizer.read_bytes())
-            row = self.download(offline=True)
-            network.assert_not_called()
-            self.assertEqual(row['pipeline'], 'qwen-08b')
-            self.assertTrue(all(item['ownership'] == 'reference' for item in row['assets']))
-            missing = self.cache(models.model_download._sources(self.recipe())[0])
-            missing.unlink()
-            self.assertEqual(models.show(self.registry, 'downloaded')['state'], 'missing')
-            network.side_effect = lambda command: missing.write_bytes(self.gguf.read_bytes())
-            self.download()
-            self.assertEqual(network.call_count, 1)
-            self.assertEqual(models.show(self.registry, 'downloaded')['state'], 'ready')
-
-    def test_dryrun_never_initializes_state_or_executes_hf(self):
-        with patch.object(models.model_download, 'recipe_by_id', return_value=self.recipe()), \
-             patch.object(models.model_download, '_run_hf') as network:
-            result = models.download(None, 'fixture', model_id='dry', dry_run=True)
-            network.assert_not_called()
-            self.assertEqual(result['state'], 'preview')
-            self.assertEqual(self.registry.list_models(), [])
-
-    def test_download_passes_pinned_command_and_preserves_partial_cache(self):
-        calls = []
-        def hf(command):
-            calls.append(command)
-            if len(calls) == 2:
-                raise models.ModelImportError('network interrupted')
-            source = models.model_download._sources(self.recipe())[0]
-            path = self.cache(source)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(self.gguf.read_bytes())
-        with patch.dict(os.environ, {'HF_HUB_CACHE': str(self.root / 'cache')}), \
-             patch.object(models.model_download, 'recipe_by_id', return_value=self.recipe()), \
-             patch.object(models.model_download, '_run_hf', side_effect=hf):
-            with self.assertRaisesRegex(HemError, 'network interrupted'):
-                self.download()
-            self.assertEqual(len(calls), 2)
-            self.assertEqual(calls[0], ['hf', 'download', 'test/weights', 'weights.gguf', '--revision', 'a'*40, '--cache-dir', str(self.root / 'cache')])
-            self.assertTrue(self.cache(models.model_download._sources(self.recipe())[0]).exists())
-            self.assertEqual(len(self.registry.list_models()), 1)
-
-    def test_consumer_helper_rechecks_even_saved_valid(self):
-        self.acquire(alias=True)
-        self.select.side_effect = InvalidInput('modified descriptors')
-        with self.assertRaisesRegex(InvalidInput, 'modified descriptors'):
-            models.model_files(self.registry, 'tiny')
-        self.assertFalse(self.registry.get_model('tiny')['validation']['valid'])
-
-    def test_changed_assets_are_unvalidated_and_detected_during_qualification(self):
+    def test_changed_assets_are_unvalidated_and_rechecked(self):
         self.acquire(alias=True)
         self.gguf.write_bytes(b'changed')
         self.assertEqual(models.show(self.registry, 'tiny')['state'], 'unvalidated')
-        def mutate(*args):
-            self.tokenizer.write_text('{"changed":true}')
-            return 'qwen-08b'
-        self.select.side_effect = mutate
-        with self.assertRaisesRegex(InvalidInput, 'changed during qualification'):
-            models.validate(self.registry, 'tiny')
+        # No model architecture gate: accessible opaque bytes remain allowed.
+        models.validate(self.registry, 'tiny')
+        self.assertEqual(models.show(self.registry, 'tiny')['state'], 'ready')
 
-    def test_real_packaged_pipeline_checks_both_synthetic_profiles(self):
-        self.qualifier.stop()
-        original = hem_config.load_profile
-        digest = hashlib.sha256(json.dumps(json.loads(self.tokenizer.read_text()), sort_keys=True,
-                                          separators=(',', ':')).encode()).hexdigest()
-        def fixture(catalog):
-            contract = original(catalog)
-            contract['tokenizer_canonical_sha256'] = digest
-            return contract
-        with patch.object(hem_config, 'load_profile', side_effect=fixture):
-            for identifier, architecture in [('qwen-08b', 'qwen_08b'), ('qwen', 'qwen_27b')]:
-                weights = self.root / (identifier + '.gguf')
-                write_matching_gguf(weights, contract=profile(architecture))
-                row = models.import_model(self.registry, identifier, ggufs=[weights], tokenizer=self.tokenizer, alias=True)
-                self.assertEqual(row['pipeline'], identifier)
-                with self.assertRaisesRegex(InvalidInput, 'incompatible'):
-                    models.validate(self.registry, identifier, pipeline='qwen' if identifier == 'qwen-08b' else 'qwen-08b')
+    def test_reference_mapping_cannot_be_requalified_after_retargeting(self):
+        row = self.acquire(alias=True)
+        target = Path(row['directory']) / 'model.gguf'
+        other = self.root / 'other.gguf'; other.write_bytes(self.gguf.read_bytes())
+        target.unlink(); target.symlink_to(other)
+        with self.assertRaisesRegex(HemError, 'mapping changed'):
+            models.model_files(self.registry, 'tiny')
+        self.assertFalse(models.show(self.registry, 'tiny')['accessible'])
+        target.unlink(); target.symlink_to(self.gguf)
+        models.validate(self.registry, 'tiny')
+        self.assertEqual(models.show(self.registry, 'tiny')['state'], 'ready')
 
+    def test_drift_during_presence_check_is_rejected(self):
+        self.acquire()
+        evidence = models._evidence
+        def drift(files):
+            value = evidence(files)
+            (files.directory / 'model.gguf').write_bytes(b'new')
+            return value
+        with patch.object(models, '_evidence', side_effect=drift):
+            with self.assertRaisesRegex(HemError, 'changed during'):
+                models.validate(self.registry, 'tiny')
 
-if __name__ == '__main__':
-    unittest.main()
+    def test_all_three_authored_recipes_drive_the_same_acquisition(self):
+        for recipe in self.declarations.values():
+            self.cached(recipe)
+            result = models.download(self.registry, recipe.id, model_id=recipe.id, offline=True)
+            self.assertEqual(result.recipe_id, recipe.id)
+            self.assertEqual(result.pipeline, recipe.pipeline)
+            prepared = models.model_files(self.registry, recipe.id)
+            self.assertEqual(prepared.recipe_identity, recipe.identity)
+            self.assertEqual([(a.id, a.logical_path) for a in prepared.files],
+                             [(a.id, a.path) for a in recipe.artifacts])
+            expected = ['preflight', 'prepare'] if self.bindings[recipe.pipeline].preparation else []
+            self.assertEqual(self.bindings[recipe.pipeline].events, expected)
+        self.fetch.assert_not_called()
+
+    def test_offline_preserves_record_and_retry_uses_cache(self):
+        with self.assertRaisesRegex(HemError, 'Offline cache is missing'): self.download(offline=True)
+        self.assertEqual(models.show(self.registry, 'downloaded')['state'], 'incomplete')
+        self.cached(); answer = self.download(offline=True)
+        self.assertEqual(answer.state, 'acquired'); self.fetch.assert_not_called()
+        missing = model_download._cache_path(self.recipe.artifacts[0].source); missing.unlink()
+        self.assertEqual(models.show(self.registry, 'downloaded')['state'], 'missing')
+        self.fetch.side_effect = lambda command: missing.write_bytes(b'restored')
+        self.download(); self.fetch.assert_called_once()
+
+    def test_dryrun_never_initializes_state_or_executes_hf(self):
+        with patch.object(hem_state, 'Registry', side_effect=AssertionError('state')):
+            answer = models.download(None, self.recipe.id, model_id='preview', dry_run=True)
+        self.assertEqual(answer.state, 'preview')
+        self.assertEqual([a.logical_path for a in answer.artifacts], ['model.gguf', 'tokenizer.json'])
+        self.fetch.assert_not_called()
+        self.assertFalse(self.cache.exists())
+
+    def test_download_passes_exact_pinned_command_and_preserves_partial_cache(self):
+        calls = []
+        def fetch(command):
+            calls.append(command)
+            item = next(a for a in self.recipe.artifacts if a.source.filename == command[3])
+            path = model_download._cache_path(item.source); path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'opaque')
+            if len(calls) == 2: raise models.ModelImportError('interrupted')
+        self.fetch.side_effect = fetch
+        with self.assertRaisesRegex(HemError, 'interrupted'): self.download()
+        self.assertEqual(calls[0], model_download.command(self.recipe.artifacts[0].source))
+        self.fetch.reset_mock(); self.download(); self.fetch.assert_not_called()
+        files = models.model_files(self.registry, 'downloaded')
+        self.assertIsInstance(files, PreparedModel)
+        for item, declaration in zip(files.files, self.recipe.artifacts):
+            self.assertTrue(item.path.is_symlink())
+            self.assertEqual(os.readlink(item.path), str(model_download._cache_path(declaration.source)))
+
+    def test_consumer_rechecks_even_saved_valid_and_recipe_identity(self):
+        self.cached(); self.download()
+        files = models.model_files(self.registry, 'downloaded')
+        self.assertEqual(files.recipe_identity, self.recipe.identity)
+        changed = replace(self.recipe, identity='0' * 64)
+        with patch.object(recipes, 'load', return_value=changed):
+            with self.assertRaisesRegex(HemError, 'declaration'): models.model_files(self.registry, 'downloaded')
+            with self.assertRaisesRegex(HemError, 'different mappings'): self.download()
+        with self.assertRaisesRegex(HemError, 'pipeline'):
+            models.model_files(self.registry, 'downloaded', pipeline='other')
+
+    def test_unsupported_admission_precedes_cache_registry_and_process(self):
+        with patch.object(self.bindings[self.recipe.pipeline], 'validate_artifacts', side_effect=HemError('unsupported')), \
+             patch.object(model_download, '_cache_path', side_effect=AssertionError('cache')):
+            with self.assertRaisesRegex(HemError, 'unsupported'): self.download()
+        self.assertEqual(self.registry.list_models(), [])
+
+    def test_explicit_destinations_and_repeated_roles_never_use_basename(self):
+        data = models._declaration(self.recipe)
+        data['artifacts'][0]['path'] = 'nested/runtime.gguf'
+        extra = dict(data['artifacts'][0], id='second', path='other/second.gguf',
+                     source=dict(data['artifacts'][0]['source'], filename='upstream/second.gguf'))
+        data['artifacts'].insert(1, extra)
+        recipe = recipes.parse(json.dumps(data).encode())
+        self.bindings[recipe.pipeline] = Binding(recipe.pipeline, recipe.modality, recipe.artifacts)
+        self.cached(recipe)
+        with patch.object(recipes, 'load', return_value=recipe): self.download()
+        row = self.registry.get_model('downloaded')
+        root = Path(row['directory'])
+        self.assertTrue((root / 'nested/runtime.gguf').is_symlink())
+        self.assertTrue((root / 'other/second.gguf').is_symlink())
+        self.assertFalse((root / self.recipe.artifacts[0].source.filename).exists())
+
+    def test_bookkeeping_collisions_rejected_before_state(self):
+        for path in ('.loom-acquisition.json', '.model.gguf.partial'):
+            data = models._declaration(self.recipe)
+            data['artifacts'][1]['path'] = path
+            recipe = recipes.parse(json.dumps(data).encode())
+            binding = Binding(recipe.pipeline, recipe.modality, recipe.artifacts)
+            with patch.object(recipes, 'load', return_value=recipe), patch.object(pipelines, 'get', return_value=binding):
+                with self.assertRaisesRegex(HemError, 'bookkeeping'): self.download()
+        self.assertEqual(self.registry.list_models(), [])
+
+    def test_explicit_import_ignores_unrelated_broken_bindings(self):
+        selected = self.recipe.pipeline
+        calls = []
+        def only_selected(key):
+            calls.append(key)
+            if key != selected:
+                raise HemError('unrelated binding unavailable')
+            return self.bindings[key]
+        with patch.object(pipelines, 'get', side_effect=only_selected):
+            self.acquire()
+            directory = self.root / 'complete'; directory.mkdir()
+            for artifact in self.recipe.artifacts:
+                (directory / artifact.path).write_bytes(b'local input')
+            row = models.import_assets(self.registry, 'complete', directory=directory, pipeline=selected)
+            self.assertTrue(row['validation']['valid'])
+            self.assertEqual(models.model_files(self.registry, 'complete').pipeline, selected)
+        self.assertTrue(calls)
+        self.assertEqual(set(calls), {selected})
+
+    def test_complete_support_discovery_still_rejects_unrelated_broken_binding(self):
+        def broken(key):
+            if key != self.recipe.pipeline:
+                raise HemError('unrelated binding unavailable')
+            return self.bindings[key]
+        with patch.object(pipelines, 'get', side_effect=broken):
+            with self.assertRaisesRegex(HemError, 'unrelated binding unavailable'):
+                models.available()
+
+    def test_explicit_import_rejects_broken_selected_binding_before_state(self):
+        with patch.object(pipelines, 'get', side_effect=HemError('selected binding unavailable')):
+            with self.assertRaisesRegex(HemError, 'selected binding unavailable'):
+                self.acquire()
+            with self.assertRaisesRegex(HemError, 'selected binding unavailable'):
+                models.import_assets(self.registry, 'complete', directory=self.root, pipeline=self.recipe.pipeline)
+        self.assertEqual(self.registry.list_models(), [])
+
+    def test_ambiguous_import_requests_existing_pipeline(self):
+        with self.assertRaisesRegex(HemError, 'pipeline'):
+            models.import_model(self.registry, 'tiny', ggufs=[self.gguf], tokenizer=self.tokenizer)
+
+    def test_invalid_fragment_format_retains_copied_assets_for_inspection(self):
+        other = self.root / 'duplicate.gguf'; other.write_bytes(self.gguf.read_bytes())
+        with self.assertRaisesRegex(HemError, 'Invalid fragment format'):
+            models.import_model(self.registry, 'split', ggufs=[self.gguf, other],
+                                tokenizer=self.tokenizer, pipeline=self.recipe.pipeline)
+        row = self.registry.get_model('split')
+        self.assertEqual(row['pending']['stage'], 'staging')
+        self.assertTrue((Path(row['pending']['path']) / 'model-00002-of-00002.gguf').is_file())
+        self.assertFalse(Path(row['directory']).exists())
+
+    def test_bad_fragment_mapping_retained_for_inspection(self):
+        with self.assertRaises(HemError):
+            models.import_model(self.registry, 'split', ggufs=[self.gguf, self.gguf],
+                                tokenizer=self.tokenizer, pipeline=self.recipe.pipeline)
+        self.assertEqual(self.registry.list_models(), [])
+
+    def test_fragment_index_is_scoped_and_has_native_suffix(self):
+        files = []
+        for i in range(2):
+            path = self.root / f'fragment-{i}.gguf'
+            write_gguf(path, tensors=[(f'tensor-{i}', [1], 0, 0)])
+            files.append(path)
+        row = models.import_model(self.registry, 'split', ggufs=files, tokenizer=self.tokenizer,
+                                  pipeline=self.recipe.pipeline)
+        prepared = models.model_files(self.registry, 'split')
+        index = next(a for a in prepared.files if a.role == 'weights')
+        self.assertEqual(index.path.suffixes[-2:], ['.index', '.json'])
+        self.assertFalse(index.path.is_symlink())
+        self.assertTrue(json.loads(index.path.read_text())['weight_map'])
+        self.assertEqual(models.show(self.registry, 'split')['state'], 'ready')

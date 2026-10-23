@@ -45,7 +45,7 @@ class CatalogTest(unittest.TestCase):
     def test_inventory_drift_and_duplicates_fail(self):
         original = self.inventory.read_text()
         self.inventory.write_text(original.replace("'qwen/continue.loom',", '', 1))
-        with self.assertRaisesRegex(ValueError, "inventory/manifest/profile drift"):
+        with self.assertRaisesRegex(ValueError, "inventory/manifest drift"):
             catalog.validate_catalog(self.inventory)
         self.inventory.write_text(original.replace('[', '["qwen/continue.loom",', 1))
         with self.assertRaisesRegex(ValueError, "Duplicate source identity"):
@@ -92,7 +92,7 @@ class CatalogTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     catalog.catalog_sources(self.inventory)
 
-    def test_inventory_preserves_source_order_and_profile_contract(self):
+    def test_inventory_preserves_source_order_without_shape_profile(self):
         value = catalog.variants(self.inventory)
         sources = value['qwen_08b']['sources']
         sources.reverse()
@@ -100,13 +100,14 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(catalog.catalog_sources(self.inventory),
                          tuple(dict.fromkeys(source for variant in value.values()
                                              for source in variant["sources"])))
-        with self.assertRaisesRegex(ValueError, 'inventory/manifest/profile drift'):
+        with self.assertRaisesRegex(ValueError, 'inventory/manifest drift'):
             catalog.validate_catalog(self.inventory)
         sources.reverse()
-        value['qwen_08b']['identifier'] = 'other-profile'
+        # Identity belongs to the explicit build variant and concrete binding;
+        # packaging must not read a second tensor/architecture shape authority.
         self.inventory.write_text('CATALOG_VARIANTS = ' + repr(value))
-        with self.assertRaisesRegex(ValueError, 'inventory/manifest/profile drift'):
-            catalog.validate_catalog(self.inventory)
+        self.assertEqual(catalog.validate_catalog(self.inventory), catalog.catalog_sources(self.inventory))
+        self.assertFalse(any(self.pipeline.rglob('compatibility.json')))
 
     def test_source_archive_flattened_role_symlinks_preserve_complete_inventory(self):
         for architecture in catalog.ARCHITECTURES:
@@ -203,7 +204,7 @@ class CatalogTest(unittest.TestCase):
         (destination / 'stale.loom').write_text('stale')
         (destination / 'stale.loombc').write_bytes(b'LOOMstale')
         staged = catalog.stage_bytecode_catalog(destination, outputs, self.inventory, decoder=Path("fixture-decoder"))
-        self.assertEqual(len(staged), 8)  #two complete modules, descriptors/profiles, license, provenance.
+        self.assertEqual(len(staged), 8)  #two complete modules, descriptors/recipes, license, provenance.
         self.assertFalse(list(destination.rglob('*.loom')))
         self.assertTrue(all(not p.is_symlink() for p in staged))
         for architecture in catalog.ARCHITECTURES:

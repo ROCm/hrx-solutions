@@ -1,39 +1,19 @@
-"""CPU pipeline qualification, serving configuration and native documents.
-
-No registry or HTTP operations belong here. Lifecycle callers retain the returned
-asset dependencies and a configured source bundle until native retirement.
-"""
+"""Pure recipe configuration and checked native documents for every modality."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 import json
-import math
 import os
 from pathlib import Path
 import re
 import sys
 import tempfile
-from types import MappingProxyType
 from typing import Mapping, Optional
 
-from . import curated_catalog
 from ..hem_common import Deadline, HemError, InvalidInput
-from .model_store import CatalogAssets, ModelFiles
-from .pipeline_validation import available_pipelines, catalog_modules, catalog_roots, resolve_catalog, text_definition
-from .qwen_validation import compare_profile, inspect_model, load_profile
+from . import pipelines, recipes
+from .recipe_types import PreparedModel, Recipe, freeze_json, json_document
 
-# Bounds in pinned configuration.c and Qwen prepare.loom, not memory-fit promises.
-# Meanings: pinned server/configuration.h and service/text/{model,packing}.h.
-# Help and validation consume this same metadata; parser omissions remain None.
-SETTINGS = {
-    "rows": (4, 16, "Maximum simultaneous execution rows for this model; queued requests may exceed this count"),
-    "context_capacity": (8192, 262144, "Logical context token ceiling per row, including retained/input and generated tokens; not eagerly allocated storage"),
-    "pool_capacity": (32768, 4194304, "Shared KV cache token positions across rows; must be divisible by source-declared page size, with page-rounded reservations"),
-    "prefill_capacity": (128, 262144, "Maximum packed input tokens per model traversal across rows, also the isolated prefill chunk limit"),
-    "mtp_depth": (3, 3, "Proposal tokens after each anchor for multi-token prediction (MTP); applicable only when supported and enabled"),
-}
-LIMITS = {key: metadata[1] for key, metadata in SETTINGS.items()}
-DEFAULTS = {key: metadata[0] for key, metadata in SETTINGS.items() if key != "mtp_depth"}
 EXPORT_RESPONSIBILITY = (
     "Export does not reserve dependencies or validate a running server. You must "
     "preserve all referenced model assets and pipeline programs/policies, and use "
@@ -43,24 +23,8 @@ EXPORT_RESPONSIBILITY = (
 )
 
 
-def _settings(values: Mapping, source: str) -> dict:
-    if not isinstance(values, Mapping):
-        raise InvalidInput(f"{source} must be a flat object of serving settings")
-    unknown = set(values) - (set(LIMITS) | {"mtp"})
-    if unknown:
-        raise InvalidInput(f"Unknown {source} settings: {', '.join(sorted(map(str, unknown)))}")
-    result = dict(values)
-    for key, value in result.items():
-        if key == "mtp":
-            if type(value) is not bool:
-                raise InvalidInput(f"{source} mtp must be a boolean")
-        elif type(value) is not int or not 1 <= value <= LIMITS[key]:
-            raise InvalidInput(f"{source} {key} must be an integer from 1 through {LIMITS[key]}")
-    return result
-
-
 def load_config(path: Optional[Path]) -> dict:
-    """Strict JSON: duplicate/unknown keys, nonfinite values and null fail."""
+    """Read strict JSON; descriptor field admission happens for every layer."""
     if path is None:
         return {}
     def pairs(entries):
@@ -75,88 +39,106 @@ def load_config(path: Optional[Path]) -> dict:
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"),
                            object_pairs_hook=pairs, parse_constant=constant)
-    except (OSError, UnicodeError, ValueError) as exc:
+        if not isinstance(value, dict):
+            raise InvalidInput("configuration must be a flat object of serving settings")
+        freeze_json(value)
+        return value
+    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
         raise InvalidInput(f"Cannot read configuration {path}: {exc}") from exc
-    return _settings(value, "configuration")
+
+
+def _settings(values, source, descriptor):
+    if not isinstance(values, Mapping):
+        raise InvalidInput(f"{source} must be an object of serving settings")
+    try:
+        freeze_json(values)
+    except (ValueError, RecursionError) as error:
+        raise InvalidInput(f"{source}: expected finite JSON settings") from error
+    for key, value in values.items():
+        where = f"{source}.{key}"
+        parameter = descriptor.parameters.get(key)
+        if parameter is None:
+            raise InvalidInput(f"{where}: unknown parameter for modality {descriptor.modality}")
+        if parameter.state == 'unsupported':
+            raise InvalidInput(f"{where}: unsupported for {descriptor.id}: {parameter.reason}")
+        valid_type = (type(value) is int if parameter.type == 'integer' else
+                      type(value) is bool if parameter.type == 'boolean' else
+                      isinstance(value, Mapping) if parameter.type == 'object' else False)
+        if not valid_type:
+            raise InvalidInput(f"{where}: expected {parameter.type}")
+        if parameter.state == 'fixed':
+            if value != parameter.value:
+                raise InvalidInput(f"{where}: expected fixed value {json_document(parameter.value)!r}")
+        elif parameter.state == 'configurable':
+            limits = parameter.constraints
+            if (limits.minimum is not None and value < limits.minimum or
+                    limits.maximum is not None and value > limits.maximum):
+                raise InvalidInput(f"{where}: outside permitted range {limits.minimum}..{limits.maximum}")
+            if limits.allowed_keys is not None and set(value) - set(limits.allowed_keys):
+                raise InvalidInput(f"{where}: unsupported object keys")
+        else:
+            raise HemError(f"Pipeline {descriptor.id}: invalid parameter state {parameter.state!r}")
+    return values
+
+
+def effective_settings(recipe, descriptor, file_settings=None, overrides=None):
+    """Validate fields at each layer, then conditional applicability at the end."""
+    values, sources, ranks = {}, {}, {}
+    for key, parameter in descriptor.parameters.items():
+        if parameter.state in ('configurable', 'fixed'):
+            values[key] = parameter.default if parameter.state == 'configurable' else parameter.value
+            sources[key], ranks[key] = 'default', 0
+    _settings(values, 'default', descriptor)
+    for rank, (label, layer) in enumerate((('recipe', recipe.configuration),
+                                         ('file', {} if file_settings is None else file_settings),
+                                         ('override', {} if overrides is None else overrides)), 1):
+        _settings(layer, label, descriptor)
+        for key, value in layer.items():
+            values[key], sources[key], ranks[key] = value, label, rank
+    for key, parameter in descriptor.parameters.items():
+        condition = getattr(parameter, 'active_when', None)
+        if condition is not None and values.get(condition['parameter']) != condition['equals']:
+            controlling = condition['parameter']
+            if key in values and ranks[key] > 0 and ranks[key] >= ranks[controlling]:
+                raise InvalidInput(f"configuration.{key}: explicit value conflicts with inactive {controlling}")
+            values.pop(key, None)
+            sources[key] = {'state': 'inactive', 'by': sources[controlling]}
+    return freeze_json(values), freeze_json(sources)
+
+
+def _document(value):
+    if is_dataclass(value):
+        return {field.name: _document(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, Mapping):
+        return {key: _document(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_document(item) for item in value]
+    return value
+
+
+def _catalog(descriptor):
+    relative = Path(descriptor.bundle.catalog_relative_path)
+    if relative.is_absolute() or not relative.parts or any(part in ('.', '..') for part in relative.parts):
+        raise HemError(f"Pipeline {descriptor.id}: invalid catalog path")
+    for root in pipelines.catalog_roots():
+        candidate = root / relative
+        if candidate.is_dir():
+            try:
+                candidate.resolve(strict=True).relative_to(root.resolve(strict=True))
+            except (OSError, ValueError) as error:
+                raise HemError(f"Pipeline {descriptor.id}: catalog escapes its root") from error
+            return candidate.resolve(strict=True)
+    raise HemError(f"No packaged catalog for pipeline {descriptor.id!r}")
 
 
 def pipeline_info(identifier: str) -> dict:
-    if identifier not in available_pipelines():
-        raise InvalidInput(f"Unknown pipeline {identifier!r}; choose from {', '.join(available_pipelines())}")
-    if identifier in curated_catalog.CATALOGS:
-        catalog = curated_catalog.load_catalog(identifier)
-        settings = {key: catalog.definition[key] for key in ('pending_requests', 'options')
-                    if key in catalog.definition}
-        return dict(pipeline=identifier, kind=catalog.definition['kind'], catalog=str(catalog.directory),
-                    asset_contract=catalog.contract, assets=list(catalog.assets),
-                    description=catalog.description, check_kind='acquisition-presence',
-                    defaults=settings, limits={})
-    try:
-        catalog = resolve_catalog(identifier)
-        profile = load_profile(catalog)
-    except (OSError, ValueError) as exc:
-        raise HemError(f"Cannot inspect packaged pipeline {identifier}: {exc}") from exc
-    supported = profile.get("capabilities", {}).get("mtp", profile["mtp_layer"] is not None)
-    return {"pipeline": identifier, "profile": profile["identifier"],
-            "catalog": str(catalog), "compatibility": profile,
-            "capabilities": {"mtp": supported},
-            "defaults": {**DEFAULTS, "mtp": supported, "mtp_depth": SETTINGS["mtp_depth"][0] if supported else None},
-            "limits": {**LIMITS, "mtp_depth": LIMITS["mtp_depth"] if supported else None}}
+    descriptor = pipelines.get(identifier).describe()
+    return dict(_document(descriptor), pipeline=descriptor.id, catalog=str(_catalog(descriptor)))
 
 
-def select_pipeline(model: ModelFiles, pipeline: Optional[str] = None) -> str:
-    """Inspect headers/tokenizer once and require one compatible packaged profile."""
-    if pipeline in curated_catalog.CATALOGS:
-        raise InvalidInput('Curated pipelines require their declared named asset set')
-    choices = (pipeline,) if pipeline is not None else tuple(
-        identifier for identifier in available_pipelines() if identifier not in curated_catalog.CATALOGS)
-    if pipeline is not None and pipeline not in available_pipelines():
-        raise InvalidInput(f"Unknown pipeline {pipeline!r}; choose from {', '.join(available_pipelines())}")
-    try:
-        inspection = inspect_model(model, native_index=True)
-        if inspection.tokenizer_error is not None:
-            raise ValueError(inspection.tokenizer_error)
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise InvalidInput(f"Cannot inspect model assets: {exc}") from exc
-    matches, diagnostics = [], []
-    for identifier in choices:
-        try:
-            profile = load_profile(resolve_catalog(identifier))
-            problems = compare_profile(inspection, profile)
-        except (OSError, ValueError) as exc:
-            raise HemError(f"Cannot inspect packaged pipeline {identifier}: {exc}") from exc
-        if problems:
-            diagnostics.append(f"{identifier}: " + "; ".join(problems[:4]))
-        else:
-            matches.append(identifier)
-    if len(matches) > 1:
-        raise InvalidInput("Ambiguous compatible pipelines: " + ", ".join(matches) + "; select --pipeline explicitly")
-    if not matches:
-        raise InvalidInput("Model is incompatible with " + (pipeline or "all packaged pipelines") + ":\n" + "\n".join(diagnostics))
-    return matches[0]
-
-
-def _freeze_json(value):
-    """Copy finite JSON into recursively immutable snapshots."""
-    if isinstance(value, Mapping):
-        if any(type(key) is not str for key in value):
-            raise InvalidInput('Checked serving objects require string keys')
-        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_json(item) for item in value)
-    if value is None or type(value) in (str, int, bool):
-        return value
-    if type(value) is float and math.isfinite(value):
-        return value
-    raise InvalidInput('Checked serving values must be finite JSON')
-
-
-def _json_snapshot(value):
-    if isinstance(value, Mapping):
-        return {key: _json_snapshot(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_json_snapshot(item) for item in value]
-    return value
+def available_pipelines() -> tuple[str, ...]:
+    """Discovery validates all recipes; selected serving never calls this."""
+    return tuple(sorted({recipe.pipeline for recipe in recipes.list()}))
 
 
 @dataclass(frozen=True)
@@ -172,7 +154,7 @@ def _catalog_snapshots(pipeline, deadline):
     # external inputs and never part of this digest.
     from ..control.hem_process import tree_identity
     snapshots = {}
-    for candidate in catalog_roots(pipeline):
+    for candidate in pipelines.catalog_roots():
         deadline.remaining()
         if not candidate.is_dir():
             continue
@@ -206,7 +188,7 @@ def _checked_catalog_identity(pipeline, contract, catalog, snapshots, deadline):
 
 @dataclass(frozen=True)
 class ResolvedConfiguration:
-    model: ModelFiles | CatalogAssets
+    model: PreparedModel
     pipeline: str
     catalog: Path
     settings: Mapping
@@ -214,85 +196,80 @@ class ResolvedConfiguration:
     definition: Mapping
     catalog_identity: CatalogIdentity
     dependencies: tuple[Path, ...]
+    recipe_identity: str
+    modality: str
 
     def __post_init__(self):
         for name in ('settings', 'sources', 'definition'):
-            object.__setattr__(self, name, _freeze_json(getattr(self, name)))
+            object.__setattr__(self, name, freeze_json(getattr(self, name)))
         object.__setattr__(self, 'dependencies', tuple(dict.fromkeys(self.dependencies)))
 
-    def settings_document(self) -> dict:
-        return _json_snapshot(self.settings)
+    def settings_document(self):
+        return json_document(self.settings)
 
-    def sources_document(self) -> dict:
-        return _json_snapshot(self.sources)
+    def sources_document(self):
+        return json_document(self.sources)
 
-    def definition_document(self) -> dict:
-        return _json_snapshot(self.definition)
+    def definition_document(self):
+        return json_document(self.definition)
 
 
-def resolve(model: ModelFiles, overrides: Optional[Mapping] = None,
-            config_path: Optional[Path] = None, *, pipeline: Optional[str] = None,
-            deadline: Optional[Deadline] = None) -> ResolvedConfiguration:
-    """Repeat structural qualification, then resolve flags > file > defaults.
+def _prepared(recipe, model, budget):
+    if (recipe.id != model.recipe_id or recipe.identity != model.recipe_identity or
+            recipe.pipeline != model.pipeline):
+        raise InvalidInput('Prepared model and recipe declaration/pipeline identities differ')
+    expected = {item.id: item for item in recipe.artifacts}
+    actual = {item.id: item for item in model.files}
+    if len(actual) != len(model.files) or not expected.keys() <= actual.keys():
+        raise InvalidInput('Prepared model artifact inventory differs from its recipe')
+    shards = tuple(item for item in model.files if item.role == 'weights-shard')
+    has_index = any(item.role == 'weights' and item.format == 'json' and
+                    item.logical_path.endswith('.safetensors.index.json') for item in model.files)
+    for item in model.files:
+        budget.remaining()
+        declared = expected.get(item.id)
+        imported = item.ownership in ('caller-reference', 'caller-owned')
+        index = (item.role == 'weights' and item.format == 'json' and shards
+                 and item.logical_path.endswith('.safetensors.index.json'))
+        if declared is None:
+            consistent = imported and has_index and item.role == 'weights-shard' and item.format == 'gguf'
+        else:
+            consistent = (item.role == declared.role and
+                          ((item.format, item.logical_path) == (declared.format, declared.path) or index))
+            if not imported:
+                consistent = consistent and item.ownership == (
+                    'hf-reference' if declared.source.kind == 'huggingface' and not index else 'generated-owned')
+        logical = Path(item.logical_path)
+        if (not consistent or logical.is_absolute() or not logical.parts or
+                '..' in logical.parts or '\\' in item.logical_path or
+                Path(item.path).absolute() != (Path(model.directory) / logical).absolute() or
+                not Path(item.path).is_file() or not os.access(item.path, os.R_OK)):
+            raise InvalidInput(f'Prepared artifact {item.id!r} is inconsistent, missing or unreadable')
 
-    `overrides` contains explicit serving settings only (omit absent CLI values).
-    `sources` records the winner for every submitted setting, including defaults.
-    No writes, native calls, model hashing or registry reservations occur here.
-    """
+
+def resolve(recipe: Recipe, model: PreparedModel, overrides: Optional[Mapping] = None,
+            config_path: Optional[Path] = None, *, deadline: Optional[Deadline] = None) -> ResolvedConfiguration:
+    """Resolve the selected recipe through one shared merge and modality policy."""
+    from . import modalities
     budget = deadline or Deadline.after()
     budget.remaining()
-    if isinstance(model, CatalogAssets):
-        if config_path is not None or overrides:
-            raise InvalidInput('Qwen serving settings and --config are unsupported for curated pipelines')
-        snapshots = _catalog_snapshots(model.pipeline, budget)
-        catalog = curated_catalog.check_assets(model, pipeline)
-        from .model_store import readable_file
-        if any(not readable_file(asset.path) for asset in model.files):
-            raise InvalidInput('Curated model assets are missing or unreadable')
-        settings = {key: catalog.definition[key] for key in ('pending_requests', 'options')
-                    if key in catalog.definition}
-        definition = curated_catalog.definition_for(catalog, model)
-        identity = _checked_catalog_identity(model.pipeline, catalog.contract, catalog.directory,
-                                             snapshots, budget)
-        resolved = ResolvedConfiguration(model, model.pipeline, catalog.directory, settings,
-                                         dict.fromkeys(settings, 'catalog'), definition, identity,
-                                         tuple(asset.path for asset in model.files))
-        budget.remaining()
-        return resolved
-    file_settings = load_config(config_path)
-    flags = _settings(overrides if overrides is not None else {}, "flags")
-    snapshots = _catalog_snapshots(pipeline, budget)
-    selected = select_pipeline(model, pipeline)
-    info = pipeline_info(selected)
-    settings = dict(info["defaults"])
-    sources = dict.fromkeys(settings, "default")
-    for label, layer in (("file", file_settings), ("flag", flags)):
-        settings.update(layer)
-        sources.update(dict.fromkeys(layer, label))
-    if not settings["mtp"]:
-        if sources["mtp_depth"] != "default":
-            raise InvalidInput("Explicit mtp_depth conflicts with disabled MTP; remove mtp_depth or enable MTP with --mtp")
-        settings["mtp_depth"] = None
-    elif not info["capabilities"]["mtp"]:
-        raise InvalidInput(f"Pipeline {selected} does not support MTP; remove --mtp and mtp_depth")
-    if settings["prefill_capacity"] > settings["context_capacity"]:
-        raise InvalidInput("prefill_capacity must not exceed context_capacity")
-    if settings["prefill_capacity"] < (settings["mtp_depth"] or 0) + 1:
-        raise InvalidInput("prefill_capacity must fit one anchor plus every MTP proposal")
-    catalog = Path(info['catalog'])
-    try:
-        modules = catalog_modules(catalog)
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise InvalidInput(f"Cannot resolve pipeline modules: {exc}") from exc
-    definition = text_definition(model, modules, rows=settings['rows'],
-                                 context_capacity=settings['context_capacity'],
-                                 pool_capacity=settings['pool_capacity'],
-                                 prefill_capacity=settings['prefill_capacity'],
-                                 draft_depth=settings['mtp_depth'] or 0)
-    identity = _checked_catalog_identity(selected, info['profile'], catalog, snapshots, budget)
-    dependencies = (*model.gguf_paths, model.weights, model.tokenizer)
-    resolved = ResolvedConfiguration(model, selected, catalog, settings, sources, definition, identity,
-                                     dependencies)
+    snapshots = _catalog_snapshots(recipe.pipeline, budget)
+    binding = pipelines.get(recipe.pipeline)
+    descriptor = binding.describe()
+    if descriptor.modality != recipe.modality:
+        raise InvalidInput('Recipe and selected pipeline modalities differ')
+    binding.validate_artifacts(recipe.artifacts)
+    _prepared(recipe, model, budget)
+    modality = modalities.get(recipe.modality)
+    settings, sources = effective_settings(recipe, descriptor, load_config(config_path), overrides)
+    modality.validate(settings, descriptor)
+    budget.remaining()
+    catalog = _catalog(descriptor)
+    definition = modality.service_definition(settings, model, descriptor.programs)
+    identity = _checked_catalog_identity(recipe.pipeline, descriptor.id, catalog, snapshots, budget)
+    resolved = ResolvedConfiguration(model, recipe.pipeline, catalog, settings, sources, definition,
+                                     identity, tuple(Path(item.path) for item in model.files),
+                                     recipe.identity, recipe.modality)
     budget.remaining()
     return resolved
 
@@ -343,12 +320,12 @@ def deployment_document(resolved: ResolvedConfiguration, name: str, *,
             "base_directory": str(catalog), "definition": definition}
 
 
-def export_deployment(model: ModelFiles, output: Path, name: str, *,
+def export_deployment(recipe: Recipe, model: PreparedModel, output: Path, name: str, *,
                       overrides: Optional[Mapping] = None, config_path: Optional[Path] = None,
-                      pipeline: Optional[str] = None, deadline: Optional[Deadline] = None) -> dict:
+                      deadline: Optional[Deadline] = None) -> dict:
     """Validate and atomically export, without registry access or native calls."""
     budget = deadline or Deadline.after()
-    resolved = resolve(model, overrides, config_path, pipeline=pipeline, deadline=budget)
+    resolved = resolve(recipe, model, overrides, config_path, deadline=budget)
     try:
         document = deployment_document(resolved, name, catalog=resolved.catalog, deadline=budget)
         output = Path(output).absolute()

@@ -27,6 +27,21 @@ from build_tools.wheel_tools.validate_wheel import validate_pi_sdist
 from build_tools.versioning import read_package_version
 
 
+def fixture_bundle():
+    # Explicit test descriptor union, independent of producer output discovery.
+    files = ['loom-pipeline/llm/LICENSE-APACHE-2.0']
+    for arch, recipe in (('qwen_08b', 'qwen35-08b-q5-k-xl'), ('qwen_27b', 'qwen38-27b-q5-k-xl')):
+        files += ['loom-pipeline/llm/qwen/' + arch + '/' + name
+                  for name in ('pipeline.loombc', 'pipeline.json', 'recipes/' + recipe + '.json')]
+    files += ['loom-pipeline/recognition/moonshine/streaming_tiny/' + name for name in (
+        'prepare.loombc', 'control.loombc', 'weights.loombc', 'providers.loombc',
+        'catalog.json', 'sources.json', 'LICENSE.moonshine', 'LICENSE-APACHE-2.0',
+        'artifacts.json', 'recipes/moonshine-streaming-tiny.json')]
+    files += ['_native/share/loom-serve/preparers/moonshine/' + name for name in
+              ('prepare_assets.py', 'model.json', 'LICENSE', 'provenance.json')]
+    return tuple(files)
+
+
 class PackagingTest(unittest.TestCase):
     def setUp(self):
         temporary=tempfile.TemporaryDirectory()
@@ -83,6 +98,12 @@ class PackagingTest(unittest.TestCase):
                 mocks[name]=stack.enter_context(patch.object(packaging, name, return_value=result))
             stack.enter_context(patch.object(packaging.build_py, 'run'))
             stack.enter_context(patch.object(packaging.package_families, 'stage_helpers', return_value=[]))
+            stack.enter_context(patch.object(packaging.package_families, 'recipe_bundle', return_value=()))
+            def context_stages(root, prepared, repository):
+                decoder, products, _ = prepared
+                return [path for produce, outputs, _ in products
+                        for path in produce(root, outputs, repository, decoder=decoder)]
+            stack.enter_context(patch.object(packaging.package_families, 'stage', side_effect=context_stages))
             bytecodes=stack.enter_context(patch.object(loom_catalog, 'query_bytecode_outputs', return_value={}))
             artifacts=stack.enter_context(patch.object(moonshine_catalog, 'query_outputs', return_value={}))
             lookup = stack.enter_context(patch.object(loom_catalog, 'query_decoder', return_value=decoder))
@@ -159,6 +180,7 @@ class PackagingTest(unittest.TestCase):
             stack.enter_context(patch.object(packaging.build_py, 'get_outputs', side_effect=lambda *args: [str(python_file)]))
             stack.enter_context(patch.object(packaging, 'resolve_rocm_runtime_payload',
                 side_effect=lambda root, **kwargs: runtime_payload(root, needed_libraries=lambda _: ())))
+            stack.enter_context(patch.object(packaging.package_families, 'recipe_bundle', return_value=fixture_bundle()))
             stack.enter_context(patch.object(packaging.BazelBuildContext, 'query', query))
             stack.enter_context(patch.object(loom_catalog, 'stage_bytecode_catalog', side_effect=stage_qwen))
             stack.enter_context(patch.object(moonshine_catalog, 'stage', side_effect=stage_moonshine))
@@ -196,6 +218,9 @@ class PackagingTest(unittest.TestCase):
         package = Path(command.build_lib) / 'hrx_solutions'
         self.assertEqual({path for path in (package / 'loom-pipeline').rglob('*') if path.is_file()}, set(command._catalog_outputs))
         self.assertEqual(sum(path.suffix == '.loombc' for path in command._catalog_outputs), 6)
+        from binding.python.models.recipes import parse
+        from build_tools.validation.recipe_inventory import validate_installed
+        validate_installed(package, parse, packaging.REPO_ROOT)
         for architecture, path in products.items():
             self.assertEqual((package/'loom-pipeline/llm/qwen'/architecture/'pipeline.loombc').read_bytes(), path.read_bytes())
         for name, path in moonshine.items():
@@ -215,46 +240,28 @@ class PackagingTest(unittest.TestCase):
             self.assertEqual(staged, [])
 
     def test_actual_packaging_omitted_required_family_fails_independent_wheel_acceptance(self):
-        # Keep only independent Python/metadata/resources from the positive fixture;
-        # every generated catalog/native/helper member below comes from BuildPy.
         with zipfile.ZipFile(self.wheel()) as archive:
-            base = {name: archive.read(name) for name in archive.namelist()
-                    if not name.startswith(('hrx_solutions/loom-pipeline/', 'hrx_solutions/_native/'))}
+            baseline = {name: archive.read(name) for name in archive.namelist()}
         producers = packaging.package_families.PRODUCERS
-        for omitted in (None, loom_catalog.CATALOG_TARGET, moonshine_catalog.TARGET):
+        for omitted, prefix in (
+            (loom_catalog.CATALOG_TARGET, 'hrx_solutions/loom-pipeline/llm/'),
+            (moonshine_catalog.TARGET, 'hrx_solutions/loom-pipeline/recognition/'),
+        ):
             selected = tuple(producer for producer in producers if producer[0] != omitted)
-            # Keep the omission active through acceptance, so a checker derived
-            # from the producer tuple would incorrectly skip required payloads.
+            # The descriptor union detects a producer omission at staging. Keep
+            # that omission active for independent archive acceptance too: a
+            # checker derived from PRODUCERS would skip the required family.
             with self.subTest(omitted=omitted), patch.object(
                     packaging.package_families, 'PRODUCERS', selected), self.buildpy_fixture() as fixture:
-                command, package, _, _, _, _, _ = fixture
-                command.run()
-                outputs = command.get_outputs()
-                self.assertEqual(len(outputs), len(set(outputs)))
-                self.assertEqual(set(outputs), {str(path) for path in package.rglob('*') if path.is_file()})
-                members = dict(base)
-                members.update({'hrx_solutions/' + path.relative_to(package).as_posix(): path.read_bytes()
-                                for path in package.rglob('*') if path.is_file()})
-                candidate = self.root / 'actual-package-fixture.whl'
+                command = fixture[0]
+                with self.assertRaisesRegex(ValueError, 'bundle missing compiled/catalog products'):
+                    command.run()
+                candidate = self.root / 'omitted-family.whl'
                 with zipfile.ZipFile(candidate, 'w') as archive:
-                    for name, content in members.items():
-                        archive.writestr(name, content)
-                with patch.object(loom_catalog, 'validate_archive', wraps=loom_catalog.validate_archive) as qwen, patch.object(
-                        moonshine_catalog, 'validate_archive', wraps=moonshine_catalog.validate_archive) as moonshine, patch.object(
-                        moonshine_preparer, 'validate_archive', wraps=moonshine_preparer.validate_archive) as helper:
-                    if omitted is None:
-                        self.assertEqual(wheel_validation.validate_wheel(candidate)[0], 2)
-                        self.assertEqual((qwen.call_count, moonshine.call_count, helper.call_count), (1, 1, 1))
-                    elif omitted == loom_catalog.CATALOG_TARGET:
-                        # Literal required Qwen inventory is independent of production.
-                        with self.assertRaisesRegex(RuntimeError, 'missing setup assets.*qwen'):
-                            wheel_validation.validate_wheel(candidate)
-                    else:
-                        # Existing required Moonshine validator runs despite omission.
-                        with self.assertRaisesRegex(ValueError, 'Moonshine installed catalog allowlist'):
-                            wheel_validation.validate_wheel(candidate)
-                        self.assertEqual((qwen.call_count, moonshine.call_count), (1, 1))
-                        self.assertFalse((package / '_native' / moonshine_preparer.RELATIVE).exists())
+                    for name, content in baseline.items():
+                        if not name.startswith(prefix): archive.writestr(name, content)
+                with self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
+                    wheel_validation.validate_wheel(candidate)
 
     def test_incomplete_family_refused_before_existing_package_is_cleared(self):
         command = packaging.BazelBuildPy(packaging.BinaryDistribution())
@@ -270,6 +277,7 @@ class PackagingTest(unittest.TestCase):
                 stage = stack.enter_context(patch.object(packaging.package_families, 'stage'))
                 stack.enter_context(patch.object(loom_catalog, 'query_bytecode_outputs', return_value={}))
                 stack.enter_context(patch.object(moonshine_catalog, 'query_outputs', return_value={}))
+                stack.enter_context(patch.object(packaging.package_families, 'recipe_bundle', return_value=fixture_bundle()))
                 stack.enter_context(patch.object(family, reader, side_effect=ValueError('incomplete required family')))
                 with self.assertRaisesRegex(ValueError, 'incomplete required family'):
                     command.run()
@@ -433,7 +441,7 @@ class PackagingTest(unittest.TestCase):
                         for name in PI_ASSETS})
         members.update({'hrx_solutions/'+name:(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
                         for name in wheel_validation.CLIENT_ASSETS})
-        for name in ('pipeline_validation.py','runtime_paths.py','loom_serve.py','models/__init__.py', *(name+'.py' for name in HEM_MODULES), *('models/'+name+'.py' for name in MODEL_MODULES), *wheel_validation.CLI_FILES, *wheel_validation.OMP_PYTHON_PATHS, *wheel_validation.OPENCODE_PYTHON_PATHS, *wheel_validation.OPENWEBUI_PYTHON_PATHS, *wheel_validation.PI_PYTHON_FILES, *wheel_validation.SHARED_INTEGRATION_PYTHON_PATHS):
+        for name in ('runtime_paths.py','loom_serve.py', *(name+'.py' for name in HEM_MODULES), *wheel_validation.MODEL_PYTHON_PATHS, *wheel_validation.CLI_FILES, *wheel_validation.OMP_PYTHON_PATHS, *wheel_validation.OPENCODE_PYTHON_PATHS, *wheel_validation.OPENWEBUI_PYTHON_PATHS, *wheel_validation.PI_PYTHON_FILES, *wheel_validation.SHARED_INTEGRATION_PYTHON_PATHS):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         for name in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
                      'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py', *('control/__init__.py', 'control/hem_http.py', 'control/hem_instances.py', 'control/hem_operation_targets.py', 'control/hem_process.py', 'control/hem_shutdown.py', 'control/hem_state.py')):
@@ -742,19 +750,12 @@ class PackagingTest(unittest.TestCase):
 
     def test_sdist_requires_each_exact_regular_model_source_once(self):
         names = (
-            'models/__init__.py',
-            'models/curated_catalog.py',
-            'models/gguf.py',
-            'models/hem_config.py',
-            'models/hem_models.py',
-            'models/hem_model_operations.py',
-            'models/model_download.py',
-            'models/model_store.py',
-            'models/moonshine_preparation.py',
-            'models/moonshine_preparer_identity.py',
-            'models/pipeline_validation.py',
-            'models/qwen_validation.py',
-            'pipeline_validation.py',
+            'models/__init__.py', 'models/gguf.py', 'models/hem_config.py',
+            'models/hem_models.py', 'models/model_download.py', 'models/model_store.py',
+            'models/moonshine_preparation.py', 'models/moonshine_preparer_identity.py',
+            'models/recipe_types.py', 'models/recipes.py', 'models/pipelines.py',
+            'models/pipelines_qwen.py', 'models/pipelines_moonshine.py',
+            'models/modalities/__init__.py', 'models/modalities/chat.py', 'models/modalities/asr.py',
         )
         for target in names:
             for failure in (None, 'missing', 'changed', 'symlink', 'duplicate'):
@@ -935,7 +936,7 @@ class PackagingTest(unittest.TestCase):
         command.build_lib = str(self.root / 'python-stage')
         command.ensure_finalized()
         command.run()
-        expected = {'models/__init__.py', *('models/'+name+'.py' for name in MODEL_MODULES),
+        expected = {*wheel_validation.MODEL_PYTHON_PATHS,
                     *wheel_validation.CLI_FILES, *('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
                      'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py', *('control/__init__.py', 'control/hem_http.py', 'control/hem_instances.py', 'control/hem_operation_targets.py', 'control/hem_process.py', 'control/hem_shutdown.py', 'control/hem_state.py')), *wheel_validation.PI_PYTHON_FILES}
         expected.update(('integrations/__init__.py', 'integrations/omp/__init__.py',
@@ -950,8 +951,8 @@ class PackagingTest(unittest.TestCase):
                                      for path in staged.rglob('*.py')})
         self.assertTrue({str(packaging.REPO_ROOT / 'binding/python' / name) for name in expected}
                         <= set(command.get_source_files()))
-        self.assertEqual((staged / 'pipeline_validation.py').read_bytes(),
-                         (packaging.REPO_ROOT / 'binding/python/pipeline_validation.py').read_bytes())
+        self.assertEqual((staged / 'models/recipes.py').read_bytes(),
+                         (packaging.REPO_ROOT / 'binding/python/models/recipes.py').read_bytes())
 
     def test_wheel_contains_new_validation_assets(self):
         libraries,size=validate_wheel(self.wheel())
@@ -962,19 +963,19 @@ class PackagingTest(unittest.TestCase):
             self.assertEqual(len(catalog), 8)
             self.assertEqual(sum(name.endswith('.loombc') for name in catalog), 2)
             self.assertFalse(any(name.endswith('sources.txt') for name in catalog))
-        with self.assertRaisesRegex(RuntimeError,'missing setup assets.*compatibility.json'):
-            validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/qwen_27b/compatibility.json'))
+        with self.assertRaisesRegex(RuntimeError,'missing setup assets.*qwen38-27b-q5-k-xl.json'):
+            validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/qwen_27b/recipes/qwen38-27b-q5-k-xl.json'))
         for name in ('__init__', *MODEL_MODULES):
             with self.subTest(module=name), self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
                 validate_wheel(self.wheel(missing='hrx_solutions/models/'+name+'.py'))
 
     def test_wheel_requires_both_architecture_catalogs(self):
-        for filename in ('pipeline.loombc', 'pipeline.json', 'compatibility.json'):
+        for filename in ('pipeline.loombc', 'pipeline.json', 'recipes/qwen35-08b-q5-k-xl.json'):
             with self.subTest(filename=filename), self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
                 validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/qwen_08b/'+filename))
 
     def test_wheel_rejects_source_fallback_corruption_and_metadata_drift(self):
-        mutations = ('source', 'bytecode', 'extra', 'descriptor', 'profile',
+        mutations = ('source', 'bytecode', 'extra', 'descriptor', 'recipe',
                      'variant', 'source_hash', 'source_inventory', 'bytecode_hash', 'format')
         for mutation in mutations:
             wheel = self.wheel()
@@ -988,10 +989,10 @@ class PackagingTest(unittest.TestCase):
                 members[local+'pipeline.loombc'] = b'LOOMstale'
             elif mutation == 'extra':
                 members[local+'weights.loombc'] = b'LOOMauxiliary'
-            elif mutation in ('descriptor', 'profile'):
-                name = local + ('pipeline.json' if mutation == 'descriptor' else 'compatibility.json')
+            elif mutation in ('descriptor', 'recipe'):
+                name = local + ('pipeline.json' if mutation == 'descriptor' else 'recipes/qwen35-08b-q5-k-xl.json')
                 data = json.loads(members[name])
-                data['variant' if mutation == 'descriptor' else 'identifier'] = 'wrong'
+                data['variant' if mutation == 'descriptor' else 'id'] = 'wrong'
                 members[name] = json.dumps(data).encode()
             else:
                 name = prefix + 'catalog-build.json'

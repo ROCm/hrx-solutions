@@ -13,7 +13,7 @@ from pathlib import Path
 import uuid
 
 from . import hem_process
-from ..models import hem_config, hem_models
+from ..models import hem_config, hem_models, recipes
 from ..hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome, result
 from .hem_http import NativeClient, active_ready, primary_parameters, registration, retired
 from .hem_state import _name
@@ -111,7 +111,7 @@ class InstanceManager:
             deadline.remaining()
             files = hem_models.model_files(self.registry, model_id, pipeline=pipeline)
             deadline.remaining()
-            resolved = hem_config.resolve(files, overrides, config_path, pipeline=pipeline, deadline=deadline)
+            resolved = hem_config.resolve(recipes.load(files.recipe_id), files, overrides, config_path, deadline=deadline)
             deadline.remaining()
             with self.registry.lock('server', server['id'], deadline=deadline):
                 server = self._server(server, starting=True)

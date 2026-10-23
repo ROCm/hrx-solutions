@@ -23,6 +23,11 @@ import types
 import unittest
 import zipfile
 
+try:
+    from . import recipe_inventory
+except ImportError:
+    import recipe_inventory
+
 
 CLI_FILES = (
     'cli/__init__.py',
@@ -87,30 +92,34 @@ PI_PYTHON_PATHS = (
 
 MODEL_PYTHON_PATHS = (
     'models/__init__.py',
-    'models/curated_catalog.py',
     'models/gguf.py',
     'models/hem_config.py',
     'models/hem_models.py',
-    'models/hem_model_operations.py',
     'models/model_download.py',
     'models/model_store.py',
     'models/moonshine_preparation.py',
     'models/moonshine_preparer_identity.py',
-    'models/pipeline_validation.py',
-    'models/qwen_validation.py',
+    'models/recipe_types.py',
+    'models/recipes.py',
+    'models/pipelines.py',
+    'models/pipelines_qwen.py',
+    'models/pipelines_moonshine.py',
+    'models/modalities/__init__.py',
+    'models/modalities/chat.py',
+    'models/modalities/asr.py',
 )
 
 
-HELPERS = ('gguf_fixtures', 'hem_lifecycle_fixture')
+HELPERS = ('gguf_fixtures', 'hem_lifecycle_fixture', 'recipe_config_fixture')
 # Installer concurrency fixtures import source-only test helpers in children.
 # Keep those in source CPU discovery; installed CLI cases still exercise the
 # real installed installer through its public entry point.
-CONTRACTS = ('hem_operation_targets_test', 'hem_process_test', 'hem_model_cli_test', 'hem_server_cli_test',
+CONTRACTS = ('recipes_test', 'launcher_test', 'hem_operation_targets_test', 'hem_process_test', 'hem_model_cli_test', 'hem_server_cli_test',
              'hem_instance_cli_test', 'hem_shutdown_test', 'hem_help_test',
              'hem_render_test', 'hem_contracts_test', 'hem_config_test', 'pipeline_catalog_test', 'hem_instances_test',
              'hem_pi_contracts_test',
              'hem_pi_state_test', 'hem_pi_endpoints_test', 'hem_pi_cli_test', 'hem_clients_endpoints_test',
-             'hem_client_documents_test', 'hem_omp_cli_test', 'hem_omp_installer_test', 'curated_assets_test', 'moonshine_acquisition_test')
+             'hem_client_documents_test', 'hem_omp_cli_test', 'hem_omp_installer_test', 'curated_assets_test', 'hem_models_test', 'model_download_test', 'moonshine_acquisition_test')
 
 
 def digest(path):
@@ -134,7 +143,7 @@ def verify_wheel_payload(wheel, package):
             assert (len(members) == 1 and not members[0].is_dir()
                     and stat.S_IFMT(members[0].external_attr >> 16) in (0, stat.S_IFREG)), f'missing or malformed Pi payload: {name}'
             assert not (package / relative).is_symlink(), f'installed Pi payload is not regular: {name}'
-        for relative in (*MODEL_PYTHON_PATHS, 'pipeline_validation.py'):
+        for relative in (*MODEL_PYTHON_PATHS, *('loom-pipeline/' + p for p in recipe_inventory.EXPECTED_RECIPES)):
             name = 'hrx_solutions/' + relative
             members = [info for info in archive.infolist() if info.filename == name]
             assert (len(members) == 1 and not members[0].is_dir()
@@ -201,7 +210,6 @@ def source_parity(source_root, package):
         checked[str(source.relative_to(source_root))] = digest(source)
     authored_root = source_root / 'loom-pipeline/llm'
     if authored_root.is_dir():
-        from hrx_solutions.models.pipeline_validation import catalog_modules
         installed_root = package / 'loom-pipeline/llm'
         build = json.loads((installed_root / 'catalog-build.json').read_text())
         assert build.get('format') == 2, 'unsupported catalog build metadata'
@@ -223,9 +231,8 @@ def source_parity(source_root, package):
                 authored.resolve(strict=True).relative_to(authored_root.resolve())
                 assert digest(authored) == variant['sources'][identity], f'stale installed catalog input: {identity}'
                 checked['loom-pipeline/llm/' + identity] = variant['sources'][identity]
-            profile = relative / 'compatibility.json'
-            assert (authored_root / profile).read_bytes() == (installed_root / profile).read_bytes(), 'installed compatibility profile mismatch'
-            identifier = json.loads((authored_root / profile).read_text())['identifier']
+            identifier = {'qwen_08b': 'qwen35-08b-ud-q5-k-xl-v1',
+                          'qwen_27b': 'qwen38-27b-ud-q5-k-xl-v1'}[architecture]
             assert variant['identifier'] == identifier, 'installed variant mismatch'
             artifact = installed_root / relative / 'pipeline.loombc'
             assert artifact.read_bytes().startswith(b'LOOM') and digest(artifact) == variant['bytecode_sha256'], f'installed bytecode mismatch: {architecture}'
@@ -233,14 +240,25 @@ def source_parity(source_root, package):
             assert json.loads((installed_root / descriptor).read_text()) == {
                 'format': 1, 'variant': identifier, 'module': 'pipeline.loombc',
                 'sha256': variant['bytecode_sha256']}, 'installed pipeline descriptor mismatch'
-            modules = catalog_modules(installed_root / relative)
-            assert (modules.prepare, modules.control, modules.weights, modules.providers) == (
-                'pipeline.loombc', 'pipeline.loombc', 'pipeline.loombc', ('pipeline.loombc',)), 'installed pipeline roles mismatch'
-            allowed.update({(relative / 'pipeline.loombc').as_posix(), profile.as_posix(), descriptor.as_posix()})
+            allowed.update({(relative / 'pipeline.loombc').as_posix(), descriptor.as_posix()})
+            for recipe in (authored_root / relative / 'recipes').glob('*.json'):
+                allowed.add(recipe.relative_to(authored_root).as_posix())
+
         actual = {p.relative_to(installed_root).as_posix() for p in installed_root.rglob('*') if p.is_file()}
         assert actual == allowed, 'installed catalog file inventory mismatch'
         assert not list(package.rglob('*.loom')), 'installed wheel contains executable sources'
         assert (authored_root / 'LICENSE-APACHE-2.0').read_bytes() == (installed_root / 'LICENSE-APACHE-2.0').read_bytes()
+    catalog_root = source_root / 'loom-pipeline'
+    authored_recipes = {p.relative_to(catalog_root).as_posix(): p
+                        for p in catalog_root.glob('**/recipes/*.json')}
+    installed_recipes = {p.relative_to(package / 'loom-pipeline').as_posix(): p
+                         for p in (package / 'loom-pipeline').glob('**/recipes/*.json')}
+    if catalog_root.is_dir():
+        assert authored_recipes.keys() == installed_recipes.keys(), 'installed recipe inventory mismatch'
+        for name, source in authored_recipes.items():
+            installed = installed_recipes[name]
+            assert not installed.is_symlink() and installed.read_bytes() == source.read_bytes(), 'installed authored recipe mismatch'
+            checked['loom-pipeline/' + name] = digest(source)
     assert checked, 'no source files checked'
     return checked
 
@@ -275,8 +293,8 @@ def load_contracts(source_root, package):
     """Load only test fixtures from source; every product import uses the wheel.
 
     Rebasing also covers mock targets and Python snippets executed by children.
-    Fixture discovery is the sole path adaptation, selecting the installed
-    compatibility contract instead of a checkout-relative catalog.
+    Complete fixture admission runs before selection; product imports always
+    resolve to installed modules.
     """
     sources = admit_fixtures(source_root, dict.fromkeys((*HELPERS, *CONTRACTS)))
     test_package = types.ModuleType('tests')
@@ -292,8 +310,6 @@ def load_contracts(source_root, package):
         setattr(test_package, name, module)
         code = text.replace('binding.python', 'hrx_solutions')
         exec(compile(code, str(source), 'exec'), module.__dict__)
-        if name == 'gguf_fixtures':
-            module.PROFILE_PATH = package / 'loom-pipeline/llm/qwen/qwen_27b/compatibility.json'
         if name in CONTRACTS:
             suite.addTests(unittest.defaultTestLoader.loadTestsFromModule(module))
     assert suite.countTestCases() > 0, 'installed contract suite is empty'

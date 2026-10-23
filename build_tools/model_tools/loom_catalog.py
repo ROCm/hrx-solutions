@@ -102,12 +102,10 @@ def validate_catalog(inventory: Path) -> tuple[str, ...]:
         manifest = source_root / relative / "sources.txt"
         entries = manifest_entries(manifest, source_root)
         closure = [posixpath.normpath((relative / entry).as_posix()) for entry in entries]
-        profile = json.loads((manifest.parent / "compatibility.json").read_text())
         if (set(variant) != {"identifier", "sources", "output"}
-                or variant["identifier"] != profile["identifier"]
                 or variant["sources"] != closure
                 or variant["output"] != (relative / "pipeline.loombc").as_posix()):
-            raise ValueError(f"Variant inventory/manifest/profile drift: {architecture}")
+            raise ValueError(f"Variant inventory/manifest drift: {architecture}")
         actual.update(closure)
     if actual != set(expected):
         raise ValueError(f"Catalog inventory/manifest drift: missing={sorted(actual-set(expected))}, "
@@ -217,7 +215,13 @@ def stage_bytecode_catalog(destination: Path, outputs: dict[str, Path], inventor
         descriptor = {"format": 1, "variant": variant["identifier"],
                       "module": "pipeline.loombc", "sha256": digest}
         (target.parent / "pipeline.json").write_text(json.dumps(descriptor, sort_keys=True, indent=2)+"\n")
-        shutil.copyfile(root / "qwen" / arch / "compatibility.json", target.parent / "compatibility.json")
+        recipes = sorted((root / "qwen" / arch / "recipes").glob("*.json"))
+        if not recipes:
+            raise ValueError(f"Missing authored recipes: {arch}")
+        (target.parent / "recipes").mkdir()
+        for recipe in recipes:
+            recipe.resolve(strict=True).relative_to(root.resolve())
+            shutil.copyfile(recipe, target.parent / "recipes" / recipe.name)
         build[arch] = {"identifier": variant["identifier"], "bytecode_sha256": digest,
                        "sources": {p: hashlib.sha256((root / p).read_bytes()).hexdigest()
                                    for p in variant["sources"]}}
@@ -236,6 +240,9 @@ def stage_package(package_root, outputs, repository, *, decoder):
 def validate_archive(archive, repository, *, prefix='hrx_solutions/loom-pipeline/llm/'):
     """Prove Qwen archive layout, authored closure and exact payload metadata."""
     names = set(archive.namelist())
+    for name in names:
+        if name.startswith(prefix) and archive.namelist().count(name) != 1:
+            raise RuntimeError(f"wheel duplicates catalog member: {name}")
     inventory = repository / "loom-pipeline/catalog_sources.bzl"
     validate_catalog(inventory)
     declared = variants(inventory)
@@ -267,10 +274,12 @@ def validate_archive(archive, repository, *, prefix='hrx_solutions/loom-pipeline
                 "format": 1, "variant": variant["identifier"],
                 "module": "pipeline.loombc", "sha256": digest}:
             raise RuntimeError(f"wheel catalog descriptor mismatch: {descriptor}")
-        profile = prefix + relative + "compatibility.json"
-        if archive.read(profile) != (root / relative / "compatibility.json").read_bytes():
-            raise RuntimeError(f"wheel compatibility profile mismatch: {profile}")
-        allowed.update({name, descriptor, profile})
+        allowed.update({name, descriptor})
+        for recipe in sorted((root / relative / "recipes").glob("*.json")):
+            member = prefix + relative + "recipes/" + recipe.name
+            if archive.read(member) != recipe.read_bytes():
+                raise RuntimeError(f"wheel authored recipe mismatch: {member}")
+            allowed.add(member)
     actual = {name for name in names if name.startswith(prefix) and not name.endswith("/")}
     if actual != allowed:
         raise RuntimeError(f"wheel catalog file inventory mismatch: extra={sorted(actual-allowed)}, missing={sorted(allowed-actual)}")

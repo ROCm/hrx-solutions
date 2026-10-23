@@ -7,7 +7,7 @@ import time
 
 from . import hem_arguments as arguments
 from .. import hem_display
-from ..models import hem_config, hem_models
+from ..models import hem_config, hem_models, recipes
 from ..hem_common import Deadline, HemError, InvalidInput, result
 from ..control.hem_http import NativeClient, registration
 from ..control.hem_instances import InstanceManager
@@ -50,7 +50,7 @@ class InstanceObservation(ObservationResult):
 
 
 def _overrides(args):
-    return {key: getattr(args, key) for key in (*hem_config.DEFAULTS, 'mtp', 'mtp_depth')
+    return {key: getattr(args, key) for key in (*arguments.SERVING_OPTIONS, 'mtp')
             if getattr(args, key) is not None}
 
 
@@ -181,9 +181,9 @@ def run(args, deadline):
         # and atomic output are owned by the shared configuration adapter.
         with registry.lock('model', args.model, deadline=budget):
             files = hem_models.model_files(registry, args.model, pipeline=args.pipeline)
-            hem_display.emit('Local asset checks (Qwen structural, curated presence); no native equivalent')
-            answer = hem_config.export_deployment(files, args.output, args.name or args.model,
-                        overrides=_overrides(args), config_path=args.config, pipeline=args.pipeline, deadline=budget)
+            hem_display.emit('Selected recipe/artifact checks; native loading remains unprobed')
+            answer = hem_config.export_deployment(recipes.load(files.recipe_id), files, args.output, args.name or args.model,
+                        overrides=_overrides(args), config_path=args.config, deadline=budget)
         hem_display.emit('# Registration example: replace SERVER:PORT with your compatible server endpoint.')
         hem_display.emit(hem_display.http('POST', 'http://SERVER:PORT/v1/models/register',
                             body_path=Path(answer['output']), body=Path(answer['output']).read_bytes()))
@@ -191,7 +191,7 @@ def run(args, deadline):
     server = resolve_server(registry, args.server, args.url)
     manager = ProcessManager(registry)
     if args.command == 'start':
-        hem_display.emit('Local asset checks and bookkeeping (Qwen structural, curated presence); no native equivalent')
+        hem_display.emit('Selected recipe/artifact checks and bookkeeping; native loading is explicit')
         return InstanceManager(registry, processes=manager).start(server, args.model, budget,
                     name=args.name, overrides=_overrides(args), config_path=args.config, pipeline=args.pipeline)
     if args.command == 'stop':

@@ -1,0 +1,41 @@
+{
+  "format": 1,
+  "id": "qwen38-27b-q5-k-xl",
+  "name": "Qwen3.8 27B · Q5_K_XL",
+  "modality": "chat",
+  "pipeline": "qwen",
+  "artifacts": [
+    {
+      "id": "weights",
+      "role": "weights",
+      "format": "gguf",
+      "path": "model.gguf",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "unsloth/Qwen3.8-27B-GGUF",
+        "revision": "408fcc1807ab264d8cd644a7c4c0f58fbd32eebc",
+        "filename": "Qwen3.8-27B-UD-Q5_K_XL.gguf"
+      }
+    },
+    {
+      "id": "tokenizer",
+      "role": "tokenizer",
+      "format": "json",
+      "path": "tokenizer.json",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "Qwen/Qwen3.8-27B",
+        "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "filename": "tokenizer.json"
+      }
+    }
+  ],
+  "configuration": {
+    "rows": 4,
+    "context_capacity": 8192,
+    "pool_capacity": 32768,
+    "prefill_capacity": 128,
+    "mtp": true,
+    "mtp_depth": 3
+  }
+}

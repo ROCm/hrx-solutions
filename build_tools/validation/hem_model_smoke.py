@@ -272,9 +272,23 @@ class Gate:
         assert (path / filename).is_file() and (path / 'tokenizer.json').is_file()
         answer = self.command(namespace, 'model', 'import', name, '--gguf', str(path / filename), '--tokenizer', str(path / 'tokenizer.json'), '--alias', '--pipeline', pipeline)
         assert answer['completed'] and answer['validation']['valid']
-        assert Path(answer['weights']).resolve() == (path / filename).resolve()
-        assert Path(answer['tokenizer']).resolve() == (path / 'tokenizer.json').resolve()
-        assert Path(answer['directory']).name == name
+        directory = Path(answer['directory'])
+        assert directory == self.state_path(namespace) / 'models' / name
+        assert not directory.is_symlink()
+        artifacts = answer['artifacts']
+        assert len(artifacts) == 2 and {item['role'] for item in artifacts} == {'weights', 'tokenizer'}
+        by_role = {item['role']: item for item in artifacts}
+        for role, format, logical, source in (
+            ('weights', 'gguf', 'model.gguf', path / filename),
+            ('tokenizer', 'json', 'tokenizer.json', path / 'tokenizer.json'),
+        ):
+            artifact = by_role[role]
+            assert artifact['format'] == format and artifact['logical_path'] == logical
+            assert artifact['ownership'] == 'caller-reference'
+            alias = Path(artifact['path'])
+            assert alias == directory / logical and alias.is_symlink()
+            assert alias.resolve(strict=True) == source.resolve(strict=True)
+        assert len(answer['assets']) == 2
         assert all(asset['ownership'] == 'reference' for asset in answer['assets'])
         return answer
 

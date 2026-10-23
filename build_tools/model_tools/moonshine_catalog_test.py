@@ -11,8 +11,6 @@ from unittest.mock import patch
 import zipfile
 
 from build_tools.model_tools import moonshine_catalog as catalog, loom_catalog
-from binding.python.models import curated_catalog
-from binding.python.hem_common import InvalidInput
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 
@@ -99,20 +97,19 @@ class MoonshineCatalogTest(unittest.TestCase):
 
     def test_installed_inventory_policy_integrity_and_missing_metadata(self):
         installed=self.stage()
-        entry=curated_catalog.load_catalog('moonshine-streaming-tiny',directory=installed)
-        self.assertEqual(entry.definition['sources'],['providers.loombc'])
-        self.assertFalse(list(installed.glob('*.loom')))
-        self.assertEqual(set(path.name for path in installed.iterdir()),set((*catalog.ARTIFACTS,*catalog.DATA,'artifacts.json')))
-        policy=installed/'weights.loombc';original=policy.read_bytes();policy.write_bytes(b'LOOMtampered')
-        with self.assertRaisesRegex(InvalidInput,'integrity'):
-            curated_catalog.load_catalog('moonshine-streaming-tiny',directory=installed)
-        policy.write_bytes(original);(installed/'artifacts.json').unlink()
-        with self.assertRaisesRegex(InvalidInput,'requires artifact'):
-            curated_catalog.load_catalog('moonshine-streaming-tiny',directory=installed)
+        document=json.loads((installed/'catalog.json').read_bytes())
+        self.assertEqual(document['definition']['sources'],['providers.loombc'])
+        self.assertNotIn('download_recipe', document)
+        self.assertNotIn('pending_requests', document['definition'])
+        self.assertNotIn('options', document['definition'])
+        self.assertFalse(list(installed.rglob('*.loom')))
+        self.assertEqual({path.relative_to(installed).as_posix() for path in installed.rglob('*') if path.is_file()},
+                         set((*catalog.ARTIFACTS,*catalog.DATA,*catalog.RECIPES,'artifacts.json')))
+        self.assertEqual((installed/catalog.RECIPES[0]).read_bytes(), (self.source/catalog.RECIPES[0]).read_bytes())
 
     def test_wheel_allowlist_missing_extra_tampered_and_wrong_native_mapping(self):
         installed=self.stage()
-        original={path.name:path.read_bytes() for path in installed.iterdir()}
+        original={path.relative_to(installed).as_posix():path.read_bytes() for path in installed.rglob('*') if path.is_file()}
         cases=[None,'missing-policy','extra-program','tampered','native-source-reference','notice']
         for case in cases:
             members=dict(original)

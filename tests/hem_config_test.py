@@ -1,7 +1,6 @@
-"""CPU-only contracts; synthetic sparse GGUFs contain no checkpoint payload."""
-from contextlib import redirect_stderr, redirect_stdout
+"""Shared configuration semantics over real authored recipes and typed doubles."""
+from contextlib import redirect_stderr
 from dataclasses import replace
-import hashlib
 import io
 import json
 from pathlib import Path
@@ -9,231 +8,165 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_cli
 from binding.python.models import hem_config as config
-from binding.python.models.gguf import inspect_gguf_set
 from binding.python.hem_common import Deadline, DeadlineExpired, InvalidInput
-from binding.python.models.model_store import ModelFiles
-from tests.gguf_fixtures import expected_tensors, lifecycle_profile, profile, write_matching_gguf
+from tests.recipe_config_fixture import ConfigurationFixture, recipe_for, descriptor_for
 
 
-class HemConfigTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.temporary = tempfile.TemporaryDirectory()
-        cls.root = Path(cls.temporary.name)
-        cls.models = {}
-        cls.tokenizer = cls.root / 'tokenizer.json'
-        cls.tokenizer.write_text('{"model":{"fixture":true}}')
-        cls.digest = hashlib.sha256(json.dumps(json.loads(cls.tokenizer.read_text()), sort_keys=True,
-                                               ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
-        for identifier, catalog in (('qwen', 'qwen_27b'), ('qwen-08b', 'qwen_08b')):
-            weights = cls.root / f'{identifier}.gguf'
-            contract = lifecycle_profile() if identifier == 'qwen-08b' else profile(catalog)
-            write_matching_gguf(weights, contract=contract)
-            cls.models[identifier] = ModelFiles(weights, cls.tokenizer)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.temporary.cleanup()
-
+class HemConfigTest(ConfigurationFixture, unittest.TestCase):
     def setUp(self):
-        self.load_profile = config.load_profile
-        def fixture_profile(catalog):
-            contract = lifecycle_profile() if Path(catalog).name == 'qwen_08b' else self.load_profile(catalog)
-            contract['tokenizer_canonical_sha256'] = self.digest
-            return contract
-        self.profile_patch = patch.object(config, 'load_profile', side_effect=fixture_profile)
-        self.profile_patch.start()
-        self.addCleanup(self.profile_patch.stop)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.configure()
 
-    def resolve(self, pipeline='qwen-08b', flags=None, file=None):
-        return config.resolve(self.models[pipeline], flags, file, pipeline=pipeline)
+    def resolve(self, overrides=None, config_path=None, **kwargs):
+        return config.resolve(self.recipe, self.model, overrides, config_path, **kwargs)
 
-    def file(self, contents):
-        path = self.root / 'settings.json'
-        path.write_text(contents)
-        return path
-
-    def test_unique_selection_uses_descriptors_for_both_profiles(self):
-        for pipeline, model in self.models.items():
-            self.assertEqual(config.select_pipeline(model), pipeline)
-
-    def test_explicit_pipeline_constrains_without_bypassing_qualification(self):
-        with self.assertRaisesRegex(InvalidInput, 'incompatible with qwen:'):
-            config.select_pipeline(self.models['qwen-08b'], 'qwen')
-        with self.assertRaisesRegex(InvalidInput, 'Unknown pipeline'):
-            config.select_pipeline(self.models['qwen'], 'unknown')
-
-    def test_ambiguous_selection_and_explicit_constraint(self):
-        with patch.object(config, 'available_pipelines', return_value=('qwen-08b', 'duplicate')), \
-             patch.object(config, 'resolve_catalog', return_value=config.resolve_catalog('qwen-08b')):
-            with self.assertRaisesRegex(InvalidInput, 'Ambiguous.*--pipeline'):
-                config.select_pipeline(self.models['qwen-08b'])
-            self.assertEqual(config.select_pipeline(self.models['qwen-08b'], 'duplicate'), 'duplicate')
-
-    def test_tokenizer_and_tensor_mismatch_fail(self):
-        changed = self.root / 'changed-tokenizer.json'
-        changed.write_text('{"model":{"fixture":false}}')
-        with self.assertRaisesRegex(InvalidInput, 'Tokenizer configuration differs'):
-            config.select_pipeline(replace(self.models['qwen-08b'], tokenizer=changed))
-        weights = self.root / 'wrong-tensor.gguf'
-        write_matching_gguf(weights, contract=lifecycle_profile(), missing=('blk.0.ssm_a',))
-        with self.assertRaisesRegex(InvalidInput, 'missing required tensor'):
-            config.select_pipeline(ModelFiles(weights, self.tokenizer), 'qwen-08b')
-
-    def test_strict_configuration_json(self):
-        for contents in ('[]', 'null', '{"rows":1,"rows":2}', '{"rows":true}', '{"rows":1.0}',
-                         '{"rows":0}', '{"rows":17}', '{"mtp":null}', '{"unknown":1}',
-                         '{"rows":NaN}', '{"mtp_depth":0}', '{"rows":{"x":1}}', '{'):
-            with self.subTest(contents=contents), self.assertRaises(InvalidInput):
-                config.load_config(self.file(contents))
+    def test_strict_json_does_not_apply_an_unselected_parameter_schema(self):
+        for value in ('[]', 'null', '{"rows":1,"rows":2}', '{"rows":NaN}', '{"options":Infinity}', '{'):
+            with self.subTest(value=value), self.assertRaises(InvalidInput):
+                config.load_config(self.config_file(value))
         self.assertEqual(config.load_config(None), {})
-        self.assertEqual(config.load_config(self.file('{"rows":8,"mtp":false}')), {'rows':8,'mtp':False})
+        self.assertEqual(config.load_config(self.config_file('{"pending_requests":4}')), {'pending_requests': 4})
 
-    def test_precedence_and_provenance_snapshot(self):
-        path = self.file('{"rows":8,"context_capacity":16384}')
-        result = self.resolve(flags={'context_capacity':32768}, file=path)
-        self.assertEqual(result.settings, {**config.DEFAULTS, 'rows':8, 'context_capacity':32768,
-                                          'mtp':False, 'mtp_depth':None})
+    def test_all_four_layers_and_immutable_source_snapshot(self):
+        recipe = replace(self.recipe, configuration={**self.recipe.configuration, 'rows': 5})
+        path = self.config_file('{"rows":8,"context_capacity":16384}')
+        result = config.resolve(recipe, replace(self.model, recipe_identity=recipe.identity),
+                                {'context_capacity': 32768}, path)
+        self.assertEqual(result.settings['rows'], 8)
+        self.assertEqual(result.settings['context_capacity'], 32768)
         self.assertEqual(result.sources['rows'], 'file')
-        self.assertEqual(result.sources['context_capacity'], 'flag')
-        self.assertEqual(result.sources['pool_capacity'], 'default')
+        self.assertEqual(result.sources['context_capacity'], 'override')
+        self.assertEqual(result.sources['pool_capacity'], 'recipe')
+        self.assertNotIn('mtp_depth', result.settings)
+        with self.assertRaises(TypeError): result.settings['rows'] = 1
         path.write_text('{"rows":1}')
-        self.assertEqual(result.settings['rows'],8)
+        self.assertEqual(result.settings['rows'], 8)
 
-    def test_mtp_defaults_disable_and_enabled_depth(self):
-        self.assertEqual(self.resolve('qwen').settings['mtp_depth'],3)
-        self.assertIsNone(self.resolve('qwen', {'mtp':False}).settings['mtp_depth'])
-        self.assertIsNone(self.resolve().settings['mtp_depth'])
-        result = self.resolve('qwen', {'mtp':True,'mtp_depth':2}, self.file('{"mtp":false}'))
-        self.assertEqual(result.settings['mtp_depth'],2)
+    def test_final_cross_rules_allow_later_layer_to_complete_partial_file(self):
+        result = self.resolve({'prefill_capacity': 32}, self.config_file('{"context_capacity":64}'))
+        self.assertEqual((result.settings['context_capacity'], result.settings['prefill_capacity']), (64, 32))
+        with self.assertRaisesRegex(InvalidInput, 'prefill_capacity'):
+            self.resolve(config_path=self.config_file('{"context_capacity":64}'))
 
-    def test_explicit_depth_disable_conflicts_across_sources(self):
-        for flags, contents in (({'mtp_depth':3},'{"mtp":false}'),
-                                ({'mtp':False},'{"mtp":true,"mtp_depth":3}'),
-                                ({'mtp':False,'mtp_depth':3},'{}'),
-                                ({},'{"mtp":false,"mtp_depth":3}')):
-            with self.subTest(flags=flags, contents=contents), self.assertRaisesRegex(InvalidInput, 'remove mtp_depth or enable'):
-                self.resolve('qwen', flags, self.file(contents))
-        for flags in ({'mtp':True}, {'mtp':True,'mtp_depth':1}, {'mtp_depth':1}):
-            with self.subTest(flags=flags), self.assertRaises(InvalidInput):
-                self.resolve(flags=flags)
+    def test_bad_layer_cannot_be_repaired_by_later_override(self):
+        for value in ('"2"', 'true', '1.0', 'null', '0', '17'):
+            with self.subTest(value=value), self.assertRaises(InvalidInput):
+                self.resolve({'rows': 2}, self.config_file('{"rows":' + value + '}'))
+        for layer in ({'unknown': 1}, {'mtp': True}, {'mtp_depth': None}, {'mtp_depth': False}, {'mtp_depth': 1}):
+            with self.subTest(layer=layer), self.assertRaises(InvalidInput): self.resolve(layer)
+        for value in ([], None, {'x': set()}):
+            if value is None: continue
+            with self.subTest(value=value), self.assertRaises(InvalidInput): self.resolve(value)
 
-    def test_capacity_limits_and_relationships(self):
-        for flags in ({'rows':17}, {'context_capacity':262145}, {'pool_capacity':4194305},
-                      {'prefill_capacity':262145}, {'prefill_capacity':129,'context_capacity':128},
-                      {'mtp_depth':4}, {'prefill_capacity':3}, {'rows':True}):
-            with self.subTest(flags=flags), self.assertRaises(InvalidInput):
-                self.resolve('qwen', flags)
-        self.assertEqual(self.resolve('qwen', {'prefill_capacity':4}).settings['prefill_capacity'],4)
+    def test_conditional_depth_uses_final_winning_layer(self):
+        recipe = recipe_for('qwen'); descriptor = descriptor_for(recipe)
+        settings, sources = config.effective_settings(recipe, descriptor, overrides={'mtp': False})
+        self.assertNotIn('mtp_depth', settings)
+        self.assertEqual(sources['mtp_depth'], {'state': 'inactive', 'by': 'override'})
+        for file, override in (({}, {'mtp': False, 'mtp_depth': 2}), ({'mtp': False}, {'mtp_depth': 2})):
+            with self.subTest(file=file, override=override), self.assertRaises(InvalidInput):
+                config.effective_settings(recipe, descriptor, file, override)
+        settings, _ = config.effective_settings(recipe, descriptor, {'mtp': False}, {'mtp': True})
+        self.assertEqual(settings['mtp_depth'], 3)
 
-    def test_native_document_exact_drained_settings_and_local_paths(self):
-        resolved = self.resolve()
-        body = config.deployment_document(resolved, 'chat-small', catalog=resolved.catalog)
-        self.assertEqual(body['admission'],'drained')
-        self.assertEqual(body['device'],0)
-        self.assertEqual(body['definition']['draft_depth'],0)
-        self.assertEqual(body['definition']['weights'],str(self.models['qwen-08b'].weights))
-        self.assertEqual(body['definition']['tokenizer'],str(self.tokenizer))
-        for key, value in config.DEFAULTS.items():
-            self.assertEqual(body['definition'][key],value)
-        self.assertNotIn('weights.loom',body['definition']['sources'])
-        self.assertTrue(all((Path(body['base_directory']) / item).is_file() for item in body['definition']['sources']))
-        self.assertIn(self.tokenizer,resolved.dependencies)
+    def test_asr_uses_same_merge_and_fixed_assertions(self):
+        recipe = recipe_for('moonshine-streaming-tiny'); descriptor = descriptor_for(recipe)
+        settings, _ = config.effective_settings(recipe, descriptor, {'pending_requests': 4, 'options': {}})
+        self.assertEqual(settings, {'pending_requests': 4, 'options': {}})
+        for layer in ({'rows': 2}, {'pending_requests': 8}, {'options': {'x': 1}}, {'pending_requests': True}, {'options': None}):
+            with self.subTest(layer=layer), self.assertRaises(InvalidInput):
+                config.effective_settings(recipe, descriptor, overrides=layer)
 
-    def test_fragmented_index_is_validated_and_retained(self):
-        # Two actual sparse GGUF members, with disjoint tensor descriptors.
-        contract = lifecycle_profile()
-        names = tuple(expected_tensors(contract))
-        first, second = self.root / 'part-one.gguf', self.root / 'part-two.gguf'
-        write_matching_gguf(first, contract=contract, missing=names[::2])
-        write_matching_gguf(second, contract=contract, missing=names[1::2])
-        model = ModelFiles(first, self.tokenizer, (first, second))
-        inspection = inspect_gguf_set(model.gguf_paths)
-        index = self.root / 'parts.safetensors.index.json'
-        with self.assertRaisesRegex(InvalidInput, 'require a .safetensors.index.json'):
-            config.select_pipeline(model)
-        index.unlink(missing_ok=True)
-        with self.assertRaisesRegex(InvalidInput, 'Cannot inspect model assets'):
-            config.select_pipeline(replace(model, weights=index, fragments=model.gguf_paths))
-        index.write_text('invalid')
-        with self.assertRaisesRegex(InvalidInput, 'Cannot inspect model assets'):
-            config.select_pipeline(replace(model, weights=index, fragments=model.gguf_paths))
-        index.write_text(json.dumps({'weight_map':{name:path.name for name,path in inspection.tensor_files.items()}}))
-        model = replace(model, weights=index, fragments=model.gguf_paths)
-        resolved = config.resolve(model)
-        self.assertIn(index,resolved.dependencies)
-        self.assertEqual(config.deployment_document(resolved,'parts',catalog=resolved.catalog)['definition']['weights'],str(index))
-        index.write_text('{"weight_map":{}}')
-        with self.assertRaisesRegex(InvalidInput,'index does not match'):
-            config.resolve(model)
+    def test_recipe_and_prepared_identity_inventory_and_files_are_checked(self):
+        for model in (replace(self.model, recipe_id='different'), replace(self.model, recipe_identity='different'),
+                      replace(self.model, pipeline='different'), replace(self.model, files=self.model.files[:-1]),
+                      replace(self.model, files=self.model.files + self.model.files[:1])):
+            with self.subTest(model=model), self.assertRaises(InvalidInput):
+                config.resolve(self.recipe, model)
+        self.model.files[0].path.unlink()
+        with self.assertRaisesRegex(InvalidInput, 'unreadable'): self.resolve()
 
-    def test_export_revalidates_and_has_no_registry_reservation(self):
-        output = self.root / 'export.json'
-        stderr = io.StringIO()
-        resolved = self.resolve()
-        budget = Deadline.after()
-        with patch.object(config,'deployment_document',wraps=config.deployment_document) as document, \
-             patch.object(config,'resolve',wraps=config.resolve) as resolution, \
-             patch.object(config,'select_pipeline',wraps=config.select_pipeline) as validation, \
-             redirect_stderr(stderr):
-            result = config.export_deployment(self.models['qwen-08b'], output,'chat-small', deadline=budget)
-        self.assertTrue(result['completed'])
-        validation.assert_called_once()
-        document.assert_called_once()
-        self.assertIs(document.call_args.kwargs['deadline'], budget)
+    def test_selected_resolve_does_not_enumerate_recipes_or_initialize_state(self):
+        with patch.object(config.recipes, 'list', side_effect=AssertionError('global recipes')), \
+             patch('binding.python.control.hem_state.Registry', side_effect=AssertionError('state')):
+            result = self.resolve()
+        self.assertEqual(result.pipeline, self.recipe.pipeline)
+        self.assertEqual(result.recipe_identity, self.recipe.identity)
+        self.assertEqual(result.modality, 'chat')
+
+    def test_export_is_atomic_and_uses_the_checked_value_without_reselection(self):
+        output = self.root / 'export.json'; budget = Deadline.after()
+        checked = self.resolve(deadline=budget)
+        with patch.object(config, 'resolve', return_value=checked) as resolution, \
+             patch.object(config.pipelines, 'get', side_effect=AssertionError('reselected')), redirect_stderr(io.StringIO()):
+            answer = config.export_deployment(self.recipe, self.model, output, 'fixture', deadline=budget)
+        self.assertTrue(answer['completed'])
         self.assertIs(resolution.call_args.kwargs['deadline'], budget)
-        self.assertEqual(json.loads(output.read_text()), config.deployment_document(resolved,'chat-small',catalog=resolved.catalog))
-        self.assertIn('does not reserve',stderr.getvalue())
-        self.assertIn('compatible server',stderr.getvalue())
-        self.assertIn('entire raw-curl',stderr.getvalue())
-        self.assertFalse(list(self.root.glob('*.sqlite3')))
+        self.assertEqual(json.loads(output.read_text())['admission'], 'drained')
         original = output.read_bytes()
-        with patch.object(config.tempfile, 'NamedTemporaryFile') as staging, self.assertRaises(InvalidInput):
-            config.export_deployment(self.models['qwen-08b'],output,'../bad')
-        staging.assert_not_called()
+        with self.assertRaises(InvalidInput), redirect_stderr(io.StringIO()):
+            config.export_deployment(self.recipe, self.model, output, '../bad')
         self.assertEqual(output.read_bytes(), original)
 
-    def test_export_expiry_before_publication_preserves_existing_output(self):
-        output = self.root / 'timed-export.json'
-        output.write_text('previous export')
-        clock = [0.0]
-        budget = Deadline(1.0, clock=lambda: clock[0])
-        dump = json.dump
+    def test_export_expiry_after_serialization_preserves_output(self):
+        output = self.root / 'old.json'; output.write_text('old')
+        clock = [0.0]; budget = Deadline(1.0, clock=lambda: clock[0]); dump = json.dump
         def expire(*args, **kwargs):
-            answer = dump(*args, **kwargs)
-            clock[0] = 2.0
-            return answer
-        with patch.object(config.json, 'dump', side_effect=expire):
-            with self.assertRaises(DeadlineExpired):
-                config.export_deployment(self.models['qwen-08b'], output, 'chat-small', deadline=budget)
-        self.assertEqual(output.read_text(), 'previous export')
-        self.assertFalse(list(output.parent.glob('.timed-export.json.*')))
+            result = dump(*args, **kwargs); clock[0] = 2.0; return result
+        with patch.object(config.json, 'dump', side_effect=expire), self.assertRaises(DeadlineExpired):
+            config.export_deployment(self.recipe, self.model, output, 'fixture', deadline=budget)
+        self.assertEqual(output.read_text(), 'old')
+        self.assertFalse(list(self.root.glob('.old.json.*')))
 
-    def test_pipeline_cli_exposes_profiles_capabilities_and_defaults(self):
-        for argv in (['pipeline','list','--json'],['pipeline','show','qwen-08b','--json']):
-            stdout = io.StringIO()
-            with redirect_stdout(stdout):
-                code = hem_cli.main(argv)
-            self.assertEqual(code,0)
-            body=json.loads(stdout.getvalue())
-            entries=body.get('items',[body])
-            self.assertTrue(entries)
-            if 'items' in body:
-                self.assertEqual({entry['pipeline'] for entry in entries},
-                                 {'qwen','qwen-08b','moonshine-streaming-tiny'})
-            for entry in entries:
-                self.assertIn('defaults',entry)
-                self.assertIn('limits',entry)
-                if entry['pipeline'] in ('qwen','qwen-08b'):
-                    self.assertIn('compatibility',entry)
-                    self.assertIn('mtp',entry['capabilities'])
+
+class RealRecipeResolutionTest(unittest.TestCase):
+    def test_three_authored_recipes_drive_actual_modality_native_definitions(self):
+        from binding.python.models import recipes
+        from tests.recipe_config_fixture import prepared_for
+        for identifier in ('qwen35-08b-q5-k-xl', 'qwen38-27b-q5-k-xl', 'moonshine-streaming-tiny'):
+            with self.subTest(identifier=identifier), tempfile.TemporaryDirectory() as directory:
+                recipe = recipes.load(identifier)
+                prepared = prepared_for(Path(directory), recipe)
+                with patch.object(recipes, 'list', side_effect=AssertionError('unrelated recipe discovery')), \
+                     patch('subprocess.Popen', side_effect=AssertionError('helper/native launch')), \
+                     patch('binding.python.control.hem_state.Registry', side_effect=AssertionError('state')):
+                    checked = config.resolve(recipe, prepared, {'rows': 2} if recipe.modality == 'chat' else {'pending_requests': 4})
+                definition = checked.definition_document()
+                if recipe.modality == 'chat':
+                    self.assertEqual(definition['kind'], 'text')
+                    self.assertEqual(definition['rows'], 2)
+                    self.assertEqual(definition['weights'], str(prepared.directory / 'model.gguf'))
+                    self.assertEqual(definition['draft_depth'], 0 if recipe.pipeline == 'qwen-08b' else 3)
                 else:
-                    self.assertEqual(entry['pipeline'],'moonshine-streaming-tiny')
-                    self.assertEqual(entry['kind'],'recognition')
-                    self.assertEqual(entry['check_kind'],'acquisition-presence')
-                    self.assertEqual(entry['defaults'],{'pending_requests':4,'options':{}})
-                    self.assertEqual({asset['path'] for asset in entry['assets']},
-                                     {'model.safetensors','tokenizer.json','config.json','rotary.safetensors'})
-                    self.assertNotIn('compatibility',entry)
+                    self.assertEqual(definition['kind'], 'recognition')
+                    self.assertEqual(definition['assets'], str(prepared.directory))
+                    self.assertEqual(definition['pending_requests'], 4)
+                    self.assertEqual(definition['options'], {})
+                self.assertEqual(checked.recipe_identity, recipe.identity)
+                self.assertEqual(set(checked.dependencies), {item.path for item in prepared.files})
+
+    def test_caller_imports_and_explicit_shard_index_survive_without_shape_matching(self):
+        from binding.python.models import recipes, hem_models
+        from binding.python.control.hem_state import Registry
+        from tests.gguf_fixtures import write_gguf
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = Registry(root / 'state')
+            tokenizer = root / 'tokenizer.json'; tokenizer.write_text('{}')
+            first, second = root / 'first.gguf', root / 'second.gguf'
+            write_gguf(first, tensors=[('arbitrary.first', [1], 0, 0)])
+            write_gguf(second, tensors=[('arbitrary.second', [1], 0, 0)])
+            hem_models.import_model(registry, 'single', ggufs=[first], tokenizer=tokenizer,
+                                    alias=True, pipeline='qwen-08b')
+            single = hem_models.model_files(registry, 'single')
+            self.assertEqual(config.resolve(recipes.load(single.recipe_id), single).definition['kind'], 'text')
+            hem_models.import_model(registry, 'split', ggufs=[first, second], tokenizer=tokenizer,
+                                    alias=True, pipeline='qwen-08b')
+            split = hem_models.model_files(registry, 'split')
+            checked = config.resolve(recipes.load(split.recipe_id), split)
+            self.assertTrue(checked.definition['weights'].endswith('.safetensors.index.json'))
+            for item in split.files:
+                self.assertIn(item.path, checked.dependencies)

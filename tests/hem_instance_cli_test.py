@@ -3,7 +3,6 @@
 The only injections select the CPU payload and tokenizer fingerprint. All CLI,
 configuration, HTTP, socket/process ownership and registry behavior stays real.
 """
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +18,7 @@ from binding.python.control import hem_process, hem_state
 from binding.python.models import hem_config
 from binding.python.hem_common import Deadline
 from binding.python.control.hem_http import NativeClient
-from tests.gguf_fixtures import install_lifecycle_profile, lifecycle_profile, write_matching_gguf
+from tests.gguf_fixtures import write_gguf
 from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
 from tests.hem_lifecycle_fixture import INSTANCES_NATIVE as NATIVE
 from tests.hem_lifecycle_fixture import port, wait_exit
@@ -69,21 +68,16 @@ class InstanceCliTest(unittest.TestCase):
         (self.package / '_native/lib/libhsa-runtime64.so.1').write_bytes(b'CPU fixture only')
         catalog = Path(hem_config.pipeline_info('qwen-08b')['catalog'])
         shutil.copytree(catalog.parents[2], self.package / 'loom-pipeline')
-        install_lifecycle_profile(self.package / 'loom-pipeline')
         self.weights = self.root / 'weights.gguf'
-        write_matching_gguf(self.weights, contract=lifecycle_profile())
+        write_gguf(self.weights, tensors=[('fixture', [1], 0, 0)])
         self.tokenizer = self.root / 'tokenizer.json'
         self.tokenizer.write_text('{"model":{"fixture":true}}')
-        digest = hashlib.sha256(json.dumps({'model':{'fixture':True}}, sort_keys=True,
-                                          separators=(',', ':')).encode()).hexdigest()
         package = hem_config.__package__.rsplit('.', 1)[0]
         script = (
             'import functools,sys; '
-            f'from {package} import hem_cli; from {package}.cli import hem_instance_cli,hem_server_cli; from {package}.models import hem_config,pipeline_validation; '
+            f'from {package} import hem_cli; from {package}.cli import hem_instance_cli,hem_server_cli; from {package}.models import hem_config,pipelines; '
             'from pathlib import Path; '
-            'pipeline_validation.__file__=str(Path(sys.argv[1])/"models/pipeline_validation.py"); '
-            'original=hem_config.load_profile; '
-            f'hem_config.load_profile=lambda catalog:dict(original(catalog), tokenizer_canonical_sha256={digest!r}); '
+            'pipelines.__file__=str(Path(sys.argv[1])/"models/pipelines.py"); '
             'hem_instance_cli.ProcessManager=functools.partial(hem_instance_cli.ProcessManager,package_root=sys.argv[1]); '
             'hem_server_cli.ProcessManager=functools.partial(hem_server_cli.ProcessManager,package_root=sys.argv[1]); '
             'raise SystemExit(hem_cli.main(sys.argv[2:]))')
@@ -114,7 +108,7 @@ class InstanceCliTest(unittest.TestCase):
 
     def setup_model(self):
         return self.invoke('model', 'import', 'tiny', '--gguf', str(self.weights),
-                           '--tokenizer', str(self.tokenizer), '--alias')
+                           '--tokenizer', str(self.tokenizer), '--alias', '--pipeline', 'qwen-08b')
 
     def setup_server(self, name='one'):
         response, _ = self.invoke('server', 'start', '--name', name, '--device', 'CPU-fixture',

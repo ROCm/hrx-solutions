@@ -1,7 +1,7 @@
-"""Scoped current model acquisition; payload ownership never follows aliases.
+"""Shared artifact acquisition, immutable references and owned publication.
 
-Callers pass a Registry. No CLI, daemon, history or legacy manifests are involved.
-Acquisition keeps its model lock through I/O, but never a database transaction.
+Registry owns reservations and no-replace publication. Pipeline bindings own
+artifact admission and preparation; acquisition never selects a model family.
 """
 from __future__ import annotations
 
@@ -11,75 +11,102 @@ from pathlib import Path
 import shutil
 import tempfile
 
-from . import curated_catalog, hem_config, model_download
-from .. import hem_display
+from . import model_download, pipelines, recipes
 from .gguf import inspect_gguf_set
 from ..hem_common import Deadline, HemError, InvalidInput
-from .model_store import (AcquisitionInput, RuntimeMapping, PreparationAttempt,
-    CatalogAssets, ModelFiles, ModelImportError, mapped_assets, prepared_outputs,
-    readable_file, validate_model_id)
+from .model_store import ModelImportError, generated_outputs, readable_file, validate_model_id
+from .recipe_types import (AcquisitionPlan, AcquisitionResult, ArtifactLocation,
+                           GeneratedSource, HFSource, PreparedArtifact, PreparedModel,
+                           json_document)
 
-_INDEX = 'model.safetensors.index.json'
 _GENERATED_RECEIPT = '.loom-acquisition.json'
+_PREFLIGHT_TIMEOUT = 30
+_PREPARATION_TIMEOUT = 300
 
 
-def _assets(ggufs, tokenizer, alias):
-    paths = [Path(path).expanduser().absolute() for path in ggufs]
-    token = Path(tokenizer).expanduser().absolute()
-    inputs = tuple(AcquisitionInput(f'input-{index}', path)
-                   for index, path in enumerate(paths + [token]))
-    return _qwen_assets(inputs, alias)
+def _admit_paths(paths):
+    """Keep declared files disjoint from publication bookkeeping and partials."""
+    members = [Path(item) for item in paths]
+    reserved = [Path(_GENERATED_RECEIPT),
+                *(path.with_name('.' + path.name + '.partial') for path in members)]
+    if any(path == other or path in other.parents or other in path.parents
+           for path in members for other in reserved):
+        raise InvalidInput('Artifact destination conflicts with acquisition bookkeeping')
 
 
-def _qwen_assets(inputs, alias):
-    paths, token = [item.path for item in inputs[:-1]], inputs[-1].path
-    if not paths or len(set(paths + [token])) != len(paths) + 1:
-        raise InvalidInput('GGUF members and tokenizer must have distinct source mappings')
-    if any(path.suffix.lower() != '.gguf' for path in paths):
-        raise InvalidInput('Every GGUF member must have a .gguf extension')
-    names = (['model.gguf'] if len(paths) == 1 else
-             [f'model-{i+1:05d}-of-{len(paths):05d}.gguf' for i in range(len(paths))])
-    mappings = tuple(RuntimeMapping('gguf' if index < len(paths) else 'tokenizer', name,
-                                   'reference' if alias else 'owned', input_id=item.input_id)
-                     for index, (name, item) in enumerate(zip(names + ['tokenizer.json'], inputs)))
-    return _mapped_assets(inputs, mappings, named=False)
+def _plan(recipe, binding):
+    binding.validate_artifacts(recipe.artifacts)
+    _admit_paths(item.path for item in recipe.artifacts)
+    descriptor = binding.describe()
+    inputs = tuple(item for item in recipe.artifacts if isinstance(item.source, HFSource))
+    generated = tuple(item for item in recipe.artifacts if isinstance(item.source, GeneratedSource))
+    preparation = descriptor.preparation
+    expected = {(item.role, item.format, item.path) for item in generated}
+    declared = set() if preparation is None else {
+        (item.role, item.format, item.path) for item in preparation.outputs}
+    if (expected != declared or len(expected) != len(generated)
+            or preparation is not None and len(declared) != len(preparation.outputs)):
+        raise InvalidInput('Generated artifacts differ from selected preparation outputs')
+    return AcquisitionPlan(recipe.id, recipe.pipeline, inputs, generated, preparation)
 
 
-def _mapped_assets(inputs, mappings, **kwargs):
-    try:
-        return mapped_assets(inputs, mappings, **kwargs)
-    except ModelImportError as error:
-        raise InvalidInput(str(error)) from error
+def _declaration(recipe):
+    return dict(format=recipe.format, id=recipe.id, name=recipe.name,
+                modality=recipe.modality, pipeline=recipe.pipeline,
+                artifacts=[dict(id=a.id, role=a.role, format=a.format, path=a.path,
+                                source=(dict(kind='huggingface', repo_id=a.source.repo_id,
+                                             revision=a.source.revision, filename=a.source.filename)
+                                        if isinstance(a.source, HFSource) else dict(kind='generated')))
+                           for a in recipe.artifacts],
+                configuration=json_document(recipe.configuration))
 
 
-def _preparation_attempt(root, model_id):
-    """Reserve caller-owned scratch while the acquisition holds its model lock."""
-    parent = Path(root) / 'preparation-attempts' / model_id
-    try:
-        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        return PreparationAttempt(Path(tempfile.mkdtemp(prefix='attempt-', dir=parent)))
-    except OSError as error:
-        raise HemError(f'Could not reserve private preparation output; incomplete acquisition retained: {error}') from error
+def _provenance(recipe, kind):
+    return dict(format=1, kind=kind, recipe_id=recipe.id, recipe_identity=recipe.identity,
+                pipeline=recipe.pipeline, declaration=_declaration(recipe))
+
+
+def _recipe(record, pipeline=None):
+    provenance = record['provenance']
+    recipe = recipes.load(provenance['recipe_id'])
+    if (recipe.identity != provenance['recipe_identity'] or
+            _declaration(recipe) != provenance['declaration'] or
+            recipe.pipeline != provenance['pipeline'] or pipeline not in (None, recipe.pipeline)):
+        raise InvalidInput('Model recipe declaration or selected pipeline differs; acquire under a new ID')
+    return recipe
 
 
 def _files(record, directory=None):
-    if curated_catalog.is_curated_record(record):
-        return curated_catalog.record_files(record, directory)
-    directory = Path(directory or record['directory'])
-    members = tuple(directory / item['logical_path'] for item in record['assets'][:-1])
-    return ModelFiles(members[0] if len(members) == 1 else directory / _INDEX,
-                      directory / record['assets'][-1]['logical_path'], members)
+    root = Path(directory or record['directory'])
+    provenance = record['provenance']
+    if root.is_symlink():
+        raise InvalidInput('Published model directory cannot be an alias')
+    for asset in record['assets']:
+        path = root / asset['logical_path']
+        relative = path.relative_to(root)
+        if any((root / Path(*relative.parts[:i])).is_symlink() for i in range(1, len(relative.parts))):
+            raise InvalidInput('Model artifact parent cannot be an alias')
+        if asset['ownership'] == 'reference':
+            if not path.is_symlink() or os.readlink(path) != asset['source_path']:
+                raise InvalidInput(f'Model reference mapping changed or is missing: {path}')
+        elif path.is_symlink():
+            raise InvalidInput(f'Owned model artifact cannot be an alias: {path}')
+    evidence = _generated_receipt(record, directory)
+    _check_index(record, root)
+    return PreparedModel(record['id'], provenance['recipe_id'], provenance['recipe_identity'],
+                         provenance['pipeline'], root,
+                         tuple(PreparedArtifact(a['id'], a['role'], a['format'], a['logical_path'],
+                                                root / a['logical_path'], a['prepared_ownership'])
+                               for a in record['assets']), evidence)
 
 
 def _evidence(files):
     result = []
-    paths = (tuple(asset.path for asset in files.files) if isinstance(files, CatalogAssets)
-             else (*files.gguf_paths, files.weights, files.tokenizer))
-    for path in dict.fromkeys(paths):
-        if not readable_file(path):
-            raise InvalidInput(f'Model asset is missing or unreadable: {path}')
-        stat = path.stat()
-        result.append(dict(path=str(path), device=stat.st_dev, inode=stat.st_ino,
+    for item in files.files:
+        if not readable_file(item.path):
+            raise InvalidInput(f'Model asset is missing or unreadable: {item.path}')
+        stat = item.path.stat()
+        result.append(dict(path=str(item.path), device=stat.st_dev, inode=stat.st_ino,
                            size=stat.st_size, mtime_ns=stat.st_mtime_ns, ctime_ns=stat.st_ctime_ns))
     return result
 
@@ -106,50 +133,43 @@ def _atomic_file(destination, write):
         temporary.unlink(missing_ok=True)
 
 
-def _index(files):
-    if len(files.gguf_paths) == 1:
-        return
-    inspection = inspect_gguf_set(files.gguf_paths)
-    document = {'weight_map': {name: path.name for name, path in inspection.tensor_files.items()}}
-    content = (json.dumps(document, sort_keys=True) + '\n').encode()
-    if os.path.lexists(files.weights):
-        if files.weights.is_symlink() or files.weights.read_bytes() != content:
-            raise InvalidInput('Existing fragment index differs from inspected members; preserved for inspection')
-    else:
-        _atomic_file(files.weights, lambda stream: stream.write(content))
-
-
 def _generated_receipt(record, directory=None, *, create=False):
-    """Keep the first published generated identity separate from revalidation."""
-    provenance = record.get('provenance', {})
-    if (not isinstance(provenance, dict) or provenance.get('kind') != 'download' or
-            provenance.get('pipeline') != 'moonshine-streaming-tiny'):
-        return
+    """Prove the first owned generated identity independently of revalidation."""
+    generated = [a for a in record['assets'] if a['prepared_ownership'] == 'generated-owned']
+    if not generated:
+        return {}
     root = Path(directory or record['directory'])
-    rotary = root / 'rotary.safetensors'
     receipt = root / _GENERATED_RECEIPT
     try:
-        if rotary.is_symlink() or not readable_file(rotary):
-            raise ValueError('owned generated rotary is missing or aliased')
-        stat = rotary.stat()
-        expected = dict(format=1, generated={'rotary.safetensors': dict(
-            device=stat.st_dev, inode=stat.st_ino, size=stat.st_size,
-            mtime_ns=stat.st_mtime_ns, ctime_ns=stat.st_ctime_ns)})
+        identities = {}
+        for asset in generated:
+            path = root / asset['logical_path']
+            relative = path.relative_to(root)
+            if (path.is_symlink() or any((root / Path(*relative.parts[:i])).is_symlink()
+                                        for i in range(1, len(relative.parts)))
+                    or not readable_file(path)):
+                raise ValueError('owned generated output is missing or aliased')
+            stat = path.stat()
+            identities[asset['logical_path']] = dict(device=stat.st_dev, inode=stat.st_ino,
+                size=stat.st_size, mtime_ns=stat.st_mtime_ns, ctime_ns=stat.st_ctime_ns)
+        expected = dict(format=1, recipe_identity=record['provenance']['recipe_identity'],
+                        generated=identities)
         if create and not os.path.lexists(receipt):
             pending = record.get('pending') or {}
             if (pending.get('stage') != 'staging' or str(root) != pending.get('path') or
-                    root.is_symlink() or not root.is_dir() or os.path.lexists(record['directory']) or
-                    any(asset['logical_path'] == _GENERATED_RECEIPT for asset in record['assets'])):
-                raise ValueError('first generated receipt requires an unpublished owned staging directory')
+                    root.is_symlink() or not root.is_dir() or os.path.lexists(record['directory'])):
+                raise ValueError('first generated receipt requires unpublished owned staging')
             content = (json.dumps(expected, sort_keys=True) + '\n').encode()
             _atomic_file(receipt, lambda stream: stream.write(content))
         if receipt.is_symlink() or json.loads(receipt.read_text()) != expected:
-            raise ValueError('first generated receipt is invalid or rotary changed')
+            raise ValueError('first generated receipt is invalid or generated output changed')
+        return expected
     except (OSError, ValueError) as error:
-        raise InvalidInput(f'Generated rotary acquisition identity is unproven; preserve the model and acquire under a new ID: {error}') from error
+        raise InvalidInput('Generated acquisition identity is unproven; preserve the model and '
+                           f'acquire under a new ID: {error}') from error
 
 
-def _populate(record, *, prepared=None):
+def _populate(record, *, prepared=None, omit=()):
     pending = record['pending']
     if not pending or pending['stage'] != 'staging':
         return
@@ -165,6 +185,8 @@ def _populate(record, *, prepared=None):
         raise HemError('Conflicting staged generated outputs retained; inspect incomplete acquisition before retrying: '
                        + ', '.join(map(str, conflicts)))
     for asset in record['assets']:
+        if asset['logical_path'] in omit:
+            continue
         source = prepared.get(asset['logical_path'], Path(asset['source_path']))
         destination = stage / asset['logical_path']
         if os.path.lexists(destination):
@@ -193,212 +215,283 @@ def _populate(record, *, prepared=None):
 def _qualify(registry, model_id, pipeline=None):
     record = registry.get_model(model_id)
     try:
+        recipe = _recipe(record, pipeline)
         files = _files(record)
-        _generated_receipt(record)
-        if not isinstance(files, CatalogAssets):
-            _index(files)
         before = _evidence(files)
-        if isinstance(files, CatalogAssets):
-            curated_catalog.check_assets(files, pipeline)
-            selected = files.pipeline
-        else:
-            selected = hem_config.select_pipeline(files, pipeline)
+        # Resolving the selected binding retains its catalog/program integrity
+        # checks. No architecture or tensor-shape qualification occurs here.
+        pipelines.get(recipe.pipeline).describe()
         after = _evidence(files)
         if before != after:
-            raise InvalidInput('Model assets changed during qualification; retry after making inputs stable')
+            raise InvalidInput('Model assets changed during presence checks; retry with stable inputs')
     except (OSError, ValueError, HemError) as exc:
         registry.record_validation(model_id, valid=False, evidence={'error': str(exc)})
         if isinstance(exc, HemError):
             raise
-        raise InvalidInput(f'Cannot qualify model {model_id}: {exc}') from exc
-    return registry.record_validation(model_id, valid=True, pipeline=selected, evidence=after)
+        raise InvalidInput(f'Cannot inspect model {model_id}: {exc}') from exc
+    return registry.record_validation(model_id, valid=True, pipeline=recipe.pipeline, evidence=after)
 
 
-def _acquire(registry, model_id, assets, provenance, pipeline, obtain=None, *,
-             inputs=(), generated=(), preparer=None):
-    """Own reservation, optional fixed preparation, staging and publication once."""
+def _preparation_attempt(root, model_id):
+    parent = Path(root) / 'preparation-attempts' / model_id
+    try:
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if parent.is_symlink() or parent.resolve() != parent.absolute():
+            raise OSError('preparation parent must be owned without aliases')
+        return Path(tempfile.mkdtemp(prefix='attempt-', dir=parent))
+    except OSError as error:
+        raise HemError(f'Could not reserve private preparation output: {error}') from error
+
+
+def _acquire(registry, model_id, assets, provenance, *, obtain=None, plan=None, binding=None, stage_prepare=None):
     with registry.lock('model', model_id):
         record = registry.prepare_model(model_id, assets=assets, provenance=provenance)
         pending = record['pending']
         stage = Path(pending['path']) if pending and pending['stage'] == 'staging' else None
-        needs_preparation = preparer is not None and stage is not None and stage.exists() and any(
-            not os.path.lexists(stage / item.logical_path) for item in generated)
+        needs_preparation = (plan is not None and plan.preparation is not None and
+                             stage is not None and stage.exists() and any(
+                                 not os.path.lexists(stage / item.path) for item in plan.generated))
         if needs_preparation:
-            preparer.preflight()  # Existing 30s cap, before unbounded acquisition.
+            binding.preflight(plan, Deadline.after(_PREFLIGHT_TIMEOUT))
         if obtain is not None:
-            obtain()  # Matching published references may need a missing pinned cache member again.
+            obtain()
         prepared = {}
         if needs_preparation:
             attempt = _preparation_attempt(registry.root, model_id)
-            deadline = Deadline.after(preparer.TIMEOUT)  # Fresh only after inputs are ready.
-            result = preparer.prepare(inputs, attempt, deadline)
+            inputs = {item.id: model_download._cache_path(item.source) for item in plan.inputs}
+            result = binding.prepare(plan, inputs, attempt, Deadline.after(_PREPARATION_TIMEOUT))
             try:
-                outputs = prepared_outputs(attempt, result, tuple(
-                    (item.generated_role, item.logical_path) for item in generated))
+                prepared = generated_outputs(attempt, result, plan.generated)
             except ModelImportError as error:
-                raise InvalidInput(f'Incomplete preparation result; attempt retained at {attempt.directory}: {error}') from error
-            prepared = {item.logical_path: outputs[item.generated_role] for item in generated}
+                raise InvalidInput(f'Incomplete preparation result; attempt retained at {attempt}: {error}') from error
         if stage is None or not stage.exists():
-            # Published generated identities, including rename-before-DB recovery,
-            # must be proven as-is. Never recreate their first-publication proof.
             _generated_receipt(record)
         if stage is not None:
             try:
+                if stage.exists() and stage_prepare is not None:
+                    _populate(record, omit=(provenance['fragment_index']['path'],))
+                    try:
+                        stage_prepare(stage)
+                    except ValueError as error:
+                        raise InvalidInput(f'Invalid fragment format; incomplete assets retained: {error}') from error
                 _populate(record, prepared=prepared)
                 if stage.exists():
-                    _generated_receipt(record, stage, create=True)
+                    _generated_receipt(record, stage, create=bool(prepared) or stage_prepare is not None)
             except OSError as exc:
                 raise HemError(f'Could not acquire model {model_id}; incomplete assets retained: {exc}') from exc
-            # Registry owns no-replace rename and recoverable DB publication.
             registry.publish_model(model_id)
-        return _qualify(registry, model_id, pipeline)
+        return _qualify(registry, model_id)
 
 
-def import_model(registry, model_id, *, ggufs, tokenizer, alias=False, pipeline=None):
-    """Import copies (default) or immutable external references, then qualify."""
-    if pipeline in curated_catalog.CATALOGS:
-        raise InvalidInput('Curated pipelines require --assets-dir with their complete prepared file set')
-    if isinstance(ggufs, (str, Path)):
-        ggufs = [ggufs]
-    assets = _assets(ggufs, tokenizer, alias)
-    return _acquire(registry, model_id, assets, {'kind': 'import'}, pipeline)
+def _asset(item, source, ownership, prepared_ownership):
+    return dict(id=item.id, role=item.role, format=item.format, logical_path=item.path,
+                source_path=str(source), ownership=ownership, prepared_ownership=prepared_ownership)
 
 
-def import_assets(registry, model_id, *, directory, pipeline, alias=False):
-    """Copy or alias an explicitly selected, complete caller-prepared file set."""
-    catalog = curated_catalog.load_catalog(pipeline)
-    directory = Path(directory).expanduser().absolute()
-    declarations = [asset for asset in catalog.assets
-                    if asset['required'] or os.path.lexists(directory / asset['path'])]
-    inputs = tuple(AcquisitionInput(f'input-{index}', directory / asset['path'])
-                   for index, asset in enumerate(declarations))
-    mappings = tuple(RuntimeMapping(asset['role'], asset['path'], 'reference' if alias else 'owned',
-                                   input_id=item.input_id)
-                     for asset, item in zip(declarations, inputs))
-    assets = _mapped_assets(inputs, mappings)
-    provenance = dict(kind='import', format=1, asset_contract=catalog.contract,
-                      pipeline=pipeline, source={'kind': 'caller-prepared'})
-    return _acquire(registry, model_id, assets, provenance, pipeline)
+def _locations(recipe):
+    return tuple(ArtifactLocation(a.id, a.path, a.source,
+                                  model_download._cache_path(a.source) if isinstance(a.source, HFSource) else None,
+                                  readable_file(model_download._cache_path(a.source)) if isinstance(a.source, HFSource) else False,
+                                  'hf-reference' if isinstance(a.source, HFSource) else 'generated-owned')
+                 for a in recipe.artifacts)
 
 
 def available():
-    """Pinned recipes and local cache state only; never legacy registrations."""
-    return [{**recipe, 'files': [model_download.source_status(source)
-                               for source in model_download._sources(recipe)]}
-            for recipe in model_download.recipes()]
+    return [dict(id=recipe.id, name=recipe.name, modality=recipe.modality, pipeline=recipe.pipeline,
+                 files=[dict(id=item.id, logical_path=item.logical_path, cached=item.cached,
+                             cache_path=str(item.cache_path) if item.cache_path else None,
+                             ownership=item.ownership) for item in _locations(recipe)])
+            for recipe in recipes.list()]
 
 
 def download(registry, recipe_id, *, model_id, pipeline=None, offline=False, dry_run=False):
-    """Download into pinned HF cache, referencing snapshot locators in scoped storage.
-
-    Dry-run never constructs a Registry: callers may pass None and preview the
-    proposed namespace separately. Normal HF credentials/cache/environment survive.
-    """
     try:
         validate_model_id(model_id)
-        recipe = model_download.recipe_by_id(recipe_id)
-        sources = model_download._sources(recipe)
-    except ModelImportError as exc:
-        raise InvalidInput(str(exc).replace('loom-serve-setup models', 'loom-control model')) from exc
-    offline = offline or os.environ.get('HF_HUB_OFFLINE', '').upper() in ('1', 'ON', 'YES', 'TRUE')
-    files = [model_download.source_status(source) for source in sources]
-    named = 'sources' in recipe
-    inputs = model_download.acquisition_inputs(sources)
-    try:
-        mappings = model_download.runtime_mappings(recipe, sources) if named else ()
     except ModelImportError as error:
         raise InvalidInput(str(error)) from error
-    assets = (_mapped_assets(inputs, mappings) if named else _qwen_assets(inputs, True))
-    selected = pipeline or recipe['pipeline']
-    commands = [['hf', 'download', source['repo_id'], source['filename'], '--revision',
-                 source['revision'], '--cache-dir', str(model_download.cache_root())] for source in sources]
+    recipe = recipes.load(recipe_id)
+    if pipeline not in (None, recipe.pipeline):
+        raise InvalidInput('Selected pipeline differs from recipe pipeline')
+    binding = pipelines.get(recipe.pipeline)
+    plan = _plan(recipe, binding)  # Pure admission precedes cache, state and helper work.
     if dry_run:
-        return dict(model=model_id, recipe=recipe, files=files, assets=assets,
-                    commands=[hem_display.command(command) for command in commands],
-                    offline=offline, dry_run=True, completed=True, state='preview',
-                    **({'generated': recipe.get('generated', []), 'check_kind': 'acquisition-presence'} if named else {}))
+        return AcquisitionResult(model_id, recipe.id, recipe.pipeline, 'preview', _locations(recipe))
+    offline = offline or os.environ.get('HF_HUB_OFFLINE', '').upper() in ('1', 'ON', 'YES', 'TRUE')
+    assets = [_asset(item, model_download._cache_path(item.source), 'reference', 'hf-reference')
+              if isinstance(item.source, HFSource) else
+              _asset(item, registry.root / 'models' / model_id / item.path, 'owned', 'generated-owned')
+              for item in recipe.artifacts]
     def obtain():
-        for source, command in zip(sources, commands):
-            if not model_download.source_status(source)['cached']:
+        for item in plan.inputs:
+            source = item.source
+            if not readable_file(model_download._cache_path(source)):
                 if offline:
-                    raise HemError(f'Offline cache is missing {source["repo_id"]}@{source["revision"]}/{source["filename"]}')
-                # Existing streamer prints this exact quoted command once and redacts HF credentials.
+                    raise HemError(f'Offline cache is missing {source.repo_id}@{source.revision}/{source.filename}')
                 try:
-                    model_download._run_hf(command)
-                except ModelImportError as exc:
-                    raise HemError(str(exc)) from exc
-                if not model_download.source_status(source)['cached']:
+                    model_download._run_hf(model_download.command(source))
+                except ModelImportError as error:
+                    raise HemError(str(error)) from error
+                if not readable_file(model_download._cache_path(source)):
                     raise HemError('hf did not populate the pinned snapshot; incomplete record retained')
-    if named:
-        if recipe['id'] != 'moonshine-streaming-tiny' or selected != recipe['pipeline']:
-            raise InvalidInput('Unsupported named preparation recipe or pipeline override')
-        from . import moonshine_preparation
-        generated_mappings = tuple(RuntimeMapping(item['role'], item['path'], 'owned',
-                                                   generated_role=item['role'])
-                                   for item in recipe['generated'])
-        if tuple((item.generated_role, item.logical_path) for item in generated_mappings) != moonshine_preparation.GENERATED:
-            raise InvalidInput('Named preparation outputs differ from the fixed adapter contract')
-        assets = _mapped_assets(inputs, (*mappings, *generated_mappings),
-                                generated_directory=registry.root / 'models' / model_id)
-        provenance = dict(kind='download', format=1, pipeline=selected,
-                          asset_contract=recipe['asset_contract'], source=recipe,
-                          preparation=dict(revision=moonshine_preparation.REVISION,
-                                           files=moonshine_preparation.TOOL_FILES))
-        return _acquire(registry, model_id, assets, provenance, selected, obtain,
-                        inputs=inputs, generated=generated_mappings, preparer=moonshine_preparation)
-    return _acquire(registry, model_id, assets, {'kind': 'download', 'recipe': recipe}, selected, obtain)
+    _acquire(registry, model_id, assets, _provenance(recipe, 'download'),
+             obtain=obtain, plan=plan, binding=binding)
+    return AcquisitionResult(model_id, recipe.id, recipe.pipeline, 'acquired', _locations(recipe))
+
+
+def _import_recipe(pipeline, formats):
+    if pipeline is None:
+        declarations = recipes.list()
+    else:
+        # The binding already owns its catalog location. Read that catalog's
+        # declaration metadata before resolving any other implementation; full
+        # support discovery deliberately keeps its stronger all-entry checks.
+        descriptor = pipelines.get(pipeline).describe()
+        declarations = []
+        for root in pipelines.catalog_roots():
+            if not root.is_dir():
+                continue
+            directory = root / descriptor.bundle.catalog_relative_path / 'recipes'
+            try:
+                directory.resolve().relative_to(root.resolve(strict=True))
+            except (ValueError, OSError, RuntimeError) as error:
+                raise InvalidInput('Selected recipe catalog escapes its packaged root') from error
+            for path in sorted(directory.glob('*.json')):
+                try:
+                    path.resolve(strict=True).relative_to(root.resolve(strict=True))
+                except (ValueError, OSError, RuntimeError) as error:
+                    raise InvalidInput('Selected recipe declaration escapes its packaged root') from error
+                try:
+                    with path.open('rb') as stream:
+                        metadata = recipes.parse(stream.read(recipes.MAX_BYTES + 1))
+                except OSError as error:
+                    raise InvalidInput(f'Cannot read selected recipe declaration {path.name!r}') from error
+                if metadata.pipeline == pipeline:
+                    if path.name != metadata.id + '.json':
+                        raise InvalidInput('Selected recipe filename and declared ID differ')
+                    declarations.append(recipes.load(metadata.id))
+            break
+    candidates = [recipe for recipe in declarations if
+                  all(any(a.format == fmt for a in recipe.artifacts) for fmt in formats)]
+    if len(candidates) != 1:
+        raise InvalidInput('Import requires an unambiguous packaged recipe; select an existing --pipeline')
+    return candidates[0]
+
+
+def import_model(registry, model_id, *, ggufs, tokenizer, alias=False, pipeline=None):
+    """Preserve the existing explicit GGUF import command without shape inference."""
+    if isinstance(ggufs, (str, Path)):
+        ggufs = [ggufs]
+    paths = [Path(path).expanduser().absolute() for path in ggufs]
+    token = Path(tokenizer).expanduser().absolute()
+    if not paths or len(set(paths + [token])) != len(paths) + 1 or any(p.suffix.lower() != '.gguf' for p in paths):
+        raise InvalidInput('GGUF members and tokenizer require distinct mappings and .gguf weight files')
+    recipe = _import_recipe(pipeline, ('gguf', 'json'))
+    weights = [a for a in recipe.artifacts if a.role == 'weights' and a.format == 'gguf']
+    tokens = [a for a in recipe.artifacts if a.role == 'tokenizer']
+    if len(weights) != 1 or len(tokens) != 1 or len(recipe.artifacts) != 2:
+        raise InvalidInput('Selected recipe does not admit this GGUF/tokenizer import')
+    if len(paths) > 1:
+        # Keep explicit split-file format/index support, never compare tensors
+        # with a model architecture or guess the selected pipeline from them.
+        return _import_fragments(registry, model_id, recipe, paths, token, alias)
+    selected = {weights[0].id: paths[0], tokens[0].id: token}
+    assets = [_asset(a, selected[a.id], 'reference' if alias else 'owned',
+                     'caller-reference' if alias else 'caller-owned') for a in recipe.artifacts]
+    _admit_paths(a['logical_path'] for a in assets)
+    return _acquire(registry, model_id, assets, _provenance(recipe, 'import'))
+
+
+def _index_content(paths):
+    inspection = inspect_gguf_set(paths)
+    return (json.dumps({'weight_map': {name: path.name for name, path in
+                                      inspection.tensor_files.items()}}, sort_keys=True) + '\n').encode()
+
+
+def _check_index(record, root):
+    declaration = record['provenance'].get('fragment_index')
+    if declaration is None:
+        return
+    index = root / declaration['path']
+    if (index.is_symlink() or index.read_bytes() !=
+            _index_content(tuple(root / name for name in declaration['members']))):
+        raise InvalidInput('Existing fragment index differs from inspected members; preserved for inspection')
+
+
+def _import_fragments(registry, model_id, recipe, paths, tokenizer, alias):
+    from .recipe_types import Artifact
+    weights = next(a for a in recipe.artifacts if a.role == 'weights')
+    token = next(a for a in recipe.artifacts if a.role == 'tokenizer')
+    # This existing local import command supplies explicit members. Only its
+    # format-derived index is generated; HF recipe destinations are never guessed.
+    names = [f'model-{i+1:05d}-of-{len(paths):05d}.gguf' for i in range(len(paths))]
+    index_name = 'model.safetensors.index.json'
+    index = Artifact(weights.id, weights.role, 'json', index_name, GeneratedSource())
+    assets = [_asset(index, registry.root / 'models' / model_id / index_name, 'owned', 'generated-owned')]
+    for i, (name, path) in enumerate(zip(names, paths)):
+        item = Artifact(f'fragment-{i+1}', 'weights-shard', 'gguf', name, GeneratedSource())
+        assets.append(_asset(item, path, 'reference' if alias else 'owned',
+                             'caller-reference' if alias else 'caller-owned'))
+    assets.append(_asset(token, tokenizer, 'reference' if alias else 'owned',
+                         'caller-reference' if alias else 'caller-owned'))
+    _admit_paths(a['logical_path'] for a in assets)
+    provenance = _provenance(recipe, 'import')
+    provenance['fragment_index'] = dict(path=index_name, members=names)
+    def prepare(stage):
+        destination = stage / index_name
+        content = _index_content(tuple(stage / name for name in names))
+        if os.path.lexists(destination):
+            if destination.is_symlink() or destination.read_bytes() != content:
+                raise InvalidInput('Existing fragment index differs from inspected members; preserved for inspection')
+        else:
+            _atomic_file(destination, lambda stream: stream.write(content))
+    return _acquire(registry, model_id, assets, provenance, stage_prepare=prepare)
+
+
+def import_assets(registry, model_id, *, directory, pipeline, alias=False):
+    """Import a complete caller-prepared set, without acquiring or preparing it."""
+    recipe = _import_recipe(pipeline, ())
+    root = Path(directory).expanduser().absolute()
+    _admit_paths(a.path for a in recipe.artifacts)
+    assets = [_asset(a, root / a.path, 'reference' if alias else 'owned',
+                     'caller-reference' if alias else 'caller-owned') for a in recipe.artifacts]
+    return _acquire(registry, model_id, assets, _provenance(recipe, 'import'))
 
 
 def validate(registry, model_id, *, pipeline=None):
-    """Recheck accessible published inputs; explicit acquisition resumes staging."""
     with registry.lock('model', model_id):
         record = registry.get_model(model_id)
         if record['pending'] and record['pending']['stage'] == 'staging':
-            raise HemError('Acquisition is incomplete; repeat the matching import/download before validation')
+            raise HemError('Acquisition is incomplete; repeat matching import/download before validation')
         return _qualify(registry, model_id, pipeline)
 
 
 def model_files(registry, model_id, *, pipeline=None):
-    """Consumer helper repeats qualification before returning immutable mappings.
-
-    Lifecycle consumers keep the model lock while preparing their dependency
-    reservation; this helper therefore does not acquire a second lock.
-    """
+    """Caller keeps its model lock through dependency reservation/export."""
     record = registry.get_model(model_id)
     if record['pending'] and record['pending']['stage'] == 'staging':
         raise HemError('Model acquisition is incomplete')
-    record = _qualify(registry, model_id, pipeline)
-    return _files(record)
+    return _files(_qualify(registry, model_id, pipeline))
 
 
 def show(registry, model_id):
-    """Observational inventory preserves missing aliases and saved qualification."""
     record = registry.get_model(model_id)
-    files = None
-    named = curated_catalog.is_curated_record(record)
     try:
+        _recipe(record)
         files = _files(record)
         evidence = _evidence(files)
-        if named:
-            curated_catalog.check_assets(files)
-            _generated_receipt(record)
         accessible, error = True, None
-    except (OSError, HemError) as exc:
-        evidence, accessible, error = None, False, str(exc)
+    except (OSError, ValueError, HemError) as exc:
+        files, evidence, accessible, error = None, None, False, str(exc)
     validation = record['validation']
     state = ('incomplete' if record['pending'] and record['pending']['stage'] == 'staging' else
              'missing' if not accessible else
              'ready' if validation and validation['valid'] and validation['evidence'] == evidence else
              'invalid' if validation and not validation['valid'] else 'unvalidated')
-    if named:
-        return dict(record, model=model_id, state=state, accessible=accessible, error=error,
-                    intended_pipeline=record['provenance'].get('pipeline'),
-                    check_kind='acquisition-presence', native_readiness='unprobed',
-                    named_assets=[dict(role=item.role, logical_path=item.logical_path, path=str(item.path))
-                                  for item in files.files] if files else [])
     return dict(record, model=model_id, state=state, accessible=accessible, error=error,
-                weights=str(files.weights), tokenizer=str(files.tokenizer),
-                fragments=[str(path) for path in files.gguf_paths])
+                intended_pipeline=record['provenance']['pipeline'],
+                check_kind='acquisition-presence', native_readiness='unprobed',
+                artifacts=[dict(id=a.id, role=a.role, format=a.format, logical_path=a.logical_path,
+                                path=str(a.path), ownership=a.ownership) for a in files.files] if files else [])
 
 
 def inventory(registry):

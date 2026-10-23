@@ -44,18 +44,16 @@ class InstalledPayloadTest(unittest.TestCase):
             'integrations/openwebui/hem_openwebui_receipts.py',
             'integrations/openwebui/hem_openwebui_wire.py',
             'models/__init__.py',
-            'models/curated_catalog.py',
             'models/gguf.py',
             'models/hem_config.py',
             'models/hem_models.py',
-            'models/hem_model_operations.py',
             'models/model_download.py',
             'models/model_store.py',
             'models/moonshine_preparation.py',
             'models/moonshine_preparer_identity.py',
-            'models/pipeline_validation.py',
-            'models/qwen_validation.py',
-            'pipeline_validation.py',
+            'models/recipe_types.py', 'models/recipes.py', 'models/pipelines.py',
+            'models/pipelines_qwen.py', 'models/pipelines_moonshine.py',
+            'models/modalities/__init__.py', 'models/modalities/chat.py', 'models/modalities/asr.py',
             'integrations/__init__.py',
             'integrations/pi/__init__.py',
             'integrations/pi/hem_pi.py',
@@ -74,6 +72,11 @@ class InstalledPayloadTest(unittest.TestCase):
         from build_tools.validation.check_installed_cpu import CLI_FILES
         for name in CLI_FILES:
             self.files[name] = (source / name).read_bytes()
+        catalog = source.parents[1] / 'loom-pipeline'
+        for relative in ('llm/qwen/qwen_08b/recipes/qwen35-08b-q5-k-xl.json',
+                         'llm/qwen/qwen_27b/recipes/qwen38-27b-q5-k-xl.json',
+                         'recognition/moonshine/streaming_tiny/recipes/moonshine-streaming-tiny.json'):
+            self.files['loom-pipeline/' + relative] = (catalog / relative).read_bytes()
         self.wheel = self.root / 'fixture.whl'
         with zipfile.ZipFile(self.wheel, 'w') as archive:
             for name, content in self.files.items():
@@ -302,7 +305,6 @@ class InstalledPayloadTest(unittest.TestCase):
 
     def test_generated_catalog_parity_rejects_stale_sources_or_modified_bytecode(self):
         from build_tools.model_tools import loom_catalog
-        from binding.python.models.pipeline_validation import catalog_modules
         repository = Path(__file__).resolve().parents[2]
         source_root = self.root / 'catalog-source'
         shutil.copytree(repository / 'loom-pipeline', source_root / 'loom-pipeline', symlinks=True)
@@ -316,9 +318,11 @@ class InstalledPayloadTest(unittest.TestCase):
         with patch.object(loom_catalog, 'validate_bytecode_artifact'):
             loom_catalog.stage_bytecode_catalog(self.package / 'loom-pipeline/llm', products, inventory, decoder=Path('fixture-decoder'))
         (self.package / 'loom-pipeline/qwen/control.loom').unlink()
-        adapter = types.ModuleType('hrx_solutions.models.pipeline_validation')
-        adapter.catalog_modules = catalog_modules
-        with patch.dict(sys.modules, {adapter.__name__:adapter}):
+        for recipe in (source_root / 'loom-pipeline').glob('**/recipes/*.json'):
+            target = self.package / 'loom-pipeline' / recipe.relative_to(source_root / 'loom-pipeline')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(recipe.read_bytes())
+        with self.subTest(contract='generated catalog parity'):
             self.assertIn('loom-pipeline/llm/qwen/qwen_08b/prepare.loom', gate.source_parity(source_root,self.package))
             source = source_root / 'loom-pipeline/llm/qwen/qwen_08b/prepare.loom'
             original = source.read_bytes()
@@ -334,8 +338,8 @@ class InstalledPayloadTest(unittest.TestCase):
             local = output.parent
             mutations = (
                 ('pipeline.json', 'installed pipeline descriptor mismatch'),
-                ('compatibility.json', 'installed compatibility profile mismatch'),
-                ('weights.loombc', 'unexpected executable modules'),
+                ('compatibility.json', 'installed catalog file inventory mismatch'),
+                ('weights.loombc', 'installed catalog file inventory mismatch'),
             )
             for filename, error in mutations:
                 target = local / filename

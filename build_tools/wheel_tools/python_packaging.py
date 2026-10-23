@@ -413,6 +413,7 @@ class BazelBuildPy(build_py):
         hrx_source = discover_hrx_source(context)
         self._native_outputs = stage_native_payload(native_root, executables, rocm_root, hrx_source)
         self._native_outputs.extend(package_families.stage_helpers(native_root, products, hrx_source))
+        package_families.validate_bundle(package_root, products)
 
     def get_outputs(self, include_bytecode: int = 1) -> list[str]:
         outputs = super().get_outputs(include_bytecode)

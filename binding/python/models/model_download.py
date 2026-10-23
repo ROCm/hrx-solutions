@@ -12,49 +12,9 @@ import sys
 import threading
 import time
 
-from . import curated_catalog, model_store, pipeline_validation
+from . import model_store
+from .recipe_types import HFSource
 from .. import hem_display
-from .qwen_validation import load_profile
-
-_COMMIT = re.compile(r"^[0-9a-f]{40}$")
-
-
-def recipes() -> list[dict]:
-    catalog = []
-    pipelines = pipeline_validation.available_pipelines()
-    # Keep existing Qwen recipe ordering when adding curated acquisition entries.
-    for pipeline in (*[item for item in pipelines if item not in curated_catalog.CATALOGS],
-                     *[item for item in pipelines if item in curated_catalog.CATALOGS]):
-        if pipeline in curated_catalog.CATALOGS:
-            entry = curated_catalog.load_catalog(pipeline)
-            if entry.recipe is not None:
-                descriptor = dict(entry.recipe, pipeline=pipeline,
-                                  asset_contract=entry.contract, check_kind='acquisition-presence')
-                _sources(descriptor)
-                catalog.append(descriptor)
-            continue
-        profile = load_profile(pipeline_validation.resolve_catalog(pipeline))
-        if "download_recipe" not in profile:
-            continue
-        descriptor = dict(profile["download_recipe"])
-        reference = profile["reference"]
-        filenames = reference.get("gguf_filenames", [reference.get("gguf_filename")])
-        descriptor.update({"pipeline": pipeline, "profile": profile["identifier"],
-                           "gguf": {"repo_id": reference["gguf_repo"],
-                                    "revision": reference["gguf_revision"], "filenames": filenames},
-                           "tokenizer": {"repo_id": reference["tokenizer_repo"],
-                                         "revision": reference["tokenizer_revision"],
-                                         "filename": reference.get("tokenizer_filename", "tokenizer.json")}})
-        _sources(descriptor)  # Reject malformed bundled coordinates before using them.
-        catalog.append(descriptor)
-    return catalog
-
-
-def recipe_by_id(identifier: str) -> dict:
-    for recipe in recipes():
-        if recipe["id"] == identifier:
-            return recipe
-    raise model_store.ModelImportError(f"Unknown download recipe {identifier!r}; run 'loom-control model available'")
 
 
 def cache_root() -> Path:
@@ -68,83 +28,23 @@ def cache_root() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))).expanduser().absolute() / "huggingface" / "hub"
 
 
-def _sources(recipe: dict) -> list[dict]:
-    if 'sources' in recipe:
-        sources = recipe['sources']
-        if not isinstance(sources, list) or not sources:
-            raise model_store.ModelImportError('Named recipe must specify pinned HF sources')
-        for source in sources:
-            if (not isinstance(source, dict) or
-                    set(source) != {'role', 'kind', 'repo_id', 'revision', 'filename'} or
-                    source['kind'] != 'huggingface' or not isinstance(source['role'], str) or
-                    not source['role']):
-                raise model_store.ModelImportError('Invalid named recipe source')
-        _check_sources(sources)
-        return sources
-    gguf = recipe["gguf"]
-    tokenizer = recipe["tokenizer"]
-    sources = [{"role": "gguf", "kind": "huggingface", "repo_id": gguf["repo_id"],
-                "revision": gguf["revision"], "filename": filename} for filename in gguf["filenames"]]
-    sources.append({"role": "tokenizer", "kind": "huggingface", "repo_id": tokenizer["repo_id"],
-                    "revision": tokenizer["revision"], "filename": tokenizer["filename"]})
-    if len(sources) < 2:
-        raise model_store.ModelImportError("Recipe must specify GGUF and tokenizer files")
-    _check_sources(sources)
-    return sources
+def _cache_path(source: HFSource) -> Path:
+    """Name the immutable snapshot locator; never resolve it to a mutable copy."""
+    return (cache_root() / ("models--" + source.repo_id.replace("/", "--")) /
+            "snapshots" / source.revision / source.filename)
 
 
-def acquisition_inputs(sources):
-    """Snapshot source identity separately from runtime filenames or preparation."""
-    return tuple(model_store.AcquisitionInput(
-        f'source-{index}', _cache_path(source), source['kind'], source['repo_id'],
-        source['revision'], source['filename']) for index, source in enumerate(sources))
-
-
-def runtime_mappings(recipe, sources, *, mappings=None):
-    """Admit explicit input-to-path associations, never expand repeated roles.
-
-    Existing serialized recipes use their exact source filename as the runtime
-    locator. Adapt that legacy association once; nonidentity mappings must be
-    explicit rather than guessed from a role or basename. An unselected input in
-    an explicit mapping set remains preparation-only.
-    """
-    catalog = curated_catalog.load_catalog(recipe['pipeline'])
-    declared = {asset['path']: asset['role'] for asset in catalog.assets}
-    generated = {item['path'] for item in recipe.get('generated', ())}
-    by_id = {f'source-{index}': source for index, source in enumerate(sources)}
-    if mappings is None:
-        mappings = tuple(model_store.RuntimeMapping(source['role'], source['filename'], 'reference',
-                                                   input_id=input_id) for input_id, source in by_id.items())
-    for mapping in mappings:
-        source = by_id.get(mapping.input_id)
-        if (source is None or mapping.generated_role is not None or mapping.ownership != 'reference'
-                or mapping.logical_path in generated or declared.get(mapping.logical_path) != mapping.role
-                or source['role'] != mapping.role):
-            raise model_store.ModelImportError('Named source mapping must select its declared runtime path and role, not a generated output')
-    return tuple(mappings)
-
-
-def _check_sources(sources):
-    for source in sources:
-        if not isinstance(source['revision'], str) or not _COMMIT.fullmatch(source["revision"]):
-            raise model_store.ModelImportError("Bundled recipes must pin each repository to an immutable commit")
-        for key in ("repo_id", "filename"):
-            value = source[key]
-            if not isinstance(value, str) or not value or value.startswith(("/", "-")) or "\\" in value or any(part in ("", ".", "..") for part in value.split("/")):
-                raise model_store.ModelImportError(f"Invalid recipe {key}: {value!r}")
-    if len({(s['repo_id'], s['revision'], s['filename']) for s in sources}) != len(sources):
-        raise model_store.ModelImportError("Recipe contains duplicate files")
-
-
-def _cache_path(source: dict) -> Path:
-    return cache_root() / ("models--" + source["repo_id"].replace("/", "--")) / "snapshots" / source["revision"] / source["filename"]
-
-
-def source_status(source: dict) -> dict:
+def source_status(source: HFSource) -> dict:
     path = _cache_path(source)
     cached = model_store.readable_file(path)
-    return {**source, "cached": cached, "cache_path": str(path),
-            "size_bytes": path.stat().st_size if cached else None}
+    return dict(repo_id=source.repo_id, revision=source.revision, filename=source.filename,
+                cached=cached, cache_path=str(path),
+                size_bytes=path.stat().st_size if cached else None)
+
+
+def command(source: HFSource) -> list[str]:
+    return ['hf', 'download', source.repo_id, source.filename, '--revision',
+            source.revision, '--cache-dir', str(cache_root())]
 
 
 def _redact(value: str) -> str:

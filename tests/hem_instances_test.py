@@ -19,10 +19,11 @@ import unittest
 from unittest.mock import patch
 
 from binding.python.control import hem_instances, hem_process, hem_state
-from binding.python.models import hem_config, hem_models, pipeline_validation
+from binding.python.models import hem_config, hem_models, pipelines, recipes
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.control.hem_http import NativeClient
 from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
+from tests.gguf_fixtures import write_gguf
 from tests.hem_lifecycle_fixture import INSTANCES_NATIVE as NATIVE, port, wait_exit
 
 
@@ -54,16 +55,13 @@ class LifecycleTest(unittest.TestCase):
         self.registry = hem_state.Registry(self.root / 'state')
         self.processes = Processes(Path(hem_config.pipeline_info('qwen-08b')['catalog']).parents[3])
         self.manager = hem_instances.InstanceManager(self.registry, processes=self.processes)
-        self.select = patch.object(hem_config, 'select_pipeline', return_value='qwen-08b')
-        self.select.start()
-        self.addCleanup(self.select.stop)
         output = redirect_stderr(io.StringIO())
         output.__enter__()
         self.addCleanup(output.__exit__, None, None, None)
         gguf, tokenizer = self.root / 'tiny.gguf', self.root / 'tokenizer.json'
-        gguf.write_bytes(b'fixture')
+        write_gguf(gguf, tensors=[('fixture', [1], 0, 0)])
         tokenizer.write_text('{}')
-        hem_models.import_model(self.registry, 'tiny', ggufs=[gguf], tokenizer=tokenizer)
+        hem_models.import_model(self.registry, 'tiny', ggufs=[gguf], tokenizer=tokenizer, pipeline='qwen-08b')
         self.build = patch.object(hem_process, 'require_build', side_effect=lambda server, package, deadline: Path(server['build']['directory']) / 'loom-pipeline')
         self.build.start()
         self.addCleanup(self.build.stop)
@@ -144,7 +142,7 @@ class LifecycleTest(unittest.TestCase):
             self.assertEqual(row['incarnation'], 17)
             document = json.loads(Path(row['document']).read_text())
             self.assertTrue(Path(document['base_directory']).is_relative_to(Path(server['build']['directory'])))
-            self.assertTrue((Path(document['base_directory']) / hem_config.catalog_modules(Path(document['base_directory'])).control).is_file())
+            self.assertTrue((Path(document['base_directory']) / document['definition']['control']).is_file())
             self.assertEqual(self.registry.references('tiny'), [row])
             stopped = self.manager.stop(server, 'chat', Deadline.after())
             self.assertTrue(stopped['completed'])
@@ -225,7 +223,7 @@ class LifecycleTest(unittest.TestCase):
             self.assertEqual(answer['settings']['rows'], 3)
             self.assertEqual(answer['settings']['context_capacity'], 4096)
             self.assertFalse(answer['settings']['mtp'])
-            self.assertIsNone(answer['settings']['mtp_depth'])
+            self.assertNotIn('mtp_depth', answer['settings'])
             self.assertEqual(self.row()['settings'], answer['settings'])
 
     def test_duplicate_local_and_native_names_never_register(self):
@@ -294,7 +292,8 @@ class LifecycleTest(unittest.TestCase):
     def test_catalog_mapping_rejects_missing_or_escaping_paths_before_registration(self):
         with fixture(self.respond) as (endpoint, _):
             server = self.server(endpoint)
-            resolved = hem_config.resolve(hem_models.model_files(self.registry, 'tiny'))
+            prepared = hem_models.model_files(self.registry, 'tiny')
+            resolved = hem_config.resolve(recipes.load(prepared.recipe_id), prepared)
             retained_root = Path(server['build']['directory']) / 'loom-pipeline'
             retained = retained_root / resolved.catalog.relative_to(self.processes.package_root / 'loom-pipeline')
             original = retained.with_name('saved-catalog')
@@ -334,7 +333,7 @@ class LifecycleTest(unittest.TestCase):
                 return original_emit(value, *args, **kwargs)
             with patch.object(hem_config, 'resolve', side_effect=resolve), \
                  patch.object(hem_config, 'deployment_document', side_effect=emit), \
-                 patch.object(hem_config, 'catalog_modules', wraps=hem_config.catalog_modules) as modules:
+                 patch.object(hem_config, '_catalog', wraps=hem_config._catalog) as modules:
                 self.start(server, deadline, overrides={'rows': 2, 'context_capacity': 4096})
             self.assertEqual(len(checked), 1)
             modules.assert_called_once()
@@ -350,9 +349,9 @@ class LifecycleTest(unittest.TestCase):
         with fixture(self.respond) as (endpoint, _):
             server = self.server(endpoint)
             retained_root = Path(server['build']['directory']) / 'loom-pipeline'
-            selected = pipeline_validation.resolve_catalog('qwen-08b')
+            selected = Path(hem_config.pipeline_info('qwen-08b')['catalog'])
             retained = retained_root / selected.relative_to(self.processes.package_root / 'loom-pipeline')
-            modules = pipeline_validation.catalog_modules(retained)
+            modules = pipelines.get('qwen-08b').describe().programs
             provider = retained / modules.providers[-1]
             provider.write_bytes(provider.read_bytes() + b'\n')
             with self.assertRaisesRegex(InvalidInput, 'checked serving interpretation'):
@@ -655,17 +654,16 @@ class OwnedProcessLifecycleTest(unittest.TestCase):
             try:
                 server = processes.start('fixture', settings, Deadline.after(5))
                 weights, tokenizer = root / 'tiny.gguf', root / 'tokenizer.json'
-                weights.write_bytes(b'CPU fixture weights')
+                write_gguf(weights, tensors=[('fixture', [1], 0, 0)])
                 tokenizer.write_text('{}')
-                with patch.object(hem_config, 'select_pipeline', return_value='qwen-08b'), \
-                     patch.object(pipeline_validation, '__file__', str(package / 'models/pipeline_validation.py')):
-                    hem_models.import_model(registry, 'tiny', ggufs=[weights], tokenizer=tokenizer)
+                with patch.object(pipelines, '__file__', str(package / 'models/pipelines.py')):
+                    hem_models.import_model(registry, 'tiny', ggufs=[weights], tokenizer=tokenizer, pipeline='qwen-08b')
                     answer = manager.start(server, 'tiny', Deadline.after(5), name='chat')
                 self.assertTrue(answer['completed'])
                 row = registry.get_instance('fixture', server['launch_token'], 'chat')
                 deployment = json.loads(Path(row['document']).read_text())
                 retained = Path(deployment['base_directory'])
-                modules = hem_config.catalog_modules(retained)
+                modules = pipelines.get('qwen-08b').describe().programs
                 self.assertEqual((retained / modules.control).read_bytes(), (source_catalog / modules.control).read_bytes())
                 self.assertEqual(retained, Path(server['build']['directory']) / 'loom-pipeline' / source_catalog.relative_to(source_catalog.parents[2]))
                 self.assertFalse(list((Path(server['build']['directory']) / 'instances').glob('*/sources-*')))
@@ -674,8 +672,7 @@ class OwnedProcessLifecycleTest(unittest.TestCase):
                 # prevent safe stop of the already observed original incarnation.
                 shutil.rmtree(package)
                 self.assertTrue((retained / modules.prepare).is_file())
-                with patch.object(hem_config, 'select_pipeline', return_value='qwen-08b'), \
-                     patch.object(pipeline_validation, '__file__', str(package / 'models/pipeline_validation.py')):
+                with patch.object(pipelines, '__file__', str(package / 'models/pipelines.py')):
                     with self.assertRaises(HemError):
                         manager.start(server, 'tiny', Deadline.after(3), name='new-alias')
                 self.assertEqual(len(registry.list_instances()), 1)

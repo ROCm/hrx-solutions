@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from binding.python import hem_cli, hem_display
 from binding.python.cli import hem_help, hem_render, hem_server_cli
-from binding.python.models import hem_config
+from binding.python.models import hem_config, hem_models
 from binding.python.hem_common import HemError, DeadlineExpired, UncertainOutcome
 from binding.python.cli.hem_server_cli import ObservationResult
 
@@ -21,6 +21,8 @@ SETTINGS = {'rows': 4, 'context_capacity': 8192, 'pool_capacity': 32768,
 MODEL = dict(model='qwen08', id='qwen08', state='ready', completed=True,
              pipeline='qwen-08b', accessible=True, directory='/models/qwen08',
              weights='/models/qwen08/model.gguf', tokenizer='/models/qwen08/tokenizer.json',
+             check_kind='acquisition-presence',
+             artifacts=[dict(id='weights',role='weights',format='gguf',logical_path='model.gguf',path='/models/qwen08/model.gguf',ownership='caller-reference')],
              assets=[dict(logical_path='model.gguf', ownership='reference', source_path='/external/weights.gguf')],
              validation=dict(valid=True, evidence=[dict(inode=999)]),
              provenance=dict(kind='import'), pending=None, instances=[])
@@ -42,7 +44,7 @@ def fixtures():
     for command in ('show', 'download', 'import', 'validate'):
         result['model', command] = MODEL
     result['model', 'list'] = dict(items=[MODEL])
-    result['model', 'available'] = dict(items=[dict(id='qwen35-08b-q5-k-xl', description='Qwen 0.8B', pipeline='qwen-08b')])
+    result['model', 'available'] = dict(items=[dict(id='qwen35-08b-q5-k-xl', name='Qwen 0.8B', pipeline='qwen-08b')])
     info = hem_config.pipeline_info('qwen-08b')
     result['pipeline', 'show'] = info
     result['pipeline', 'list'] = dict(items=[info])
@@ -103,6 +105,21 @@ class RendererTest(unittest.TestCase):
                 self.assertEqual(json.loads(output), data)
                 self.assertIn('curl ', diagnostics)
 
+    def test_available_displays_actual_authored_recipe_names(self):
+        items = hem_models.available()
+        self.assertEqual(len(items), 3)
+        args = hem_cli.parse_args(['model', 'available'])
+        for width in (80, 240):
+            with self.subTest(width=width):
+                output = hem_render.render(args, dict(items=items), width=width)
+                self.assertIn('Name', output)
+                self.assertNotIn('Description', output)
+                self.assertNotIn('Unknown', output)
+                for item in items:
+                    self.assertIn(item['name'], output)
+                    self.assertIn(item['id'], output)
+                    self.assertIn(item['pipeline'], output)
+
     def test_empty_and_unavailable_inventories(self):
         for argv, phrase in ((['model', 'list'], 'No local models'),
                              (['server', 'list'], 'No servers'),
@@ -137,7 +154,7 @@ class RendererTest(unittest.TestCase):
 
     def test_dry_run_no_wait_and_structural_readiness(self):
         _, output, _ = self.invoke(['model', 'download', 'recipe', '--id', 'qwen08'],
-                                  dict(dry_run=True, model='qwen08', files=[], offline=True))
+                                  dict(state='preview', model_id='qwen08', recipe_id='recipe', artifacts=[], offline=True))
         self.assertIn('no files acquired', output)
         self.assertIn('no model record created', output)
         self.assertIn('Yes', output)
@@ -146,7 +163,7 @@ class RendererTest(unittest.TestCase):
         self.assertIn('retirement is not yet confirmed', ' '.join(output.split()))
         self.assertIn('--url http://127.0.0.1:8080', output)
         _, output, _ = self.invoke(['model', 'validate', 'qwen08'], MODEL)
-        self.assertIn('Structural validation does not prove inference readiness', ' '.join(output.split()))
+        self.assertIn('Prepared asset checks do not prove native inference readiness', ' '.join(output.split()))
         self.assertNotIn('ready to accept requests', output)
         _, output, _ = self.invoke(['instance', 'export', 'qwen08', '--output', 'r.json'], fixtures()['instance', 'export'])
         self.assertIn('Replace SERVER:PORT', ' '.join(output.split()))
@@ -158,7 +175,7 @@ class RendererTest(unittest.TestCase):
             args = hem_cli.parse_args(['model', 'list'])
             output = hem_render.render(args, dict(items=[dict(MODEL, model=identifier)]), width=width)
             self.assertIn(identifier, output)
-            output = hem_render.render(hem_cli.parse_args(['model', 'show', 'qwen08']), dict(MODEL, weights=path), width=width)
+            output = hem_render.render(hem_cli.parse_args(['model', 'show', 'qwen08']), dict(MODEL, artifacts=[dict(id='weights', role='weights', path=path)]), width=width)
             self.assertIn(path, output)
         output = hem_render.render(hem_cli.parse_args(['instance', 'status', 'chat']), dict(INSTANCE, incarnation=None,
                                   native={'loom': {'parameters': {'active': False}}}), width=35)
@@ -186,7 +203,7 @@ class RendererTest(unittest.TestCase):
         path = '/external model directory/fragment file with spaces.gguf'
         document = '/external model directory/deployment document with spaces.json'
         cases = [
-            (['model', 'show', 'qwen08'], dict(MODEL, fragments=[path]), [path]),
+            (['model', 'show', 'qwen08'], dict(MODEL, artifacts=[dict(id='part', role='weights-shard', path=path)]), [path]),
             (['model', 'import', 'qwen08', '--gguf', 'w.gguf', '--tokenizer', 't.json'],
              dict(MODEL, assets=[dict(ownership='reference', source_path=path)]), [path]),
             (['instance', 'show', 'chat'], dict(INSTANCE, document=document, dependencies=[path]), [document, path]),

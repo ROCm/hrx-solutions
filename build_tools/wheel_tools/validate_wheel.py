@@ -16,9 +16,11 @@ from packaging.requirements import Requirement
 
 
 try:
+    from ..validation import recipe_inventory
     from ..versioning import read_package_version
     from ..model_tools import loom_catalog, moonshine_catalog, moonshine_preparer
 except ImportError:
+    from build_tools.validation import recipe_inventory
     from build_tools.versioning import read_package_version
     from build_tools.model_tools import loom_catalog, moonshine_catalog, moonshine_preparer
 
@@ -42,18 +44,23 @@ HEM_MODULES = (
     "hem_display",
 )
 MODEL_MODULES = (
-    'curated_catalog',
     'gguf',
     'hem_config',
     'hem_models',
-    'hem_model_operations',
     'model_download',
     'model_store',
     'moonshine_preparation',
     'moonshine_preparer_identity',
-    'pipeline_validation',
-    'qwen_validation',
+    'recipe_types',
+    'recipes',
+    'pipelines',
+    'pipelines_qwen',
+    'pipelines_moonshine',
 )
+MODEL_PYTHON_PATHS = ('models/__init__.py',
+    *('models/' + name + '.py' for name in MODEL_MODULES),
+    'models/modalities/__init__.py', 'models/modalities/chat.py', 'models/modalities/asr.py')
+
 CLI_FILES = (
     'cli/__init__.py',
     'cli/hem_arguments.py',
@@ -210,9 +217,9 @@ def validate_pi_python_sdist(path: Path) -> None:
 
 
 def validate_models_sdist(path: Path) -> None:
-    """The models move ships these exact regular Python source files."""
+    """The shared model and modality packages ship exact regular Python sources."""
     with tarfile.open(path) as archive:
-        for name in ('models/__init__.py', *('models/' + module + '.py' for module in MODEL_MODULES), 'pipeline_validation.py'):
+        for name in MODEL_PYTHON_PATHS:
             suffix = '/binding/python/' + name
             matches = [member for member in archive.getmembers() if member.name.endswith(suffix)]
             if len(matches) != 1 or not matches[0].isfile():
@@ -335,7 +342,6 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             PACKAGE_PREFIX + "_native/bin/loom-serve",
             PIPELINE_PREFIX + "LICENSE-APACHE-2.0",
             PACKAGE_PREFIX + "_native/share/loom-serve/LICENSE",
-            PACKAGE_PREFIX + "pipeline_validation.py",
             PACKAGE_PREFIX + "runtime_paths.py",
         }
         required_files.update(PACKAGE_PREFIX + name + ".py" for name in HEM_MODULES)
@@ -343,8 +349,7 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         required_files.update(PACKAGE_PREFIX + name for name in OPENCODE_PYTHON_PATHS)
         required_files.update(PACKAGE_PREFIX + name for name in OPENWEBUI_PYTHON_PATHS)
         required_files.update(PACKAGE_PREFIX + name for name in SHARED_INTEGRATION_PYTHON_PATHS)
-        required_files.add(PACKAGE_PREFIX + "models/__init__.py")
-        required_files.update(PACKAGE_PREFIX + "models/" + name + ".py" for name in MODEL_MODULES)
+        required_files.update(PACKAGE_PREFIX + name for name in MODEL_PYTHON_PATHS)
         required_files.update(PACKAGE_PREFIX + name for name in CLI_FILES)
         required_files.update(PACKAGE_PREFIX + "pi_extension/" + name for name in PI_ASSETS)
         required_files.update(PACKAGE_PREFIX + name for name in (*CLIENT_ASSETS, *TUI_MODULES, *CONTROL_PYTHON_PATHS))
@@ -354,13 +359,14 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         for architecture in ("qwen_27b", "qwen_08b"):
             required_files.update(
                 PIPELINE_PREFIX + f"qwen/{architecture}/{filename}"
-                for filename in ("pipeline.loombc", "pipeline.json", "compatibility.json")
+                for filename in ("pipeline.loombc", "pipeline.json")
             )
+        required_files.update(PACKAGE_PREFIX + "loom-pipeline/" + path for path in recipe_inventory.EXPECTED_RECIPES)
         missing = sorted(required_files - names)
         if missing:
             raise RuntimeError("wheel is missing setup assets: " + ", ".join(missing))
 
-        for relative in ('models/__init__.py', *('models/' + module + '.py' for module in MODEL_MODULES), 'pipeline_validation.py'):
+        for relative in MODEL_PYTHON_PATHS:
             member = PACKAGE_PREFIX + relative
             matches = [info for info in wheel.infolist() if info.filename == member]
             expected = (REPO_ROOT / 'binding/python' / relative).read_bytes()
@@ -431,6 +437,12 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             if wheel.namelist().count(member) != 1 or wheel.read(member) != expected:
                 raise RuntimeError("wheel client asset duplicates or differs from reviewed source: " + member)
 
+        retired_models = {'models/curated_catalog.py', 'models/hem_model_operations.py', 'models/qwen_validation.py',
+                          'models/pipeline_validation.py', 'pipeline_validation.py'}
+        stale = retired_models & {name[len(PACKAGE_PREFIX):] for name in names if name.startswith(PACKAGE_PREFIX)}
+        if stale or any(name.endswith('/compatibility.json') and name.startswith(PIPELINE_PREFIX) for name in names):
+            raise RuntimeError('wheel contains retired model execution authorities: ' + repr(sorted(stale)))
+
         obsolete_checkers = sorted(
             name for name in names
             if Path(name).name in {"loom-qwen-epoch-check", "qwen-epoch-check", "epoch_check"}
@@ -456,6 +468,8 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         if any(name.endswith(".loom") for name in names):
             raise RuntimeError("wheel must not contain executable .loom sources")
         # Required-family acceptance is independent of producer selection.
+        from binding.python.models.recipes import parse
+        recipe_inventory.validate_wheel(wheel, REPO_ROOT, parse)
         loom_catalog.validate_archive(wheel, REPO_ROOT)
 
         moonshine_catalog.validate_archive(wheel, REPO_ROOT)
@@ -521,6 +535,8 @@ def main() -> int:
         validate_shared_integrations_sdist(args.sdist)
         with tarfile.open(args.sdist) as source_archive:
             moonshine_catalog.validate_source_archive(source_archive, REPO_ROOT)
+            from binding.python.models.recipes import parse
+            recipe_inventory.validate_sdist(source_archive, REPO_ROOT, parse)
     print(f"Validated {args.wheel}: {count} native libraries, {size} bytes")
     return 0
 

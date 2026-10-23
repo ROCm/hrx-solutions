@@ -25,16 +25,6 @@
       "required": true
     }
   ],
-  "download_recipe": {
-    "id": "moonshine-streaming-tiny",
-    "description": "Pinned Moonshine streaming tiny with HRX-owned rotary preparation",
-    "sources": [
-      {"role":"checkpoint","kind":"huggingface","repo_id":"moonshine-ai/moonshine-streaming-tiny","revision":"f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a","filename":"model.safetensors"},
-      {"role":"tokenizer","kind":"huggingface","repo_id":"moonshine-ai/moonshine-streaming-tiny","revision":"f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a","filename":"tokenizer.json"},
-      {"role":"configuration","kind":"huggingface","repo_id":"moonshine-ai/moonshine-streaming-tiny","revision":"f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a","filename":"config.json"}
-    ],
-    "generated": [{"role":"rotary","path":"rotary.safetensors"}]
-  },
   "definition": {
     "kind": "recognition",
     "prepare": "prepare.loom",
@@ -54,8 +44,6 @@
       "projection.loom",
       "reset.loom"
     ],
-    "assets": ".",
-    "pending_requests": 4,
-    "options": {}
+    "assets": "."
   }
 }

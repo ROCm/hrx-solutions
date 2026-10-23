@@ -167,7 +167,7 @@ preserving installed application import provenance.
 | --- | --- | --- |
 | Local native build setup | `python -m build_tools.wheel_tools.setup_python --rocm=/path/to/rocm [--bazel EXECUTABLE]` | Existing ROCm/TheRock Clang and pinned Bazel/Bazelisk; writes or validates `.bazelrc.configured`; `--force` replaces incompatible settings |
 | Archive acceptance | `python -m build_tools.wheel_tools.validate_wheel WHEEL [--sdist SDIST]` | Existing archives; verifies payload/entrypoints/native constraints and optional reviewed sdist assets; console success/error, no GPU |
-| Catalog validation | `python -m build_tools.model_tools.loom_catalog validate --inventory INVENTORY --stamp STAMP` | Catalog inventory/recipes; writes validation stamp; smallest source check is `model_tools/loom_catalog_test.py` |
+| Catalog validation | `python -m build_tools.model_tools.loom_catalog validate --inventory INVENTORY --stamp STAMP` | Explicit native compiler inventory; writes validation stamp; smallest source check is `model_tools/loom_catalog_test.py` |
 | Catalog preparation | `python -m build_tools.model_tools.loom_catalog prepare --source SOURCE --output OUTPUT` | Existing bytecode source; writes prepared bytecode source; no weight acquisition |
 | Catalog Bazel action | `//build_tools:loom_catalog` | Used by `loom-pipeline/bytecode.bzl`; retains runfiles/direct-import handling |
 | Cache lifecycle | `ci_tools/wheel_cache.py`, `wheel_cache_summary.py` | Build/container/CI-owned cache directory, fingerprints and diagnostics; writes cache provenance/configuration or summaries; owning unit tests are the smallest check |
@@ -339,3 +339,18 @@ The build command checks archive contents, filename/internal host tags and sourc
 integrity; the installed command checks existing public/payload/native-library,
 catalog/helper and CPU contracts. Neither replaces the mandatory default full
 container/GPU/Pi local CI gate before landing.
+
+Wheel packaging parses the authored JSON recipes with the runtime parser, resolves
+their concrete pipeline descriptors, and selects catalog assets from the descriptor
+bundle union. Finite Bazel producers still own compiler inputs and trusted helper
+bytes. Recipe JSON is copied byte for byte; executable source is compiled. Qwen
+`pipeline.json` and catalog build hashes retain program identity without a Python
+tensor-shape profile. Moonshine catalog metadata retains native program and asset
+locators; acquisition and settings live in the common authored recipe.
+
+`validation/recipe_inventory.py` independently checks the three released recipe
+IDs, logical paths and immutable HF coordinates. Wheel/source archive checks reject
+missing, duplicate, swapped, changed and unregistered declarations. Installed checks
+compare source bytes and exercise the actual parser, binding, effective settings
+and modality definition constructor; typed synthetic references in this CPU setup
+check do not qualify model acquisition or native inference.

@@ -1,52 +1,9 @@
 """Generate sparse GGUF fixtures; no checkpoint payloads or downloads."""
 
-import json
 from pathlib import Path
 import struct
 
 from binding.python.models.gguf import tensor_size
-
-PROFILE_PATH = Path(__file__).resolve().parents[1] / 'loom-pipeline/llm/qwen/qwen_27b/compatibility.json'
-
-
-def profile(architecture='qwen_27b'):
-    return json.loads((PROFILE_PATH.parent.parent / architecture / 'compatibility.json').read_text())
-
-
-def lifecycle_profile():
-    """One-layer profile for tests that observe assets but never run inference."""
-    contract = profile('qwen_08b')
-    contract['base_layer_count'] = 1
-    contract['mtp_layer'] = None
-    contract['tensors']['mtp'] = {}
-    contract['tensors']['layer_overrides'] = {}
-    contract['metadata']['qwen35.block_count'] = 1
-    for entry in contract['metadata_arrays'].values():
-        entry['count'] = 2
-    for family in ('global', 'gdn', 'attention'):
-        for spec in contract['tensors'][family].values():
-            spec['shape'] = [256] if spec['type'].startswith('Q') else [1]
-    return contract
-
-
-def install_lifecycle_profile(catalog_root):
-    """Replace qwen-08b geometry only inside a test-owned catalog copy."""
-    path = Path(catalog_root) / 'llm/qwen/qwen_08b/compatibility.json'
-    path.write_text(json.dumps(lifecycle_profile(), sort_keys=True))
-
-
-def expected_tensors(contract=None):
-    contract = contract or profile()
-    result = dict(contract['tensors']['global'])
-    for layer in range(contract['base_layer_count']):
-        family = 'attention' if layer % contract['full_attention_interval'] == 3 else 'gdn'
-        entries = dict(contract['tensors'][family])
-        entries.update(contract['tensors'].get('layer_overrides', {}).get(str(layer), {}))
-        result.update({f'blk.{layer}.{name}': value for name, value in entries.items()})
-    if contract['mtp_layer'] is not None:
-        result.update({f"blk.{contract['mtp_layer']}.{name}": value for name, value in contract['tensors']['mtp'].items()})
-    return result
-
 
 def string(value):
     encoded = value.encode('utf-8')
@@ -83,33 +40,3 @@ def write_gguf(path, *, metadata=(), tensors=(), version=3, alignment=32):
         stream.write(data)
         stream.truncate(data_offset + end)
     return header_bytes, data_offset
-
-
-def write_matching_gguf(path, *, contract=None, changes=None, missing=(), extra=()):
-    contract = contract or profile()
-    metadata=[]
-    for key,value in contract['metadata'].items():
-        if isinstance(value,list):
-            kind,value=9,(4,value)
-        else:
-            kind=8 if isinstance(value,str) else 6 if isinstance(value,float) else 4
-        metadata.append((key,kind,value))
-    for key,entry in contract['metadata_arrays'].items():
-        repeated='' if entry['type']==8 else 0
-        metadata.append((key,9,(entry['type'],[repeated]*entry['count'])))
-    from binding.python.models.gguf import GGML_TYPES
-    types={value[0]:key for key,value in GGML_TYPES.items()}
-    tensors=[]
-    offset=0
-    expected=expected_tensors(contract)
-    for name,update in (changes or {}).items():
-        expected[name]={**expected[name],**update}
-    for name,spec in expected.items():
-        if name in missing:
-            continue
-        kind=types[spec['type']]
-        tensors.append((name,spec['shape'],kind,offset))
-        offset+=tensor_size(tuple(spec['shape']),kind)
-        offset=(offset+31)//32*32
-    tensors.extend(extra)
-    return write_gguf(path,metadata=metadata,tensors=tensors)

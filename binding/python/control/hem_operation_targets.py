@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 from ..hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from .hem_http import primary_parameters, registration
-from ..models.hem_model_operations import OperationProfile, operation_profile
+from ..models.recipe_types import ProtocolDescriptor
 from .hem_process import ProcessManager, observe_server, require_build
 from .hem_state import _name
 
@@ -29,7 +29,7 @@ class OperationTarget:
     incarnation: int
     server_revision: int
     instance_revision: int
-    profile: OperationProfile
+    profile: ProtocolDescriptor
     build_identity: tuple[tuple[str, str], ...]
     registration: str
     parameter_operation: str
@@ -220,8 +220,9 @@ def resolve_operation_target(registry, server_id, instance_name, operation, dead
     _name(server_id)
     _name(instance_name)
     try:
-        profile = operation_profile(operation)
-    except ValueError as error:
+        from ..models import modalities
+        profile = modalities.get({"chat": "chat", "transcription": "asr"}[operation]).PROTOCOL
+    except (ValueError, KeyError) as error:
         raise InvalidInput('unsupported operation; select chat or transcription') from error
     with _budget(registry, deadline):
         try:

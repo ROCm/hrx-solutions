@@ -1,0 +1,58 @@
+{
+  "format": 1,
+  "id": "moonshine-streaming-tiny",
+  "name": "Moonshine Streaming Tiny",
+  "modality": "asr",
+  "pipeline": "moonshine-streaming-tiny",
+  "artifacts": [
+    {
+      "id": "weights",
+      "role": "weights",
+      "format": "safetensors",
+      "path": "model.safetensors",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "moonshine-ai/moonshine-streaming-tiny",
+        "revision": "f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a",
+        "filename": "model.safetensors"
+      }
+    },
+    {
+      "id": "tokenizer",
+      "role": "tokenizer",
+      "format": "json",
+      "path": "tokenizer.json",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "moonshine-ai/moonshine-streaming-tiny",
+        "revision": "f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a",
+        "filename": "tokenizer.json"
+      }
+    },
+    {
+      "id": "configuration",
+      "role": "configuration",
+      "format": "json",
+      "path": "config.json",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "moonshine-ai/moonshine-streaming-tiny",
+        "revision": "f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a",
+        "filename": "config.json"
+      }
+    },
+    {
+      "id": "rotary",
+      "role": "rotary",
+      "format": "safetensors",
+      "path": "rotary.safetensors",
+      "source": {
+        "kind": "generated"
+      }
+    }
+  ],
+  "configuration": {
+    "pending_requests": 4,
+    "options": {}
+  }
+}

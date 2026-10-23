@@ -7,8 +7,9 @@ import unittest
 from unittest.mock import patch
 
 from binding.python import runtime_paths
-from binding.python.models import hem_models, model_download, model_store
+from binding.python.models import hem_models, recipes, model_store
 from binding.python.control.hem_state import Registry
+from binding.python.hem_common import HemError
 
 
 class MigrationBoundaryTest(unittest.TestCase):
@@ -57,9 +58,7 @@ class MigrationBoundaryTest(unittest.TestCase):
             self.assertFalse(model_store.readable_file(alias))
             target.write_bytes(b'GGUF')
             self.assertTrue(model_store.readable_file(alias))
-            files = model_store.ModelFiles(alias, target)
-            self.assertEqual(files.gguf_paths, (alias,))
 
-    def test_unknown_recipe_points_to_current_tool(self):
-        with self.assertRaisesRegex(model_store.ModelImportError, 'loom-control model available'):
-            model_download.recipe_by_id('missing')
+    def test_unknown_recipe_is_actionable_from_common_loader(self):
+        with self.assertRaisesRegex(HemError, 'Unknown recipe'):
+            recipes.load('missing')

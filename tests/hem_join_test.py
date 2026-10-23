@@ -252,7 +252,7 @@ class JoinTest(unittest.TestCase):
         replacement = f.root / 'replacement-tokenizer.json'
         replacement.write_text('{"model":{"replacement":true}}')
         refused = f.cli('model', 'import', 'tiny', '--gguf', str(f.root / 'weights.gguf'),
-                        '--tokenizer', str(replacement), '--alias', expected=1)
+                        '--tokenizer', str(replacement), '--alias', '--pipeline', 'qwen-08b', expected=1)
         self.assertIn('different mappings', refused['error'])
         self.assertEqual(len(f.registry.references('tiny')), 2)
         beta = f.registry.references('tiny')[1]

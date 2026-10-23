@@ -1,5 +1,6 @@
 """Failure propagation in the installed real-model smoke harness."""
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -50,6 +51,50 @@ class SmokeFailureTest(unittest.TestCase):
             self.assertEqual(hem_model_smoke.source_commit(self.root), 'local-commit')
         git.assert_called_once_with(
             ['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True)
+
+    def test_import_result_artifacts_keep_exact_alias_identity_and_containment(self):
+        source = self.root / 'inputs'
+        source.mkdir()
+        (source / 'fixture.gguf').write_bytes(b'input weights')
+        (source / 'tokenizer.json').write_bytes(b'{}')
+        directory = self.gate.state_path('a') / 'models/small'
+        directory.mkdir(parents=True)
+        (directory / 'model.gguf').symlink_to(source / 'fixture.gguf')
+        (directory / 'tokenizer.json').symlink_to(source / 'tokenizer.json')
+        answer = dict(completed=True, validation={'valid': True}, directory=str(directory),
+                      assets=[{'ownership': 'reference'}, {'ownership': 'reference'}],
+                      artifacts=[dict(role=role, format=format, logical_path=logical,
+                                      path=str(directory / logical), ownership='caller-reference')
+                                 for role, format, logical in (('weights', 'gguf', 'model.gguf'),
+                                                              ('tokenizer', 'json', 'tokenizer.json'))])
+        with mock.patch.object(self.gate, 'command', return_value=answer):
+            self.assertIs(self.gate.import_model('a', 'small', source, 'fixture.gguf', 'qwen-08b'), answer)
+        mutations = [
+            lambda a: a['artifacts'].pop(),
+            lambda a: a['artifacts'].append(deepcopy(a['artifacts'][0])),
+            lambda a: a['artifacts'][1].update(role='weights'),
+            lambda a: a['artifacts'][0].update(format='json'),
+            lambda a: a['artifacts'][0].update(logical_path='../model.gguf'),
+            lambda a: a['artifacts'][0].update(path=str(source / 'fixture.gguf')),
+            lambda a: a['artifacts'][0].update(ownership='caller-owned'),
+            lambda a: a.update(directory=str(self.root / 'elsewhere/small')),
+            lambda a: a['assets'][0].update(ownership='owned'),
+        ]
+        for index, mutate in enumerate(mutations):
+            invalid = deepcopy(answer)
+            mutate(invalid)
+            with self.subTest(mutation=index), mock.patch.object(self.gate, 'command', return_value=invalid):
+                with self.assertRaises(AssertionError):
+                    self.gate.import_model('a', 'small', source, 'fixture.gguf', 'qwen-08b')
+        alias = directory / 'model.gguf'
+        alias.unlink()
+        alias.symlink_to(source / 'tokenizer.json')
+        with mock.patch.object(self.gate, 'command', return_value=answer), self.assertRaises(AssertionError):
+            self.gate.import_model('a', 'small', source, 'fixture.gguf', 'qwen-08b')
+        alias.unlink()
+        alias.write_bytes(b'copied input weights')
+        with mock.patch.object(self.gate, 'command', return_value=answer), self.assertRaises(AssertionError):
+            self.gate.import_model('a', 'small', source, 'fixture.gguf', 'qwen-08b')
 
     def test_internal_private_root_separates_state_from_report_and_venv_paths(self):
         from build_tools.ci_tools.local_ci_runtime import create
@@ -182,18 +227,16 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
             'integrations/openwebui/hem_openwebui_receipts.py',
             'integrations/openwebui/hem_openwebui_wire.py',
             'models/__init__.py',
-            'models/curated_catalog.py',
             'models/gguf.py',
             'models/hem_config.py',
             'models/hem_models.py',
-            'models/hem_model_operations.py',
             'models/model_download.py',
             'models/model_store.py',
             'models/moonshine_preparation.py',
             'models/moonshine_preparer_identity.py',
-            'models/pipeline_validation.py',
-            'models/qwen_validation.py',
-            'pipeline_validation.py',
+            'models/recipe_types.py', 'models/recipes.py', 'models/pipelines.py',
+            'models/pipelines_qwen.py', 'models/pipelines_moonshine.py',
+            'models/modalities/__init__.py', 'models/modalities/chat.py', 'models/modalities/asr.py',
             'integrations/__init__.py',
             'integrations/pi/__init__.py',
             'integrations/pi/hem_pi.py',
@@ -212,6 +255,11 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
         from build_tools.validation.check_installed_cpu import CLI_FILES
         for name in CLI_FILES:
             self.files[name] = (source / name).read_bytes()
+        catalog = source.parents[1] / 'loom-pipeline'
+        for relative in ('llm/qwen/qwen_08b/recipes/qwen35-08b-q5-k-xl.json',
+                         'llm/qwen/qwen_27b/recipes/qwen38-27b-q5-k-xl.json',
+                         'recognition/moonshine/streaming_tiny/recipes/moonshine-streaming-tiny.json'):
+            self.files['loom-pipeline/' + relative] = (catalog / relative).read_bytes()
         self.wheel=self.root/'fixture.whl'
         with zipfile.ZipFile(self.wheel,'w') as archive:
             for name,data in self.files.items():

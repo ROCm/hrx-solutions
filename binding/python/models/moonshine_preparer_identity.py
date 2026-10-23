@@ -7,3 +7,9 @@ FILES = {
 }
 RELATIVE = 'share/loom-serve/preparers/moonshine'
 UPSTREAM = 'experimental/loom_serve/models/moonshine'
+
+# Code-owned input/output contract for this exact fixed helper, not recipe knobs.
+INPUT_REPOSITORY = 'moonshine-ai/moonshine-streaming-tiny'
+INPUT_REVISION = 'f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a'
+INPUT_FILES = ('model.safetensors', 'tokenizer.json', 'config.json')
+GENERATED_FILES = (('rotary', 'safetensors', 'rotary.safetensors'),)

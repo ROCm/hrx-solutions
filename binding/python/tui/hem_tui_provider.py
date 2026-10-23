@@ -35,6 +35,7 @@ class _ServerSnapshot:
 @dataclass(frozen=True)
 class _InstanceSnapshot:
     record: dict
+    pipeline: Optional[str] = None
 
     @property
     def identity(self):
@@ -91,6 +92,7 @@ def _read_snapshot(root: Path, deadline: Deadline):
         deadline.remaining()
         server_rows = connection.execute(
             "SELECT id,launch_token,revision,data FROM servers ORDER BY id").fetchall()
+        model_rows = connection.execute("SELECT id,revision,data FROM models ORDER BY id").fetchall()
         instance_rows = connection.execute(
             "SELECT server_id,launch_token,name,revision,data FROM instances "
             "ORDER BY server_id,launch_token,name").fetchall()
@@ -101,12 +103,17 @@ def _read_snapshot(root: Path, deadline: Deadline):
             deadline.remaining()
             servers.append(_ServerSnapshot(decode_record(
                 "servers", data, revision, {"id": server_id, "launch_token": launch_token})))
+        model_pipelines = {}
+        for model_id, revision, data in model_rows:
+            deadline.remaining()
+            model = decode_record('models', data, revision, {'id': model_id})
+            model_pipelines[model_id] = model['pipeline']
         instances = []
         for server_id, launch_token, name, revision, data in instance_rows:
             deadline.remaining()
-            instances.append(_InstanceSnapshot(decode_record(
-                "instances", data, revision,
-                {"server_id": server_id, "launch_token": launch_token, "name": name})))
+            record = decode_record('instances', data, revision,
+                                   {'server_id': server_id, 'launch_token': launch_token, 'name': name})
+            instances.append(_InstanceSnapshot(record, model_pipelines.get(record['model_id'])))
         return servers, instances
     except sqlite3.Error as error:
         raise HemError(f"state database unavailable; inventory retained: {error}") from error
