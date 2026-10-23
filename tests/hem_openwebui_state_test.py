@@ -52,6 +52,79 @@ def plan(current, owned, wanted, mode='configure', identity=''):
 
 
 class OwnershipTest(unittest.TestCase):
+    def test_selection_schema_is_strict_and_legacy_reads_do_not_upgrade(self):
+        names = dict(server='main', instance='dictation')
+        old = document([row()], 'deployment')
+        old.update(schema_version=2, stt=dict(
+            target=dict(names, base_url=row()['base_url'], prefixed_id=row()['provider']+'.dictation'),
+            routing=None, overlay=None, pending=None))
+        original = deepcopy(old)
+        loaded = state.decode_document(files.encoded(old), ROOT, TARGET)
+        selected = state.stt_selection(loaded)
+        self.assertEqual(selected, names)
+        selected['instance'] = 'detached'
+        self.assertEqual(loaded, original)
+        self.assertNotIn('stt_selection', loaded)
+        self.assertIsNone(state.stt_selection(document()))
+        current = state.with_stt_selection(loaded, names)
+        self.assertEqual(current['schema_version'], 3)
+        self.assertEqual(current['stt'], old['stt'])
+        self.assertEqual(loaded, original)
+        self.assertEqual(state.decode_document(files.encoded(current), ROOT, TARGET), current)
+        for selection in (True, [], {}, dict(names, incarnation=1), dict(names, server='bad/name'),
+                          dict(names, instance=1)):
+            with self.subTest(selection=selection), self.assertRaises(common.InvalidInput):
+                state.with_stt_selection(loaded, selection)
+        for changes in ({'schema_version': True}, {'schema_version': 4}, {'future': {}},
+                        {'stt_selection': dict(names, ready=True)}):
+            invalid = dict(current, **changes)
+            with self.subTest(changes=changes), self.assertRaises(common.InvalidInput):
+                state.decode_document(files.encoded(invalid), ROOT, TARGET)
+        for missing in ('stt', 'stt_selection'):
+            invalid = deepcopy(current); del invalid[missing]
+            with self.assertRaises(common.InvalidInput):
+                state.decode_document(files.encoded(invalid), ROOT, TARGET)
+        # A selection field cannot be smuggled into either supported old shape.
+        for version in (1, 2):
+            invalid = dict(current, schema_version=version)
+            with self.assertRaises(common.InvalidInput):
+                state.decode_document(files.encoded(invalid), ROOT, TARGET)
+
+    def test_chat_plans_preserve_selection_and_receipts_until_whole_disable(self):
+        names = dict(server='main', instance='future-name')
+        owned = state.with_stt_selection(document(), names)
+        original = deepcopy(owned)
+        staged = plan(remote(), owned, [row()])
+        self.assertEqual(staged.pending_document['stt_selection'], names)
+        self.assertEqual(staged.next_document['stt_selection'], names)
+        checked = plan(staged.remote_config, staged.pending_document, [row()], mode='check')
+        self.assertIsNone(checked.next_document)
+        completed, recovery = state._recover_pending(staged.remote_config, staged.pending_document, '')
+        self.assertEqual(recovery, 'completed')
+        self.assertEqual(completed['stt_selection'], names)
+        unchanged, recovery = state._recover_pending(remote(), staged.pending_document, '')
+        self.assertEqual(recovery, 'unchanged')
+        self.assertEqual(unchanged['stt_selection'], names)
+        disabled = plan(staged.remote_config, completed, [], mode='disable')
+        self.assertEqual(disabled.pending_document['stt_selection'], names)
+        self.assertIsNone(disabled.next_document['stt_selection'])
+        self.assertIsNone(disabled.next_document['stt'])
+        self.assertEqual(disabled.next_document['schema_version'], 3)
+        drifted = deepcopy(staged.remote_config)
+        drifted['OPENAI_API_KEYS'][0] = 'administrator-edit'
+        partial = plan(drifted, completed, [], mode='disable')
+        self.assertTrue(partial.partial)
+        self.assertEqual(partial.next_document['stt_selection'], names)
+        # An outstanding STT receipt is not retired by the chat planner.
+        receipt = dict(target=dict(server='main', instance='future-name', base_url=row()['base_url'],
+                                  prefixed_id=row()['provider']+'.future-name'),
+                       routing=None, overlay=None, pending=None)
+        completed['stt'] = receipt
+        retained = plan(staged.remote_config, completed, [], mode='disable')
+        self.assertEqual(retained.next_document['stt_selection'], names)
+        self.assertEqual(retained.next_document['stt'], receipt)
+        self.assertEqual(owned, original)
+
     def test_schema_imports_and_schema2_decode_need_no_operational_modules(self):
         # A fresh process proves imports, not just an already-warmed module cache.
         code = """
@@ -71,6 +144,9 @@ target = 'http://127.0.0.1:3000'
 document = state.decode_document(None, root, target)
 document.update(schema_version=2, stt=None)
 assert state.decode_document(json.dumps(document).encode(), root, target) == document
+document = state.with_stt_selection(document, {'server': 'later', 'instance': 'future'})
+assert state.decode_document(json.dumps(document).encode(), root, target) == document
+assert state.stt_selection(document) == {'server': 'later', 'instance': 'future'}
 """
         subprocess.run([sys.executable, '-c', 'PACKAGE = ' + repr(PACKAGE) + '\n' + code],
                        check=True, capture_output=True, text=True)

@@ -14,8 +14,8 @@ def configure(parser):
     mode.add_argument('--check', action='store_true')
     mode.add_argument('--disable', action='store_true')
     child.add_argument('--url', help='WebUI management origin; overrides OPENWEBUI_URL')
-    child.add_argument('--stt-server', type=arguments.name, help='Managed server for the selected recognition instance; requires --stt-instance')
-    child.add_argument('--stt-instance', type=arguments.name, help='Unprefixed served recognition instance; requires --stt-server')
+    child.add_argument('--stt-server', type=arguments.name, help='Saved server for STT selection; requires --stt-instance, may be stopped')
+    child.add_argument('--stt-instance', type=arguments.name, help='Unprefixed STT instance name, including a future instance; requires --stt-server')
 
 
 def safe_error(error):

@@ -1,7 +1,9 @@
 """STT ownership boundaries with real private files and existing chat coordinator."""
 from copy import deepcopy
 from contextlib import nullcontext, contextmanager
+from contextlib import redirect_stdout, redirect_stderr
 import importlib
+import io
 import json
 import os
 from pathlib import Path
@@ -122,6 +124,229 @@ class STTTest(unittest.TestCase):
         self.assertNotIn(SECRET, repr(self.events) + repr(result))
         for path in self.root.rglob('*.json'): self.assertNotIn(SECRET, path.read_text())
 
+    def test_missing_and_stopped_names_save_then_only_explicit_configure_applies(self):
+        self.registry.create_server('offline', saved_settings=dict(device='task', listen='127.0.0.1:18081'))
+        for server, instance, reason in (('offline', 'future', 'unavailable'),
+                                         ('local', 'future-dictation', 'missing_instance')):
+            with self.subTest(server=server):
+                result = self.run_configure(stt_server=server, stt_instance=instance)
+                self.assertEqual((result.exit_code, result['completed'], result['pending']), (0, True, False))
+                self.assertEqual(result['stt'], dict(selection=dict(server=server, instance=instance),
+                    configuration='deferred', reason=reason))
+                self.assertIsNone(self.record())
+                self.assertFalse(any(call.startswith(('audio_', 'model_')) for call in self.client.calls))
+        before = self.path.read_bytes(); stamp = self.path.stat().st_mtime_ns
+        self.native.reset_mock()
+        self.assertEqual(self.run_configure(check=True).exit_code, 1)
+        self.native.assert_not_called()
+        self.assertEqual((self.path.read_bytes(), self.path.stat().st_mtime_ns), (before, stamp))
+        self.assertEqual(self.run_configure()['stt']['configuration'], 'deferred')
+        self.assertEqual(self.path.read_bytes(), before)
+        result = self.configure()
+        self.assertEqual(result['stt']['configuration'], 'configured')
+        self.assertEqual(result['stt']['selection'], dict(server='local', instance='dictation'))
+        self.assertEqual(self.client.calls.count('model_create'), 1)
+        self.assertEqual(self.client.calls.count('audio_update'), 1)
+        self.native.reset_mock(); self.client.calls.clear()
+        self.assertEqual(self.run_configure()['stt']['configuration'], 'configured')
+        self.native.assert_called_once()
+        self.assertFalse(any(call.endswith(('update', 'create', 'delete')) for call in self.client.calls))
+
+    def test_new_missing_server_rejects_but_previously_selected_removed_server_is_retained(self):
+        with self.assertRaises(common.InvalidInput):
+            self.run_configure(stt_server='typo', stt_instance='future')
+        self.assertIsNone(files.read_owned(self.path)); self.assertFalse(self.client.calls)
+        self.run_configure(stt_server='local', stt_instance='future')
+        with self.registry._transaction() as connection:
+            connection.execute('DELETE FROM instances'); connection.execute('DELETE FROM servers')
+        self.client.calls.clear()
+        result = self.run_configure()
+        self.assertEqual(result['stt']['reason'], 'missing_saved_server')
+        self.assertEqual(state.stt_selection(state.decode_document(files.read_owned(self.path), self.root, TARGET)),
+                         dict(server='local', instance='future'))
+        before = self.path.read_bytes()
+        with self.assertRaises(common.InvalidInput):
+            self.run_configure(stt_server='local', stt_instance='another')
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(any(call.startswith(('audio_', 'model_')) for call in self.client.calls))
+
+    def test_unknown_and_incompatible_keep_exact_failure_after_saving_names_without_effects(self):
+        for error in (common.UncertainOutcome('unresolved native identity', status=503, reason='unknown'),
+                      common.HemError('incompatible operation', status=409, reason='incompatible')):
+            with self.subTest(reason=error.reason), patch.object(core, 'resolve_operation_target', side_effect=error):
+                self.client.calls.clear()
+                with self.assertRaises(type(error)) as caught: self.configure()
+                self.assertIs(caught.exception, error)
+                self.assertEqual((caught.exception.status, caught.exception.reason, caught.exception.accepted),
+                                 (error.status, error.reason, None))
+                value = state.decode_document(files.read_owned(self.path), self.root, TARGET)
+                self.assertEqual(value['stt_selection'], dict(server='local', instance='dictation'))
+                self.assertIsNone(value['stt']); self.assertIsNone(value['pending'])
+                self.assertFalse(any(call.endswith(('update', 'create', 'delete')) for call in self.client.calls))
+                self.assertFalse(any(call.startswith(('audio_', 'model_')) for call in self.client.calls))
+
+    def test_selection_preflight_conflicts_and_failed_selection_write_stop_new_effects(self):
+        self.client.remote['ENABLE_OPENAI_API'] = False
+        with self.assertRaises(common.InvalidInput): self.configure()
+        self.assertIsNone(files.read_owned(self.path))
+        self.client.remote['ENABLE_OPENAI_API'] = True
+        with patch.object(hem, '_replace_before_submission', side_effect=common.HemError('selection disk failure', accepted=False)):
+            with self.assertRaises(common.HemError): self.configure()
+        self.assertIsNone(files.read_owned(self.path))
+        self.assertFalse(any(call.endswith(('update', 'create', 'delete')) for call in self.client.calls))
+
+    def test_unavailable_old_route_is_visible_and_retarget_refuses_without_erasing_it(self):
+        self.configure(); old = deepcopy(self.record()); self.client.calls.clear()
+        self.native_row['loom']['registration'] = 'loading'
+        result = self.run_configure()
+        self.assertEqual((result.exit_code, result['completed'], result['pending']), (0, True, False))
+        self.assertEqual(result['stt']['configuration'], 'deferred')
+        self.assertEqual(result['stt']['target'], old['target'])
+        self.assertEqual(self.record(), old)
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(common.InvalidInput, 'Disable'):
+            self.run_configure(stt_server='local', stt_instance='future')
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(any(call.endswith(('update', 'create', 'delete')) for call in self.client.calls))
+
+    def test_saved_selection_survives_later_chat_failure_without_claiming_deferred_success(self):
+        self.client.fail_chat = True
+        with self.assertRaises(common.HemError) as error:
+            self.run_configure(stt_server='local', stt_instance='future')
+        self.assertEqual(error.exception.exit_code, 1)
+        value = state.decode_document(files.read_owned(self.path), self.root, TARGET)
+        self.assertEqual(value['stt_selection'], dict(server='local', instance='future'))
+        self.assertIsNotNone(value['pending']); self.assertIsNone(value['stt'])
+        self.assertFalse(any(call.startswith(('audio_', 'model_')) for call in self.client.calls))
+        before = self.path.read_bytes(); writes = self.client.calls.count('chat_update')
+        self.client.fail_chat = False
+        with self.assertRaises(common.UncertainOutcome):
+            self.run_configure(stt_server='local', stt_instance='another-future')
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.client.calls.count('chat_update'), writes)
+
+    def cli_configure(self, *flags):
+        cli = importlib.import_module(PACKAGE + '.hem_cli')
+        entry = hem.configure_openwebui
+        def configure(*args, **kwargs):
+            return entry(*args, **kwargs, client_factory=self.client.factory)
+        output, errors = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ, dict(LOOM_SERVE_DIR=str(self.root), OPENWEBUI_URL=TARGET, OPENWEBUI_TOKEN='admin-token')), \
+                patch.object(hem, 'configure_openwebui', side_effect=configure), \
+                redirect_stdout(output), redirect_stderr(errors):
+            code = cli.main(['openwebui', 'configure', *flags, '--json'])
+        value = json.loads(output.getvalue())
+        self.assertNotIn('admin-token', output.getvalue()+errors.getvalue())
+        return code, value
+
+    def test_real_cli_reports_deferred_selection_separately_from_remote_pending(self):
+        code, value = self.cli_configure('--stt-server', 'local', '--stt-instance', 'future')
+        self.assertEqual((code, value['completed'], value['pending']), (0, True, False))
+        self.assertEqual(value['stt'], dict(selection=dict(server='local', instance='future'),
+                         configuration='deferred', reason='missing_instance'))
+
+    def assert_confirmed_history_survives_later_failure(self, history, phase):
+        if history == 'audio':
+            self.pending_audio()
+            self.client.audio['stt'].update(stt.desired(self.selected))
+            self.native_row['loom']['registration'] = 'loading'
+        else:
+            self.pending_chat(completed=True)
+        self.registry.create_server('later', saved_settings=dict(device='task', listen='127.0.0.1:18082'))
+        error = (common.InvalidInput('WebUI owned STT routing/model row drift; preserve evidence')
+                 if phase == 'ownership' else common.HemError('later chat step failed',
+                     accepted=False, status=503, reason='transport_error'))
+        reads = [0]
+        config = self.client.config
+        def read():
+            reads[0] += 1
+            if phase == 'preflight' and reads[0] == (1 if history == 'audio' else 2):
+                raise error
+            return config()
+        def update(body):
+            self.client.calls.append('chat_update')
+            raise error
+        if phase == 'ownership':
+            self.client.rows[self.selected['prefixed_id']]['name'] = 'administrator edit'
+        with patch.object(self.client, 'config', side_effect=read), \
+                patch.object(self.client, 'update', side_effect=update):
+            with self.assertRaises(type(error)) as caught:
+                self.configure()
+        if phase != 'ownership':
+            self.assertIs(caught.exception, error)
+            self.assertEqual((caught.exception.reason, caught.exception.status, caught.exception.exit_code),
+                             ('transport_error', 503, 1))
+        else:
+            self.assertEqual(caught.exception.exit_code, 2)
+        self.assertIs(caught.exception.accepted, True)
+        self.assertIn('prior '+('audio routing update' if history == 'audio' else 'chat update'), str(caught.exception))
+        self.assertIn('not submitted', str(caught.exception))
+        current = state.decode_document(files.read_owned(self.path), self.root, TARGET)
+        self.assertIsNone(current['stt']['pending'])
+        if history == 'audio':
+            self.assertEqual(current['stt']['routing'], stt.desired(self.selected))
+        if phase == 'chat':
+            self.assertEqual(current['pending']['operation'], 'configure')
+        else:
+            self.assertIsNone(current['pending'])
+        self.assertEqual(current['stt_selection'], dict(server='local', instance='dictation'))
+        self.assertNotIn('audio_update', self.client.calls)
+        self.assertNotIn('model_create', self.client.calls)
+
+    def test_confirmed_audio_history_survives_deferred_chat_throw(self):
+        self.assert_confirmed_history_survives_later_failure('audio', 'chat')
+
+    def test_confirmed_chat_history_survives_deferred_chat_throw(self):
+        self.assert_confirmed_history_survives_later_failure('chat', 'chat')
+
+    def test_confirmed_audio_history_survives_later_preflight_throw(self):
+        self.assert_confirmed_history_survives_later_failure('audio', 'preflight')
+
+    def test_confirmed_chat_history_survives_later_preflight_throw(self):
+        self.assert_confirmed_history_survives_later_failure('chat', 'preflight')
+
+    def test_confirmed_audio_history_survives_owned_preflight_conflict(self):
+        self.assert_confirmed_history_survives_later_failure('audio', 'ownership')
+
+    def test_partial_disable_cli_reports_retained_selection_and_success_clears_it(self):
+        self.configure()
+        self.client.remote['OPENAI_API_KEYS'][-1] = 'administrator edit'
+        code, value = self.cli_configure('--disable')
+        self.assertEqual((code, value['completed'], value['configuration']), (1, False, 'partial'))
+        current = state.decode_document(files.read_owned(self.path), self.root, TARGET)
+        self.assertIsNone(current['stt'])
+        selected = dict(server='local', instance='dictation')
+        self.assertEqual(current['stt_selection'], selected)
+        self.assertEqual(value['stt']['selection'], selected)
+        self.assertEqual(value['stt']['configuration'], 'absent')
+        self.assertIsNone(value['stt']['target'])
+        self.client.remote['OPENAI_API_KEYS'][-1] = ''
+        self.configure()
+        code, value = self.cli_configure('--disable')
+        self.assertEqual((code, value['completed']), (0, True))
+        self.assertIsNone(value['stt']['selection'])
+        self.assertIsNone(state.decode_document(files.read_owned(self.path), self.root, TARGET)['stt_selection'])
+
+    def test_unavailable_before_new_intent_can_defer_but_staged_intent_is_not_harmless(self):
+        guard = core.revalidate_operation_target
+        def unavailable(*args):
+            guard(*args)
+            raise common.HemError('known not ready', reason='unavailable')
+        with patch.object(core, 'revalidate_operation_target', side_effect=unavailable):
+            result = self.configure()
+        self.assertEqual(result['stt']['configuration'], 'deferred')
+        self.assertIsNone(self.record())
+        self.assertNotIn('model_create', self.client.calls)
+        self.client.calls.clear()
+        def after_intent(*args):
+            guard(*args)
+            if self.record() is not None:
+                raise common.HemError('known not ready', reason='unavailable')
+        with patch.object(core, 'revalidate_operation_target', side_effect=after_intent):
+            with self.assertRaises(common.HemError): self.configure()
+        self.assertEqual(self.record()['pending']['operation'], 'create_overlay')
+        self.assertNotIn('model_create', self.client.calls)
+
     def test_configure_check_disable_reenable_preserves_secrets_and_dynamic_chat(self):
         original = deepcopy(self.client.audio)
         result = self.configure(); self.assertEqual(result.exit_code, 0)
@@ -150,6 +375,68 @@ class STTTest(unittest.TestCase):
         self.run_configure(); self.run_configure(check=True); self.run_configure(disable=True)
         self.assertFalse(any(call.startswith(('audio_', 'model_')) for call in self.client.calls))
         self.assertEqual(state.decode_document(files.read_owned(self.path), self.root, TARGET)['schema_version'], 1)
+
+    def test_legacy_stt_check_is_write_free_and_explicit_mutation_upgrades_only_locally(self):
+        self.configure()
+        legacy = state.decode_document(files.read_owned(self.path), self.root, TARGET)
+        legacy['schema_version'] = 2; del legacy['stt_selection']
+        self.path.write_bytes(files.encoded(legacy))
+        before = self.path.read_bytes(); stamp = self.path.stat().st_mtime_ns
+        self.native.reset_mock(); self.revalidate.reset_mock(); self.client.calls.clear()
+        self.assertEqual(self.run_configure(check=True).exit_code, 0)
+        self.assertEqual((self.path.read_bytes(), self.path.stat().st_mtime_ns), (before, stamp))
+        self.native.assert_not_called(); self.revalidate.assert_not_called()
+        self.client.calls.clear()
+        result = self.configure()
+        current = state.decode_document(files.read_owned(self.path), self.root, TARGET)
+        self.assertTrue(result['changed'])
+        self.assertEqual(current['schema_version'], 3)
+        self.assertEqual(current['stt_selection'], dict(server='local', instance='dictation'))
+        self.assertEqual(current['stt'], legacy['stt'])
+        self.assertFalse(any(call.endswith(('update', 'create', 'delete')) for call in self.client.calls))
+
+    def test_selection_only_chat_writes_preserve_names_and_disable_failure_retains_intent(self):
+        selected = dict(server='local', instance='not-yet-served')
+        value = state.with_stt_selection(state.decode_document(None, self.root, TARGET), selected)
+        files.atomic_replace(self.path, files.encoded(value), expected=None, deadline=common.Deadline.after())
+        self.native.reset_mock(); self.revalidate.reset_mock()
+        self.run_configure()
+        self.assertEqual(state.decode_document(files.read_owned(self.path), self.root, TARGET)['stt_selection'], selected)
+        before = self.path.read_bytes(); stamp = self.path.stat().st_mtime_ns
+        self.assertEqual(self.run_configure(check=True).exit_code, 1)
+        self.assertEqual((self.path.read_bytes(), self.path.stat().st_mtime_ns), (before, stamp))
+        self.client.fail_chat = True
+        with self.assertRaises(common.HemError): self.run_configure(disable=True)
+        pending = state.decode_document(files.read_owned(self.path), self.root, TARGET)
+        self.assertEqual(pending['stt_selection'], selected)
+        self.assertEqual(pending['pending']['operation'], 'disable')
+        self.assertIsNone(pending['stt'])
+        self.client.fail_chat = False
+        self.assertEqual(self.run_configure(disable=True).exit_code, 0)
+        current = state.decode_document(files.read_owned(self.path), self.root, TARGET)
+        self.assertEqual(current['schema_version'], 3)
+        self.assertIsNone(current['stt_selection']); self.assertIsNone(current['stt'])
+        self.assertEqual(self.native.call_count, 1); self.revalidate.assert_not_called()
+        self.assertFalse(any(call.startswith(('audio_', 'model_')) for call in self.client.calls))
+
+    def test_legacy_pending_finalization_keeps_derived_selection_and_original_native_failure(self):
+        self.configure()
+        legacy = state.decode_document(files.read_owned(self.path), self.root, TARGET)
+        legacy['schema_version'] = 2; del legacy['stt_selection']
+        legacy['stt']['pending'] = dict(operation='configure_audio', intent=deepcopy(legacy['stt']['routing']),
+                                        outcome='unconfirmed')
+        self.path.write_bytes(files.encoded(legacy))
+        self.native_row['loom']['kind'] = 'text'
+        self.client.calls.clear()
+        with self.assertRaises(common.HemError) as error: self.configure()
+        self.assertEqual(error.exception.reason, 'incompatible')
+        self.assertIs(error.exception.accepted, True)
+        current = state.decode_document(files.read_owned(self.path), self.root, TARGET)
+        self.assertEqual(current['schema_version'], 3)
+        self.assertEqual(current['stt_selection'], dict(server='local', instance='dictation'))
+        self.assertIsNone(current['stt']['pending'])
+        self.assertEqual(current['stt']['routing'], legacy['stt']['routing'])
+        self.assertFalse(any(call.endswith(('update', 'create', 'delete')) for call in self.client.calls))
 
     def test_fixed_entry_one_client_one_mutation_lock_and_no_recursion(self):
         dispatch = importlib.import_module(PACKAGE + '.hem_integrations').configure_integration
@@ -288,11 +575,14 @@ class STTTest(unittest.TestCase):
         self.configure();self.client.fail_delete=True
         with self.assertRaises(common.UncertainOutcome):self.run_configure(disable=True)
         self.assertIsNone(self.record()['routing']);self.assertEqual(self.record()['pending']['operation'],'delete_overlay')
+        self.assertEqual(state.stt_selection(state.decode_document(files.read_owned(self.path), self.root, TARGET)),
+                         dict(server='local', instance='dictation'))
         writes=self.client.calls.count('audio_update');self.client.audio['stt'].update(ENGINE='foreign',MODEL='admin')
         with self.assertRaises(common.UncertainOutcome):self.run_configure(disable=True)
         self.assertEqual(self.client.calls.count('audio_update'),writes)
         del self.client.rows[self.selected['prefixed_id']]
         self.run_configure(disable=True);self.assertEqual(self.client.audio['stt']['ENGINE'],'foreign')
+        self.assertIsNone(state.stt_selection(state.decode_document(files.read_owned(self.path), self.root, TARGET)))
 
     def test_audio_recheck_race_keeps_intent_and_does_not_post(self):
         def race(client):
@@ -307,7 +597,7 @@ class STTTest(unittest.TestCase):
         def fault(*args, **kwargs):
             nonlocal count
             count += 1
-            if count == 2:raise common.HemError('disk failure', accepted=False)
+            if count == 3:raise common.HemError('disk failure', accepted=False)
             return replace(*args, **kwargs)
         with patch.object(hem, '_replace_before_submission', side_effect=fault):
             with self.assertRaises(common.UncertainOutcome) as error:self.configure()
@@ -341,7 +631,12 @@ class STTTest(unittest.TestCase):
             with self.subTest(changes=changes):
                 original = deepcopy(self.native_row['loom'])
                 self.native_row['loom'].update(changes)
-                with self.assertRaises(common.HemError):self.configure()
+                if 'incarnation' in changes or 'kind' in changes:
+                    with self.assertRaises(common.HemError):self.configure()
+                else:
+                    result = self.configure()
+                    self.assertEqual(result['stt']['configuration'], 'deferred')
+                    self.assertEqual(result['stt']['target'], self.selected)
                 self.native_row['loom'] = original
 
     def test_original_target_is_resolved_outside_integration_and_revalidated_inside(self):
@@ -457,9 +752,9 @@ class STTTest(unittest.TestCase):
     def test_initial_native_failure_after_pending_audio_finalization_still_surfaces(self):
         self.pending_audio()
         self.client.audio['stt'].update(stt.desired(self.selected))
-        self.native_row['loom']['registration'] = 'loading'
+        self.native_row['loom']['kind'] = 'text'
         with self.assertRaises(common.HemError) as error:self.configure()
-        self.assertEqual(error.exception.reason, 'unavailable'); self.assertIs(error.exception.accepted, True)
+        self.assertEqual(error.exception.reason, 'incompatible'); self.assertIs(error.exception.accepted, True)
         self.assertIsNone(self.record()['pending']); self.assertEqual(self.record()['routing'], stt.desired(self.selected))
         self.assertNotIn('audio_update', self.client.calls)
 
@@ -470,12 +765,12 @@ class STTTest(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before); self.assertNotIn('audio_update', self.client.calls)
 
     def test_initial_native_failure_idempotent_and_no_receipt_never_succeeds(self):
-        self.native_row['loom']['registration'] = 'loading'
+        self.native_row['loom']['kind'] = 'text'
         with self.assertRaises(common.HemError):self.configure()
         self.assertFalse(any(call.endswith(('create', 'update')) for call in self.client.calls))
-        self.native_row['loom']['registration'] = 'ready'; self.configure()
+        self.native_row['loom']['kind'] = 'recognition'; self.configure()
         before = self.path.read_bytes(); self.client.calls.clear()
-        self.native_row['loom']['registration'] = 'loading'
+        self.native_row['loom']['kind'] = 'text'
         with self.assertRaises(common.HemError):self.configure()
         self.assertEqual(self.path.read_bytes(), before)
         self.assertFalse(any(call.endswith(('create', 'update')) for call in self.client.calls))
@@ -513,14 +808,14 @@ class STTTest(unittest.TestCase):
         count = [0]
         def fault(*args, **kwargs):
             count[0] += 1
-            if count[0] == 2:raise common.HemError('disk failure')
+            if count[0] == 3:raise common.HemError('disk failure')
             return replace(*args, **kwargs)
         with patch.object(hem, '_replace_before_submission', side_effect=fault):
             with self.assertRaises(common.UncertainOutcome):self.configure()
         self.assertEqual(self.record()['pending']['operation'], 'create_overlay')
-        self.native_row['loom']['registration'] = 'loading'; self.client.calls.clear()
+        self.native_row['loom']['kind'] = 'text'; self.client.calls.clear()
         with self.assertRaises(common.HemError) as error:self.configure()
-        self.assertEqual(error.exception.reason, 'unavailable'); self.assertIs(error.exception.accepted, True)
+        self.assertEqual(error.exception.reason, 'incompatible'); self.assertIs(error.exception.accepted, True)
         self.assertIn('prior overlay creation', str(error.exception))
         self.assertIsNone(self.record()['pending']); self.assertEqual(self.record()['overlay']['ownership'], 'created')
         self.assertNotIn('model_create', self.client.calls); self.assertNotIn('audio_update', self.client.calls)
@@ -565,11 +860,11 @@ class STTTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIsNone(self.record()['pending']); self.assertEqual(self.record()['routing'], stt.desired(self.selected))
 
-    def test_passive_disable_and_selectorless_paths_gain_no_native_prerequisite(self):
+    def test_passive_and_disable_stay_native_free_but_saved_selection_configure_retries(self):
         self.configure(); self.native.reset_mock(); self.revalidate.reset_mock()
         self.native_row['loom']['registration'] = 'loading'
         self.run_configure(check=True, stt_server='local', stt_instance='dictation')
-        self.run_configure(); self.run_configure(disable=True)
+        self.run_configure(disable=True)
         self.native.assert_not_called(); self.revalidate.assert_not_called()
 
     def pending_chat(self, *, completed=False):
@@ -602,17 +897,19 @@ class STTTest(unittest.TestCase):
 
     def test_initial_failure_finalizes_only_observed_chat_not_new_desired_work(self):
         previous = self.pending_chat(completed=True)
+        self.native_row['loom']['kind'] = 'text'
         self.registry.create_server('later', saved_settings=dict(device='task', listen='127.0.0.1:18082'))
         with self.assertRaises(common.HemError) as error:self.configure()
         self.assertIs(type(error.exception), common.HemError)
-        self.assertEqual(error.exception.reason, 'unavailable'); self.assertIs(error.exception.accepted, True)
+        self.assertEqual(error.exception.reason, 'incompatible'); self.assertIs(error.exception.accepted, True)
         self.assertIn('prior chat update', str(error.exception)); self.assertIn('not submitted', str(error.exception))
         owned = state.decode_document(files.read_owned(self.path), self.root, TARGET)
         self.assertIsNone(owned['pending'])
         self.assertEqual(owned['connections'], previous['pending']['after'])
         self.assertEqual(owned['stt'], previous['stt'])
         self.assertFalse(any(call.endswith(('create', 'update', 'delete')) for call in self.client.calls))
-        self.assertFalse(any(call.startswith(('audio_', 'model_')) for call in self.client.calls))
+        # Existing applied receipt still receives its required read-only drift
+        # checks before names can be retained with the incompatible error.
 
     def test_initial_failure_chat_pending_deadline_preserves_uncertainty(self):
         self.pending_chat(); before = self.path.read_bytes()

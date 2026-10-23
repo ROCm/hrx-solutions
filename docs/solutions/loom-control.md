@@ -982,8 +982,9 @@ model list so WebUI discovers models from native `/v1/models`.
 
 ### Open WebUI dictation
 
-With the same host-network topology and administrator prerequisites above, select
-a ready recognition instance explicitly:
+With the same host-network topology and administrator prerequisites above, save
+an explicit recognition selection. Its server must already be saved; it may be
+stopped, and the instance may not exist yet:
 
 ```bash
 loom-control openwebui configure --url http://127.0.0.1:3000 \
@@ -991,8 +992,19 @@ loom-control openwebui configure --url http://127.0.0.1:3000 \
 loom-control openwebui configure --url http://127.0.0.1:3000 --check
 ```
 
-Both selectors are required together. The selected native instance must be ready
-recognition with open admission on the matching managed server. WebUI's backend
+Both selectors are required together. Configure saves only their names. When the
+target is stopped, missing or not ready, successful chat configuration returns
+exit 0 and `completed=true`, with `stt.selection`, `stt.configuration="deferred"`
+and a reason. No STT picker row or audio route is created without fresh native
+qualification. A new unknown saved-server name is rejected; a previously selected
+server that was later removed remains recorded with reason `missing_saved_server`.
+
+After starting the intended recognition instance through normal lifecycle
+commands, explicitly run `loom-control openwebui configure` again to retry the
+saved selection. Setup never downloads or starts a model, watches availability,
+or runs automatically after native start. The selected native instance must be
+ready recognition with open admission on the matching managed server before
+STT can be applied. WebUI's backend
 must be able to reach that server's `/v1` URL; a successful management request
 does not prove backend reachability. Use English recordings of at most 40.96 seconds.
 Existing WebUI upload restrictions must permit MP3 and WAV; Control preserves
@@ -1004,21 +1016,47 @@ existing and newly discovered text models remain dynamically discoverable. The
 native inventory stays unchanged. A preexisting foreign inactive override can
 satisfy this prerequisite without becoming owned; active/custom conflicts refuse.
 
-No-selector configure retains the existing chat workflow. Foreign STT providers
+Without a saved selection or legacy STT receipt, no-selector configure remains
+chat-only, even if exactly one recognition instance is running. With a selection,
+that explicit configure retries it; it does not choose another instance.
+Foreign STT providers
 are not silently replaced. Control preserves unrelated TTS/realtime/chat/STT values
 and keeps foreign credentials only in memory while carrying them through the API.
-`--check` writes nothing and leaves native availability unprobed. Persistence and
+`--check` writes nothing and leaves native availability unprobed. Selection without
+an applied route is reported as deferred (`routing_not_applied`); check returns
+nonzero for that incomplete route. A configured receipt proves configuration,
+not current native readiness. Persistence and
 user-info forwarding remain operator prerequisites, not proven by configuration.
 
-`--disable` disconnects only unchanged owned STT routing and removes its unchanged
-created override and chat connections; foreign inactive prerequisites remain.
+`--disable` disconnects unchanged owned STT routing and removes its unchanged
+created override, chat connections and saved selection after successful cleanup;
+foreign inactive prerequisites remain. It requires reachable qualified WebUI,
+but no live native instance. Failed/uncertain cleanup retains the required
+selection and receipt evidence.
 Disconnect leaves an inert OpenAI STT profile with blank URL/key/model, so it cannot
 fall back to cloud/native inference or initialize an unrelated Whisper model. It
 does not restore earlier providers/credentials. Exact blank routing can be configured
 again. Edited owned fields or uncertain writes retain evidence for inspection;
 there is no cross-endpoint transaction or automatic retry of an unconfirmed STT
-update. Changing an existing selected target requires disable, then configure.
+update. Changing names while a routing, overlay or uncertain receipt exists
+requires disable, then configure. A selection with no receipt can be replaced by
+another valid pair. When a saved target becomes unavailable, `stt.target` still
+shows any old applied receipt separately from deferred `stt.selection`; Control
+does not clear that route or claim it is usable. Top-level `pending` remains
+reserved for unconfirmed remote intent, not pending routing. Unknown identity,
+incompatible targets, configuration failures, deadline expiry and unconfirmed
+acceptance keep their error categories; they are never successful deferral.
+Admitted names may remain saved after an error, but that does not mean a remote
+mutation was accepted. Known preflight conflicts do not save a new selection;
+earlier confirmed pending work may still have been finalized.
 Native models/servers keep running until normal lifecycle commands stop them.
+
+Selection uses ownership schema 3 in the existing target-specific private file.
+Supported schema 1/2 files remain readable without migration during check;
+schema 2 derives names from its existing STT receipt in memory. Explicit STT
+mutation carries those names and receipts into schema 3, and chat writes preserve
+them. Older binaries may reject schema 3. Automatic downgrade is unsupported;
+do not delete or edit receipts to bypass refusal, especially with pending work.
 
 After configuration, the user must check recording English audio in WebUI and
 receiving its transcript in the composer, while existing chat/settings still work.

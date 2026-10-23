@@ -222,6 +222,8 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
     path = ownership_path(root, target)
     record = deepcopy(document.get('stt'))
     saved_record = deepcopy(record)
+    selection = state.stt_selection(document)
+    saved_selection = deepcopy(selection)
     stt_changed = False
     confirmed_effects = []
 
@@ -236,22 +238,22 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
         if (qualification_error is not None and (document['pending'] is not None
                 or record is not None and record['pending'] is not None)):
             return partial_failure(UncertainOutcome('WebUI pending operation inspection incomplete; retain intent'))
-        return error
+        return partial_failure(error)
 
     def qualify():
         if operation_target is not None:
             try:
                 operation_targets.revalidate_operation_target(registry, operation_target, deadline)
             except HemError as error:
+                if error.reason == 'unavailable' and record['pending'] is None:
+                    return deferred(error)
                 raise partial_failure(error) from None
 
     if stt_server is not None and not check:
         selectors = dict(server=stt_server, instance=stt_instance)
         if record is not None and any(record['target'][key] != value for key, value in selectors.items()):
             fail('Disable the existing STT target before selecting another')
-        if (qualification_error is not None and document['pending'] is None
-                and (record is None or record['pending'] is None)):
-            raise qualification_error
+        selection = selectors
         if operation_target is not None:
             # UI alone projects native identity into its existing receipt.
             selected = dict(server=operation_target.server_id, instance=operation_target.instance_name,
@@ -261,6 +263,7 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
                 fail('Disable the existing STT target before selecting another')
             if record is None:
                 record = dict(target=selected, routing=None, overlay=None, pending=None)
+            selection = dict(server=stt_server, instance=stt_instance)
     try:
         version = request('GET', '/api/version', client.version)
         if version['version'] not in QUALIFIED_VERSIONS and not check:
@@ -269,7 +272,7 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
             fail('WebUI deployment identity conflict')
     except HemError as error:
         raise pending_inspection_failure(error) from None
-    if qualification_error is not None and document['pending'] is not None:
+    if not check and stt_server is not None and document['pending'] is not None:
         try:
             remote = request('GET', '/openai/config', client.config)
             state._remote(remote)
@@ -286,15 +289,11 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
         document = recovered
         previous = files.read_owned(path)
         confirmed_effects.append('prior chat update')
-    if qualification_error is not None and (record is None or record['pending'] is None):
-        raise partial_failure(qualification_error)
     if stt_server is not None and check:
         selectors = dict(server=stt_server, instance=stt_instance)
-        if record is None or any(record['target'][key] != value for key, value in selectors.items()):
+        if not same(selectors, selection):
             return _result(target, 'check', configuration='absent', completed=False, exit_code=1,
                            findings=[dict(status='stt_intent_absent')])
-    if record is None:
-        return chat_operation(check=check, disable=disable, version=version)
     def audio_get():
         return validate_audio(request('GET', '/api/v1/audio/config', client.audio_config))
 
@@ -304,6 +303,87 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
             fail('WebUI model lookup lacks matching identity/write access')
         return value
 
+    def persist(receipt, *, confirmed=False):
+        nonlocal previous, document, saved_record, saved_selection, stt_changed
+        try:
+            current = files.read_owned(path)
+            document = state.decode_document(current, root, target)
+            if (not same(document.get('stt'), saved_record)
+                    or not same(state.stt_selection(document), saved_selection)):
+                fail('WebUI local STT ownership changed before update')
+            # The existing chat coordinator may just have finalized its own receipt.
+            document = state.with_stt_selection(document, selection)
+            document.update(stt=deepcopy(receipt), deployment_id=version['deployment_id'])
+            state._validate_document(document, root, target)
+        except HemError as error:
+            raise partial_failure(error)
+        try:
+            _replace_before_submission(path, files.encoded(document), expected=current, deadline=deadline)
+        except (HemError, OSError) as error:
+            if confirmed:
+                raise UncertainOutcome('WebUI STT remote outcome observed but local finalization incomplete; retain intent', accepted=True) from None
+            if isinstance(error, HemError):
+                raise partial_failure(error)
+            raise
+        try:
+            previous = files.read_owned(path)
+        except HemError as error:
+            raise partial_failure(error)
+        saved_record = deepcopy(receipt)
+        saved_selection = deepcopy(selection)
+        stt_changed = True
+
+    def chat_preflight():
+        try:
+            remote_chat = request('GET', '/openai/config', client.config)
+            plan = state.plan_change(remote_chat, document, state.desired_connections(endpoints),
+                                    mode='disable' if disable else 'configure', deployment_id=version['deployment_id'])
+            if plan.configuration == 'drift' or plan.recovery == 'conflict':
+                fail('WebUI chat connection conflict; inspect before configuring STT')
+        except HemError as error:
+            raise partial_failure(error)
+
+    def save_selection():
+        # Names confer no live authority. Preserve the prior receipt until an
+        # actual effect's own intent/readback changes it.
+        if document['schema_version'] != 3 or not same(saved_selection, selection):
+            persist(saved_record)
+
+    def deferred(error):
+        if error.reason not in ('missing', 'unavailable'):
+            raise partial_failure(error)
+        reason = ('missing_saved_server' if selection['server'] not in {r['server'] for r in endpoints['servers']}
+                  else 'missing_instance' if error.reason == 'missing' else 'unavailable')
+        try:
+            chat = chat_operation(check=False, disable=False, version=None)
+        except HemError as error:
+            raise partial_failure(error)
+        chat['stt'] = dict(selection=deepcopy(selection),
+            configuration='deferred' if chat.exit_code == 0 else 'unknown',
+            reason=reason if chat.exit_code == 0 else 'configuration_failed')
+        if saved_record is not None:
+            chat['stt']['target'] = deepcopy(saved_record['target'])
+        chat['changed'] = chat['changed'] or stt_changed
+        if confirmed_effects:
+            chat['accepted'] = True
+        return chat
+
+    if record is None:
+        if check:
+            chat = chat_operation(check=True, disable=False, version=version)
+            if selection is not None:
+                chat['stt'] = dict(selection=deepcopy(selection), configuration='deferred', reason='routing_not_applied')
+                chat.update(configuration='partial', state='partial', completed=False)
+                chat.exit_code = max(chat.exit_code, 1)
+            return chat
+        if disable:
+            return chat_operation(check=False, disable=True, version=version)
+        chat_preflight()
+        save_selection()
+        if qualification_error is not None:
+            return deferred(qualification_error)
+        raise UncertainOutcome('WebUI selected STT target has no fresh operation proof')
+
     try:
         audio = audio_get()
         model_id = record['target']['prefixed_id']
@@ -311,28 +391,9 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
     except HemError as error:
         raise pending_inspection_failure(error) from None
 
-    def persist(*, confirmed=False):
-        nonlocal previous, document, saved_record, stt_changed
-        document = state.decode_document(files.read_owned(path), root, target)
-        if not same(document.get('stt'), saved_record):
-            fail('WebUI local STT ownership changed before update')
-        # The existing chat coordinator may just have finalized its own receipt.
-        current = files.read_owned(path)
-        document.update(schema_version=2, stt=deepcopy(record), deployment_id=version['deployment_id'])
-        state._validate_document(document, root, target)
-        try:
-            _replace_before_submission(path, files.encoded(document), expected=current, deadline=deadline)
-        except (HemError, OSError):
-            if confirmed:
-                raise UncertainOutcome('WebUI STT remote outcome observed but local finalization incomplete; retain intent', accepted=True) from None
-            raise
-        previous = files.read_owned(path)
-        saved_record = deepcopy(record)
-        stt_changed = True
-
     def stage(operation, intent):
         record['pending'] = dict(operation=operation, intent=deepcopy(intent), outcome='unconfirmed')
-        persist()
+        persist(record)
 
     def observed_pending():
         pending = record['pending']
@@ -363,12 +424,10 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
         return _result(target, 'check', configuration='pending', pending=True, completed=False,
             exit_code=1, findings=[dict(status='stt_observed_completed_not_finalized')])
     if had_pending:
-        persist(confirmed=True)
+        persist(record, confirmed=True)
         confirmed_effects.append({'create_overlay': 'prior overlay creation',
             'configure_audio': 'prior audio routing update', 'clear_audio': 'prior audio clearing',
             'delete_overlay': 'prior overlay deletion'}[recovered_operation])
-    if qualification_error is not None:
-        raise partial_failure(qualification_error)
 
     def overlay_matches():
         overlay = record['overlay']
@@ -380,11 +439,12 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
 
     routing_matches = record['routing'] is not None and same(projection(audio), record['routing'])
     if not overlay_matches() or record['routing'] is not None and not routing_matches:
-        fail('WebUI owned STT routing/model row drift; preserve evidence')
+        raise partial_failure(InvalidInput('WebUI owned STT routing/model row drift; preserve evidence'))
     if check:
         chat = chat_operation(check=True, disable=False, version=version)
         configured = routing_matches and record['overlay'] is not None and record['pending'] is None
         chat['stt'] = dict(configuration='configured' if configured else 'partial',
+            selection=deepcopy(selection), reason=None,
             target=deepcopy(record['target']), overlay_ownership=(record['overlay'] or {}).get('ownership'))
         if not configured:
             chat.update(configuration='partial', state='partial', completed=False)
@@ -392,23 +452,31 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
         return chat
 
     # All chat/audio/model conflicts are checked before creating remote state.
-    remote_chat = request('GET', '/openai/config', client.config)
-    plan = state.plan_change(remote_chat, document, state.desired_connections(endpoints),
-                            mode='disable' if disable else 'configure', deployment_id=version['deployment_id'])
-    if plan.configuration == 'drift' or plan.recovery == 'conflict':
-        fail('WebUI chat connection conflict; inspect before configuring STT')
+    chat_preflight()
     if not disable:
-        if record['routing'] is None and not stt_policy.pristine(audio):
-            fail('Foreign STT provider/configuration conflicts; no automatic replacement')
-        stt_policy.upload_prerequisites(audio)
-        if record['overlay'] is None and row is not None:
-            if row.get('write_access', True) is not True or row.get('base_model_id') is not None or row.get('is_active') is not False:
+        try:
+            if record['routing'] is None and not stt_policy.pristine(audio):
+                fail('Foreign STT provider/configuration conflicts; no automatic replacement')
+            stt_policy.upload_prerequisites(audio)
+            if record['overlay'] is None and row is not None and (
+                    row.get('write_access', True) is not True or row.get('base_model_id') is not None
+                    or row.get('is_active') is not False):
                 fail('WebUI selected model has an active/custom foreign override')
-            qualify()
+        except HemError as error:
+            raise partial_failure(error)
+        save_selection()
+        if qualification_error is not None:
+            return deferred(qualification_error)
+        if record['overlay'] is None and row is not None:
+            deferred_result = qualify()
+            if deferred_result is not None:
+                return deferred_result
             record['overlay'] = dict(ownership='external', id=model_id)
         if record['overlay'] is None:
             nonce = uuid.uuid4().hex; body = create_body(record['target'], nonce)
-            qualify()
+            deferred_result = qualify()
+            if deferred_result is not None:
+                return deferred_result
             stage('create_overlay', body)
             if model_get(model_id) is not None:
                 fail('WebUI model appeared before create; pending evidence retained')
@@ -425,13 +493,16 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
                     row=created_row(row, record['target'], nonce))
             except HemError:
                 raise UncertainOutcome('WebUI overlay create readback incomplete/conflicting; retain intent') from None
-            record['pending'] = None; persist(confirmed=True)
+            record['pending'] = None; persist(record, confirmed=True)
             confirmed_effects.append('overlay creation')
         elif document.get('stt') is None:
-            persist()
+            persist(record)
         # Overlay creation/finalization is a mutation transition: requalify the
         # deployment before the chat participant can write its own receipt.
-        chat = chat_operation(check=False, disable=False, version=None)
+        try:
+            chat = chat_operation(check=False, disable=False, version=None)
+        except HemError as error:
+            raise partial_failure(error)
         if chat.exit_code:
             return chat
         if chat.get('accepted') is True:
@@ -442,7 +513,9 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
         wanted = CLEAR if record['routing'] is not None else None
     if wanted is not None and not same(projection(audio), wanted):
         if not disable:
-            qualify()
+            deferred_result = qualify()
+            if deferred_result is not None:
+                return deferred_result
         stage('clear_audio' if disable else 'configure_audio', wanted)
         immediate = audio_get()
         if not same(immediate, audio):
@@ -464,7 +537,7 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
             raise UncertainOutcome('WebUI audio update unconfirmed/conflicting; no replay; inspect') from None
         audio = actual
         record['routing'] = None if disable else wanted
-        record['pending'] = None; persist(confirmed=True)
+        record['pending'] = None; persist(record, confirmed=True)
     elif wanted is not None and record['routing'] is None and not disable:
         # Matching foreign routing without our submitted intent is not ownership.
         fail('Unowned matching STT routing is not eligible for adoption')
@@ -481,12 +554,16 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
                 pass  # Only readback can prove the current outcome.
             if model_get(model_id) is not None:
                 raise UncertainOutcome('WebUI model deletion unconfirmed; no automatic replay')
-            record['overlay'] = None; record['pending'] = None; persist(confirmed=True)
+            record['overlay'] = None; record['pending'] = None; persist(record, confirmed=True)
         # External prerequisite is never deleted/adopted; no remaining authority.
-        record = None; persist(confirmed=True)
+        record = None; persist(record, confirmed=True)
         # Audio/overlay effects may cross a deployment transition; observe again.
-        chat = chat_operation(check=False, disable=True, version=None)
+        try:
+            chat = chat_operation(check=False, disable=True, version=None)
+        except HemError as error:
+            raise partial_failure(error)
     chat['stt'] = dict(configuration='absent' if disable else 'configured',
+        selection=None if disable and chat.exit_code == 0 and chat['completed'] else deepcopy(selection), reason=None,
         target=None if disable else deepcopy(record['target']), backend_reachability='operator-required/unverified',
         disconnect='inert-openai/blank-origin-no-provider-fallback' if disable else None)
     chat['changed'] = chat['changed'] or stt_changed
@@ -537,6 +614,11 @@ def _configure_owned(root, target, token, deadline, *, check, disable,
     path = ownership_path(root, target)
     previous = files.read_owned(path)
     document = decode_document(previous, root, target)
+    prior_selection = state.stt_selection(document)
+    selected_names = (dict(server=stt_server, instance=stt_instance) if stt_server is not None
+                      else None if disable else prior_selection)
+    if not check and selected_names is not None:
+        stt_server, stt_instance = selected_names['server'], selected_names['instance']
     client = client_factory(target, token, deadline)
     def request(method, route, operation, intent=None):
         try:
@@ -558,23 +640,33 @@ def _configure_owned(root, target, token, deadline, *, check, disable,
         registry = Registry(root, deadline=deadline)
         ensure_endpoints(registry, deadline)
         if stt_server is not None:
+            if (not same(selected_names, prior_selection)
+                    and not any(row['id'] == stt_server for row in registry.list_servers())):
+                raise InvalidInput('Selected STT server must already be saved')
             try:
                 operation_target = operation_targets.resolve_operation_target(
                     registry, stt_server, stt_instance, 'transcription', deadline)
             except InvalidInput:
                 raise
             except HemError as error:
-                # Only a fresh existing pending receipt can defer this failure.
+                # Native proof is independent of names-only intent. The owner
+                # admits selection only after applicable preflight/recovery.
                 qualification_error = error
     try:
         with nullcontext() if check else integration_lock(root, deadline):
             if not check:
                 previous = files.read_owned(path)
                 document = decode_document(previous, root, target)
+                if not same(state.stt_selection(document), prior_selection):
+                    fail('WebUI local STT selection changed while waiting for the integration lock')
             expected = project_endpoints(root, passive_snapshot(root, deadline)['servers'])
             projection = read_endpoints(root)
             if not check and not _same(projection, expected):
                 raise InvalidInput("WebUI endpoint projection changed; rerun configure")
+            if (not check and not disable and selected_names is not None
+                    and not same(selected_names, prior_selection)
+                    and stt_server not in {row['server'] for row in expected['servers']}):
+                raise InvalidInput('Selected STT server must already be saved')
 
             def chat_operation(*, check, disable, version):
                 # Audio/picker effects may have finalized their receipt since entry.
@@ -584,7 +676,7 @@ def _configure_owned(root, target, token, deadline, *, check, disable,
                     client=client, request=request, expected=expected, projection=projection,
                     previous=current, document=owned, version=version)
 
-            if stt_server is not None or document.get('stt') is not None:
+            if stt_server is not None or document.get('stt') is not None or state.stt_selection(document) is not None:
                 return _configure_audio(root, target, deadline, check=check, disable=disable,
                     client=client, request=request, stt_server=stt_server, stt_instance=stt_instance,
                     previous=previous, document=document, endpoints=expected, chat_operation=chat_operation,

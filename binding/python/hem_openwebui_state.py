@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .hem_openwebui_wire import (MAX_BYTES, canonical_target, ownership_error as _fail,
     json_bytes, decode_json, strict_equal as _strict, validate_config)
-from .hem_openwebui_receipts import validate_record
+from .hem_openwebui_receipts import validate_record, _name
 from .hem_pi_contracts import NATIVE_PROFILE, READABLE_NATIVE_PROFILES, provider_id
 
 OWNER = "loom-control-openwebui"
@@ -71,14 +71,21 @@ def _records(rows):
 
 
 def _validate_document(document, root, target):
+    version = document.get("schema_version") if isinstance(document, dict) else None
+    keys = _DOCUMENT_KEYS | ({"stt", "stt_selection"} if version == 3 else {"stt"} if version == 2 else set())
     if (not isinstance(document, dict) or
-            set(document) != (_DOCUMENT_KEYS | {"stt"} if document.get("schema_version") == 2 else _DOCUMENT_KEYS) or
-            type(document["schema_version"]) is not int or document["schema_version"] not in (SCHEMA_VERSION, 2) or
+            set(document) != keys or
+            type(version) is not int or version not in (SCHEMA_VERSION, 2, 3) or
             document["owner"] != OWNER or document["hem_root"] != _root(root) or
             document["target_url"] != _origin(target) or not isinstance(document["deployment_id"], str)):
         _fail()
-    if document["schema_version"] == 2:
+    if version in (2, 3):
         validate_record(document["stt"])
+    if version == 3 and document["stt_selection"] is not None:
+        selection = document["stt_selection"]
+        if type(selection) is not dict or set(selection) != {"server", "instance"}:
+            _fail()
+        _name(selection["server"]); _name(selection["instance"])
     owned = _records(document["connections"])
     pending = document["pending"]
     if pending is not None:
@@ -107,6 +114,24 @@ def decode_document(data: bytes | None, root: Path, target: str) -> dict:
         _fail()
     document = decode_json(data, mode='ownership')
     return _validate_document(document, root, target)
+
+
+def stt_selection(document):
+    """Read names only, including schema-2 legacy intent, without migration."""
+    _validate_document(document, document.get("hem_root"), document.get("target_url"))
+    if document["schema_version"] == 3:
+        return deepcopy(document["stt_selection"])
+    if document.get("stt") is not None:
+        return {key: document["stt"]["target"][key] for key in ("server", "instance")}
+    return None
+
+
+def with_stt_selection(document, selection):
+    """Build an explicit mutation's version-3 document; never write or resolve."""
+    _validate_document(document, document.get("hem_root"), document.get("target_url"))
+    value = deepcopy(document)
+    value.update(schema_version=3, stt=deepcopy(document.get("stt")), stt_selection=deepcopy(selection))
+    return _validate_document(value, value["hem_root"], value["target_url"])
 
 
 def desired_connections(endpoints: dict) -> list[dict]:
@@ -299,6 +324,12 @@ def plan_change(remote: dict, document: dict, desired: list[dict], *, mode: str,
     merged.update(OPENAI_API_BASE_URLS=urls, OPENAI_API_KEYS=keys, OPENAI_API_CONFIGS=configs)
     _remote(merged)
     next_document = _with_connections(current, list(after.values()), deployment_id)
+    if (mode == "disable" and not conflicts and next_document.get("stt") is None
+            and next_document["schema_version"] == 3):
+        # Audio cleanup has already retired its receipt before the owner calls
+        # the chat disable participant. Keep intent throughout partial cleanup
+        # and in the before-submit pending document until confirmed finalization.
+        next_document = with_stt_selection(next_document, None)
     remote_changed = not _strict(remote, merged)
     pending_document = None
     if remote_changed:
