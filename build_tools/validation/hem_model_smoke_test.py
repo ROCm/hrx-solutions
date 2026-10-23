@@ -18,10 +18,11 @@ from contextlib import redirect_stderr, redirect_stdout
 import io
 
 from build_tools.validation import check_installed_wheel_test as checker_fixtures
-from binding.python import hem_process, hem_display
+from binding.python.control import hem_process
+from binding.python import hem_display
 from binding.python.hem_common import Deadline
-from binding.python.hem_shutdown import ShutdownManager
-from binding.python.hem_state import Registry
+from binding.python.control.hem_shutdown import ShutdownManager
+from binding.python.control.hem_state import Registry
 from unittest import mock
 
 from build_tools.validation import hem_model_smoke
@@ -205,6 +206,8 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
             self.files[name] = (source / name).read_bytes()
         for relative in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
                      'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'):
+            self.files[relative] = (source / relative).read_bytes()
+        for relative in ('control/__init__.py', 'control/hem_http.py', 'control/hem_instances.py', 'control/hem_operation_targets.py', 'control/hem_process.py', 'control/hem_shutdown.py', 'control/hem_state.py'):
             self.files[relative] = (source / relative).read_bytes()
         from build_tools.validation.check_installed_cpu import CLI_FILES
         for name in CLI_FILES:

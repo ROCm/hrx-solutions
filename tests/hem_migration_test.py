@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from binding.python import runtime_paths
 from binding.python.models import hem_models, model_download, model_store
-from binding.python.hem_state import Registry
+from binding.python.control.hem_state import Registry
 
 
 class MigrationBoundaryTest(unittest.TestCase):

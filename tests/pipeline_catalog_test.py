@@ -12,7 +12,7 @@ from unittest.mock import patch
 from binding.python.models import hem_config, pipeline_validation
 from binding.python.models.model_store import ModelFiles
 from binding.python.hem_common import Deadline, DeadlineExpired, InvalidInput
-from binding.python import hem_process
+from binding.python.control import hem_process
 
 
 class PipelineCatalogTest(unittest.TestCase):

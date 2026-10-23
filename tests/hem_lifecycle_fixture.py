@@ -6,7 +6,7 @@ import socket
 import threading
 import time
 
-from binding.python import hem_process
+from binding.python.control import hem_process
 from binding.python.hem_common import UncertainOutcome
 
 def inventory(*items):

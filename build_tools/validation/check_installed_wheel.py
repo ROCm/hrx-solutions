@@ -34,8 +34,7 @@ package_root = Path(hrx_solutions.__file__).resolve().parent
 package_root.relative_to(Path(sys.prefix).resolve())
 for name in (
     "hem_bootstrap", "hem_cli", "hem_common",
-    "hem_display", "hem_http", "hem_instances", "hem_process",
-    "hem_shutdown", "hem_state",
+    "hem_display",
 ):
     module = importlib.import_module("hrx_solutions." + name)
     assert Path(module.__file__).resolve().parent == package_root
@@ -145,6 +144,9 @@ for relative in (
     installed = Path(module.__file__).resolve()
     assert installed.is_relative_to(package_root)
     assert installed == (package_root / relative).resolve()
+for name in ('__init__', 'hem_http', 'hem_instances', 'hem_operation_targets', 'hem_process', 'hem_shutdown', 'hem_state'):
+    module = importlib.import_module('hrx_solutions.control' + ('' if name == '__init__' else '.' + name))
+    assert Path(module.__file__).resolve() == package_root / 'control' / (name + '.py')
 entrypoints = {entry.name: entry.value for entry in
                importlib.metadata.distribution("hrx-solutions").entry_points
                if entry.group == "console_scripts"}
@@ -256,7 +258,7 @@ assert not state_root.exists(), "help, preview and invalid input must not create
 def check_native_lifecycle():
     """Real pinned driver is AMDGPU-only; opt in on a GPU host, never CPU CI."""
     from hrx_solutions.hem_common import Deadline
-    from hrx_solutions.hem_process import package_identity, identity, _confirmed_exit
+    from hrx_solutions.control.hem_process import package_identity, identity, _confirmed_exit
 
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -302,7 +304,7 @@ def check_native_lifecycle():
             # A timed-out accepted start may still own a pending bootstrap/native.
             # Reconcile before aborting, using one cleanup budget and only this
             # check's named server; never sweep other rows in the same namespace.
-            from hrx_solutions.hem_state import Registry
+            from hrx_solutions.control.hem_state import Registry
             if state_root.exists():
                 budget = Deadline.after()
                 owned = next((row for row in Registry(state_root, deadline=budget).list_servers()

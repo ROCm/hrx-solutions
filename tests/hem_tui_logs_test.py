@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from binding.python.tui import hem_tui, hem_tui_logs
 from binding.python.hem_common import HemError, UncertainOutcome
-from binding.python.hem_state import Registry
+from binding.python.control.hem_state import Registry
 
 
 def observation(kind="server"):

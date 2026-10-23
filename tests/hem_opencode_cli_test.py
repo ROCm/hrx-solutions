@@ -14,7 +14,7 @@ from binding.python import hem_cli
 from binding.python.integrations.opencode import hem_opencode as owner
 from binding.python.hem_common import Deadline, InvalidInput
 from binding.python.integrations.opencode.hem_opencode import PLUGIN
-from binding.python.hem_state import Registry
+from binding.python.control.hem_state import Registry
 
 
 class OpenCodeCliTest(unittest.TestCase):
@@ -43,7 +43,7 @@ class OpenCodeCliTest(unittest.TestCase):
 
     def test_explicit_configure_refreshes_prior_owned_projection_after_passive_check(self):
         from binding.python.integrations.pi.hem_pi_contracts import NATIVE_PROFILE, PREVIOUS_NATIVE_PROFILE
-        from binding.python.hem_state import Registry
+        from binding.python.control.hem_state import Registry
         Registry(self.root).create_server('local', saved_settings=dict(device='task', listen='127.0.0.1:18080'))
         self.invoke()
         path = self.root / 'clients/endpoints.json'

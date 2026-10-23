@@ -74,8 +74,8 @@ class AcceptanceProofTest(unittest.TestCase):
         self.check.project.mkdir()
         child = Mock(pid=12345); child.poll.return_value=None; child.wait.return_value=143
         error=RuntimeError('identity unavailable')
-        module=types.ModuleType('hrx_solutions.hem_process'); module.identity=Mock(side_effect=error)
-        with patch.dict('sys.modules',{'hrx_solutions.hem_process':module}), \
+        module=types.ModuleType('hrx_solutions.control.hem_process'); module.identity=Mock(side_effect=error)
+        with patch.dict('sys.modules',{'hrx_solutions.control.hem_process':module}), \
              patch('build_tools.integrations.omp.omp_configuration_smoke.subprocess.Popen',return_value=child):
             with self.assertRaises(RuntimeError) as caught: self.check.run_client('--version')
         self.assertIs(caught.exception,error)
@@ -91,14 +91,14 @@ class AcceptanceProofTest(unittest.TestCase):
         probe = self.check.gate.args.source / 'tests/omp_configuration_probe.mjs'
         probe.parent.mkdir()
         probe.write_text(second)
-        module = types.ModuleType('hrx_solutions.hem_process')
+        module = types.ModuleType('hrx_solutions.control.hem_process')
         module.identity = lambda pid: pid
         def exited(pid):
             try: os.kill(pid, 0)
             except ProcessLookupError: return True
             return False
         module._confirmed_exit = exited
-        return patch.dict('sys.modules', {'hrx_solutions.hem_process': module})
+        return patch.dict('sys.modules', {'hrx_solutions.control.hem_process': module})
 
     def assert_pair_retired(self):
         self.assertIsNone(self.check.child)
@@ -158,7 +158,7 @@ class AcceptanceProofTest(unittest.TestCase):
 
     def test_second_identity_failure_retires_both_owned_children(self):
         with self.observation_scripts('import time; time.sleep(30)', 'import time; time.sleep(30)'):
-            module = sys.modules['hrx_solutions.hem_process']
+            module = sys.modules['hrx_solutions.control.hem_process']
             module.identity = Mock(side_effect=[123, RuntimeError('second identity unavailable')])
             module._confirmed_exit = Mock(return_value=True)
             with self.assertRaisesRegex(RuntimeError, 'second identity unavailable'):

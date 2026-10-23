@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 from binding.python.hem_common import HemError, UncertainOutcome
 from tests.hem_lifecycle_fixture import fixture
-from binding.python.hem_state import Registry
-from binding.python import hem_state
+from binding.python.control.hem_state import Registry
+from binding.python.control import hem_state
 from binding.python.tui import hem_tui_provider
 
 

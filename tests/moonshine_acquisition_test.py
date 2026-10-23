@@ -18,7 +18,7 @@ from binding.python import hem_cli
 from binding.python.cli import hem_instance_cli
 from binding.python.models import hem_models, model_download, moonshine_preparation as preparation
 from binding.python.hem_common import Deadline, HemError
-from binding.python.hem_state import Registry
+from binding.python.control.hem_state import Registry
 from binding.python.models.model_store import NamedAsset, PreparationResult, RuntimeMapping
 
 

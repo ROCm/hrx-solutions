@@ -11,7 +11,7 @@ import signal
 import time
 import uuid
 
-from .hem_common import DeadlineExpired, HemError, UncertainOutcome, result
+from ..hem_common import DeadlineExpired, HemError, UncertainOutcome, result
 from .hem_http import registration
 from .hem_process import ProcessManager, _confirmed_exit
 

@@ -6,7 +6,7 @@ from . import hem_arguments as arguments
 from .. import hem_display
 from ..models import curated_catalog, hem_models
 from ..hem_common import InvalidInput, result
-from ..hem_state import Registry
+from ..control.hem_state import Registry
 
 
 def configure(parser):

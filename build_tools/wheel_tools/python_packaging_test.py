@@ -436,7 +436,7 @@ class PackagingTest(unittest.TestCase):
         for name in ('pipeline_validation.py','runtime_paths.py','loom_serve.py','models/__init__.py', *(name+'.py' for name in HEM_MODULES), *('models/'+name+'.py' for name in MODEL_MODULES), *wheel_validation.CLI_FILES, *wheel_validation.OMP_PYTHON_PATHS, *wheel_validation.OPENCODE_PYTHON_PATHS, *wheel_validation.OPENWEBUI_PYTHON_PATHS, *wheel_validation.PI_PYTHON_FILES, *wheel_validation.SHARED_INTEGRATION_PYTHON_PATHS):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         for name in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
-                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'):
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py', *('control/__init__.py', 'control/hem_http.py', 'control/hem_instances.py', 'control/hem_operation_targets.py', 'control/hem_process.py', 'control/hem_shutdown.py', 'control/hem_state.py')):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         version=read_package_version()
         prefix=f'hrx_solutions-{version}.dist-info/'
@@ -468,11 +468,11 @@ class PackagingTest(unittest.TestCase):
 
     def test_wheel_requires_each_client_resource_and_exact_reviewed_bytes_once(self):
         for name in (*wheel_validation.CLIENT_ASSETS, *('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
-                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py')):
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py', *('control/__init__.py', 'control/hem_http.py', 'control/hem_instances.py', 'control/hem_operation_targets.py', 'control/hem_process.py', 'control/hem_shutdown.py', 'control/hem_state.py'))):
             with self.subTest(missing=name), self.assertRaisesRegex(RuntimeError,'missing setup assets'):
                 validate_wheel(self.wheel(missing='hrx_solutions/'+name))
         for selected in ('native_protocol.ts', *wheel_validation.CLI_FILES, *('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
-                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py')):
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py', *('control/__init__.py', 'control/hem_http.py', 'control/hem_instances.py', 'control/hem_operation_targets.py', 'control/hem_process.py', 'control/hem_shutdown.py', 'control/hem_state.py'))):
             for failure in ('changed','duplicate'):
                 with self.subTest(failure=failure):
                     wheel=self.wheel()
@@ -492,7 +492,7 @@ class PackagingTest(unittest.TestCase):
 
     def test_sdist_requires_each_exact_regular_client_resource_once(self):
         for assets, validator in (((*wheel_validation.CLIENT_ASSETS, *('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
-                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py')), wheel_validation.validate_client_sdist),
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py', *('control/__init__.py', 'control/hem_http.py', 'control/hem_instances.py', 'control/hem_operation_targets.py', 'control/hem_process.py', 'control/hem_shutdown.py', 'control/hem_state.py'))), wheel_validation.validate_client_sdist),
                                   (wheel_validation.CLI_FILES, wheel_validation.validate_cli_sdist)):
             for selected in assets:
                 for failure in (None, 'missing', 'changed', 'symlink', 'duplicate'):
@@ -937,7 +937,7 @@ class PackagingTest(unittest.TestCase):
         command.run()
         expected = {'models/__init__.py', *('models/'+name+'.py' for name in MODEL_MODULES),
                     *wheel_validation.CLI_FILES, *('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
-                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'), *wheel_validation.PI_PYTHON_FILES}
+                     'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py', *('control/__init__.py', 'control/hem_http.py', 'control/hem_instances.py', 'control/hem_operation_targets.py', 'control/hem_process.py', 'control/hem_shutdown.py', 'control/hem_state.py')), *wheel_validation.PI_PYTHON_FILES}
         expected.update(('integrations/__init__.py', 'integrations/omp/__init__.py',
                          'integrations/omp/hem_omp.py', 'integrations/omp/hem_omp_yaml.py'))
         expected.update(('integrations/__init__.py', 'integrations/opencode/__init__.py',

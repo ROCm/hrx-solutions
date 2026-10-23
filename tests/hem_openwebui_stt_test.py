@@ -17,10 +17,10 @@ stt = importlib.import_module(PACKAGE + '.integrations.openwebui.hem_openwebui_s
 state = importlib.import_module(PACKAGE + '.integrations.openwebui.hem_openwebui_state')
 files = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_files')
 common = importlib.import_module(PACKAGE + '.hem_common')
-Registry = importlib.import_module(PACKAGE + '.hem_state').Registry
+Registry = importlib.import_module(PACKAGE + '.control.hem_state').Registry
 contracts = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_contracts')
-core = importlib.import_module(PACKAGE + '.hem_operation_targets')
-process = importlib.import_module(PACKAGE + '.hem_process')
+core = importlib.import_module(PACKAGE + '.control.hem_operation_targets')
+process = importlib.import_module(PACKAGE + '.control.hem_process')
 TARGET = 'http://127.0.0.1:3000'
 SECRET = 'foreign-audio-secret-do-not-persist'
 

@@ -16,8 +16,8 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from . import hem_display
-from .hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
+from .. import hem_display
+from ..hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 
 
 @dataclass(frozen=True)

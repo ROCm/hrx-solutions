@@ -10,9 +10,9 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from binding.python import hem_state
+from binding.python.control import hem_state
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput
-from binding.python.hem_state import Registry
+from binding.python.control.hem_state import Registry
 from binding.python.integrations.pi.hem_pi_state import (passive_snapshot, integration_lock,
                                         target_lock, get_target, set_target, clear_target)
 
@@ -84,7 +84,7 @@ class PiStateTest(unittest.TestCase):
 
     def test_migration_crash_rolls_back_table_and_version(self):
         self.legacy()
-        code='''from binding.python import hem_state
+        code='''from binding.python.control import hem_state
 import os,sys
 def crash(db):
     db.execute(hem_state._PI_SCHEMA)
@@ -163,7 +163,7 @@ print(passive_snapshot(Path(sys.argv[1]),Deadline.after(.1))['schema_version'])
 
     def test_reservation_survives_crash_without_claiming_installation(self):
         Registry(self.root)
-        code='''from binding.python.hem_state import Registry
+        code='''from binding.python.control.hem_state import Registry
 from binding.python.integrations.pi.hem_pi_state import set_target
 import json,os,sys
 set_target(Registry(sys.argv[1]),json.loads(sys.argv[2]))
@@ -176,7 +176,7 @@ os._exit(24)
 
     def test_atomic_concurrent_reservations_have_one_winner(self):
         registry=Registry(self.root)
-        code='''from binding.python.hem_state import Registry
+        code='''from binding.python.control.hem_state import Registry
 from binding.python.integrations.pi.hem_pi_state import set_target
 from binding.python.hem_common import InvalidInput
 import json,sys

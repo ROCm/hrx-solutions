@@ -15,10 +15,10 @@ import tempfile
 import time
 import unittest
 
-from binding.python import hem_process, hem_state
+from binding.python.control import hem_process, hem_state
 from binding.python.models import hem_config
 from binding.python.hem_common import Deadline
-from binding.python.hem_http import NativeClient
+from binding.python.control.hem_http import NativeClient
 from tests.gguf_fixtures import install_lifecycle_profile, lifecycle_profile, write_matching_gguf
 from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
 from tests.hem_lifecycle_fixture import INSTANCES_NATIVE as NATIVE

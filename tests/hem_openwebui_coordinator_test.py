@@ -17,7 +17,7 @@ hem = importlib.import_module(PACKAGE + '.integrations.openwebui.hem_openwebui')
 common = importlib.import_module(PACKAGE + '.hem_common')
 files = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_files')
 state = importlib.import_module(PACKAGE + '.integrations.openwebui.hem_openwebui_state')
-Registry = importlib.import_module(PACKAGE + '.hem_state').Registry
+Registry = importlib.import_module(PACKAGE + '.control.hem_state').Registry
 
 TARGET = 'http://127.0.0.1:3000'
 SECRET = 'foreign-key-must-stay-in-memory'

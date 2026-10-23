@@ -11,8 +11,8 @@ from pathlib import Path
 import sys
 
 from .hem_common import Deadline, HemError
-from .hem_process import identity
-from .hem_state import Registry
+from .control.hem_process import identity
+from .control.hem_state import Registry
 
 LOG_BYTES = 2 * 1024 * 1024
 

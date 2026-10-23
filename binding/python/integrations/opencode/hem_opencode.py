@@ -26,7 +26,7 @@ from ..pi.hem_pi_state import passive_snapshot
 from ...hem_common import HemError, InvalidInput, UncertainOutcome, DeadlineExpired, result
 from ..pi.hem_pi_files import (atomic_replace, encoded, private_path, read_owned,
                            remove_owned, staged_path, sync_dir, validate_stage)
-from ...hem_state import Registry, ResourceLock
+from ...control.hem_state import Registry, ResourceLock
 
 ASSETS = ("index.ts", "discovery.ts", "native_protocol.ts", "installation.ts", "profile.json", "package.json")
 ARTIFACTS = (*ASSETS, "config.json")

@@ -16,7 +16,7 @@ from binding.python.hem_common import Deadline, InvalidInput, UncertainOutcome
 from binding.python.integrations.pi.hem_pi_assets import bundled_assets
 from binding.python.integrations.pi.hem_pi_contracts import MANIFEST_PATH, ENDPOINT_PATH
 from binding.python.integrations.pi.hem_pi_state import passive_snapshot, get_target, set_target
-from binding.python.hem_state import Registry
+from binding.python.control.hem_state import Registry
 
 
 def projection(root, target, servers):

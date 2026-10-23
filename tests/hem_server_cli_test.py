@@ -20,12 +20,12 @@ import unittest
 from tests.hem_lifecycle_fixture import SERVER_CLI_NATIVE as NATIVE, port as available_port
 
 PACKAGE = os.environ.get('HEM_TEST_PACKAGE', 'binding.python')
-process_module = importlib.import_module(PACKAGE + '.hem_process')
-Registry = importlib.import_module(PACKAGE + '.hem_state').Registry
+process_module = importlib.import_module(PACKAGE + '.control.hem_process')
+Registry = importlib.import_module(PACKAGE + '.control.hem_state').Registry
 Deadline = importlib.import_module(PACKAGE + '.hem_common').Deadline
 InvalidInput = importlib.import_module(PACKAGE + '.hem_common').InvalidInput
 resolve_server = importlib.import_module(PACKAGE + '.cli.hem_server_cli').resolve_server
-NativeClient = importlib.import_module(PACKAGE + '.hem_http').NativeClient
+NativeClient = importlib.import_module(PACKAGE + '.control.hem_http').NativeClient
 
 
 class ServerCliTest(unittest.TestCase):

@@ -15,7 +15,7 @@ import time
 import uuid
 
 from ...hem_common import Deadline, HemError, InvalidInput
-from ...hem_state import Registry, ResourceLock, _directory, _validate_schema
+from ...control.hem_state import Registry, ResourceLock, _directory, _validate_schema
 
 
 def _canonical(path):

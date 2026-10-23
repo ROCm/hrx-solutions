@@ -18,7 +18,7 @@ from binding.python.cli import hem_pi_cli
 from binding.python.integrations.pi import hem_pi
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.integrations.pi.hem_pi_contracts import MANIFEST_PATH
-from binding.python.hem_state import Registry
+from binding.python.control.hem_state import Registry
 
 
 class PiCliTest(unittest.TestCase):

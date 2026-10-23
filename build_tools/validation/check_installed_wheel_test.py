@@ -13,8 +13,8 @@ import unittest
 
 from tests import hem_process_test as process_fixtures
 from binding.python.hem_common import Deadline
-from binding.python.hem_shutdown import ShutdownManager
-from binding.python import hem_process
+from binding.python.control.hem_shutdown import ShutdownManager
+from binding.python.control import hem_process
 
 
 class CheckerCleanupTest(unittest.TestCase):

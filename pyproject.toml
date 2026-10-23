@@ -37,7 +37,7 @@ Homepage = "https://github.com/ROCm/hrx-solutions"
 Repository = "https://github.com/ROCm/hrx-solutions"
 
 [tool.setuptools]
-packages = ["hrx_solutions", "hrx_solutions.models", "hrx_solutions.cli", "hrx_solutions.tui", "hrx_solutions.integrations", "hrx_solutions.integrations.omp", "hrx_solutions.integrations.opencode", "hrx_solutions.integrations.openwebui", "hrx_solutions.integrations.pi"]
+packages = ["hrx_solutions", "hrx_solutions.models", "hrx_solutions.cli", "hrx_solutions.tui", "hrx_solutions.integrations", "hrx_solutions.integrations.omp", "hrx_solutions.integrations.opencode", "hrx_solutions.integrations.openwebui", "hrx_solutions.integrations.pi", "hrx_solutions.control"]
 
 [tool.setuptools.package-dir]
 hrx_solutions = "binding/python"

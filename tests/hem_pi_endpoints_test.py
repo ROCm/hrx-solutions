@@ -12,7 +12,7 @@ PACKAGE = os.environ.get('HEM_TEST_PACKAGE', 'binding.python')
 endpoints = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_endpoints')
 contracts = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_contracts')
 state = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_state')
-Registry = importlib.import_module(PACKAGE + '.hem_state').Registry
+Registry = importlib.import_module(PACKAGE + '.control.hem_state').Registry
 common = importlib.import_module(PACKAGE + '.hem_common')
 assets_module = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_assets')
 from tests import hem_server_cli_test as fixtures
@@ -181,7 +181,7 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(payload['pi_update'],'failed')
         self.assertEqual(payload['pi_repair'],'loom-control pi configure')
         self.assertEqual(path.read_bytes(),before)
-        process=importlib.import_module(PACKAGE+'.hem_process')
+        process=importlib.import_module(PACKAGE+'.control.hem_process')
         with patch.object(process.subprocess,'Popen',side_effect=AssertionError('must not launch')):
             with self.assertRaisesRegex(common.InvalidInput,'1 MiB'):
                 process.ProcessManager(self.registry).start('one',self.registry.get_server('one')['saved_settings'],common.Deadline.after())
@@ -194,7 +194,7 @@ class PublicationTest(unittest.TestCase):
         self.configured()
         code=(f'from {PACKAGE}.integrations.pi.hem_pi_endpoints import publish_endpoints; '
               f'from {PACKAGE}.hem_common import Deadline; '
-              f'from {PACKAGE}.hem_state import Registry; '
+              f'from {PACKAGE}.control.hem_state import Registry; '
               'import sys; r=Registry(sys.argv[1],deadline=Deadline.after(2)); '
               'publish_endpoints(r,Deadline.after(2))')
         children=[subprocess.Popen([sys.executable,'-c',code,str(self.registry.root)],

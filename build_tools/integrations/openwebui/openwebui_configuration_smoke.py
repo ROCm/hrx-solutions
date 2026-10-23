@@ -114,7 +114,7 @@ class ConfigurationGate:
                 self.child = subprocess.Popen([str(self.gate.args.webui_python), '-m', 'uvicorn',
                     'open_webui.main:app', '--host', '127.0.0.1', '--port', self.settings['PORT']],
                     env=env, cwd=self.gate.args.webui_backend, stdout=log, stderr=log)
-                from hrx_solutions.hem_process import identity
+                from hrx_solutions.control.hem_process import identity
                 self.process = identity(self.child.pid)
             finally:
                 log.close()
@@ -170,7 +170,7 @@ class ConfigurationGate:
                 child.wait(timeout=5)
             self.child = None
             if self.process:
-                from hrx_solutions.hem_process import _confirmed_exit
+                from hrx_solutions.control.hem_process import _confirmed_exit
                 assert _confirmed_exit(self.process)
             self.evidence['cleanup'].append(dict(pid=child.pid, process=self.process, exited=True, forced=forced))
             assert not forced, 'owned native WebUI required forced termination'

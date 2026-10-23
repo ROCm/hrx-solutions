@@ -80,7 +80,7 @@ class ConfigurationGate:
         self.child = subprocess.Popen([str(self.client), 'serve', '--hostname', '127.0.0.1', '--port', str(port)],
             cwd=self.project, env=self.env, stdin=subprocess.DEVNULL, stdout=self.log, stderr=self.log)
         # Save process identity immediately, before readiness can fail.
-        from hrx_solutions.hem_process import identity
+        from hrx_solutions.control.hem_process import identity
         self.identity = identity(self.child.pid)
         end = time.monotonic() + 10
         while time.monotonic() < end:
@@ -111,7 +111,7 @@ class ConfigurationGate:
             self.log.close()
         self.child = None
         if saved is not None:
-            from hrx_solutions.hem_process import _confirmed_exit
+            from hrx_solutions.control.hem_process import _confirmed_exit
             assert _confirmed_exit(saved), saved
         with socket.socket() as sock:
             assert sock.connect_ex(('127.0.0.1', self.port)) != 0, 'owned OpenCode port remains open'

@@ -10,9 +10,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_state
+from binding.python.control import hem_state
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput
-from binding.python.hem_state import Registry
+from binding.python.control.hem_state import Registry
 
 
 class StateTest(unittest.TestCase):
@@ -120,7 +120,7 @@ class StateTest(unittest.TestCase):
                 db.execute("DELETE FROM servers")
                 raise RuntimeError("interrupted")
         self.assertEqual(len(self.registry.list_servers()), 1)
-        code = '''from binding.python.hem_state import Registry
+        code = '''from binding.python.control.hem_state import Registry
 import os,sys
 r=Registry(sys.argv[1])
 with r._transaction() as db:
@@ -145,7 +145,7 @@ with r._transaction() as db:
             self.assertEqual(db.execute("PRAGMA journal_mode").fetchone()[0], "wal")
 
     def test_concurrent_name_and_launch_claims_are_unique(self):
-        code = '''from binding.python.hem_state import Registry
+        code = '''from binding.python.control.hem_state import Registry
 from binding.python.hem_common import HemError
 import sys
 r=Registry(sys.argv[1])
@@ -159,7 +159,7 @@ except HemError:
         outputs = [self.finish(process).strip() for process in processes]
         self.assertEqual(outputs.count("created"), 1)
         self.assertEqual(outputs.count("conflict"), 4)
-        code = '''from binding.python.hem_state import Registry
+        code = '''from binding.python.control.hem_state import Registry
 from binding.python.hem_common import HemError
 import sys
 r=Registry(sys.argv[1])
@@ -176,7 +176,7 @@ except HemError:
 
     def test_caller_crash_releases_lock_but_keeps_pending(self):
         self.registry.create_server("local", saved_settings={})
-        code = '''from binding.python.hem_state import Registry
+        code = '''from binding.python.control.hem_state import Registry
 import sys,os
 r=Registry(sys.argv[1])
 with r.lock("server","local"):
@@ -190,7 +190,7 @@ with r.lock("server","local"):
                 self.registry.reserve_launch("local", launch_token="new", current_settings={}, endpoint="http://local")
 
     def test_lock_contention_deadline_and_independent_servers(self):
-        code = '''from binding.python.hem_state import Registry
+        code = '''from binding.python.control.hem_state import Registry
 from binding.python.hem_common import Deadline,DeadlineExpired
 import sys
 r=Registry(sys.argv[1])
@@ -211,7 +211,7 @@ except DeadlineExpired:
 
     def test_sqlite_contention_uses_callers_deadline(self):
         with self.registry._transaction():
-            code = '''from binding.python.hem_state import Registry
+            code = '''from binding.python.control.hem_state import Registry
 from binding.python.hem_common import Deadline,DeadlineExpired
 import sys
 try:
@@ -285,7 +285,7 @@ except DeadlineExpired:
         assets = [dict(logical_path="tokenizer.json", source_path="/external/tok", ownership="owned")]
         initial = self.registry.prepare_model("small", assets=assets)
         Path(initial["pending"]["path"], "tokenizer.json").write_text("durable")
-        code = '''from binding.python import hem_state
+        code = '''from binding.python.control import hem_state
 import os,sys
 r=hem_state.Registry(sys.argv[1])
 sync=hem_state._sync_dir

@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 
-from .hem_common import Deadline, HemError, InvalidInput
+from ..hem_common import Deadline, HemError, InvalidInput
 
 SCHEMA_VERSION = 2
 _HELD = threading.local()
@@ -59,7 +59,7 @@ def _validate_schema(connection, version, *, deadline=None):
             Registry._read(connection, table, tuple(key))
     check()
     if version == 2:
-        from .integrations.pi.hem_pi_state import _read_target
+        from ..integrations.pi.hem_pi_state import _read_target
         _read_target(connection)
         check()
 

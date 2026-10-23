@@ -14,7 +14,7 @@ import tempfile
 import time
 import unittest
 
-from binding.python import hem_process
+from binding.python.control import hem_process
 from binding.python.hem_common import Deadline
 from tests.hem_join_fixture import JoinFixture, NATIVE_JOIN
 

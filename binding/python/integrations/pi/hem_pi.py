@@ -29,7 +29,7 @@ from .hem_pi_contracts import (PiResult, MANIFEST_PATH, ENDPOINT_PATH,
     NATIVE_PROFILE, NATIVE_COMMIT, PI_PACKAGE, PI_VERSIONS)
 from .hem_pi_state import (passive_snapshot, integration_lock, target_lock,
     get_target, set_target, clear_target)
-from ...hem_state import Registry
+from ...control.hem_state import Registry
 from . import hem_pi_files as files
 
 

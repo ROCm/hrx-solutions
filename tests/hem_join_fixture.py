@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-from binding.python import hem_process, hem_state
+from binding.python.control import hem_process, hem_state
 from binding.python.hem_common import Deadline, UncertainOutcome
 from tests.gguf_fixtures import install_lifecycle_profile, lifecycle_profile, write_matching_gguf
 from tests.hem_lifecycle_fixture import INSTANCES_NATIVE as NATIVE

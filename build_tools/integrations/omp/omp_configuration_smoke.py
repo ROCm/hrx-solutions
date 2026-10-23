@@ -70,7 +70,7 @@ class ConfigurationGate:
             code = child.wait(timeout=5)
         self.child = None
         if saved is not None:
-            from hrx_solutions.hem_process import _confirmed_exit
+            from hrx_solutions.control.hem_process import _confirmed_exit
             assert _confirmed_exit(saved), saved
         self.evidence['client_cleanup'].append(dict(pid=child.pid, process=saved, exit=code,
             processes_exited=True, identity_verified=saved is not None, forced=forced))
@@ -95,7 +95,7 @@ class ConfigurationGate:
         self.child = subprocess.Popen([str(self.bun), str(entry), *args], cwd=self.project,
             env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            from hrx_solutions.hem_process import identity
+            from hrx_solutions.control.hem_process import identity
             self.identity = identity(self.child.pid)
             stdout, stderr = self.child.communicate(timeout=timeout)
             code = self.child.returncode
@@ -122,7 +122,7 @@ class ConfigurationGate:
         exists, so neither registry performs a legacy JSON migration. Files
         rather than pipes keep either child from blocking on undrained output.
         """
-        from hrx_solutions.hem_process import identity
+        from hrx_solutions.control.hem_process import identity
         began = time.monotonic()
         deadline = began + timeout
         number = len(self.evidence['commands'])

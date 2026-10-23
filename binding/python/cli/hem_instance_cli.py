@@ -9,11 +9,11 @@ from . import hem_arguments as arguments
 from .. import hem_display
 from ..models import hem_config, hem_models
 from ..hem_common import Deadline, HemError, InvalidInput, result
-from ..hem_http import NativeClient, registration
-from ..hem_instances import InstanceManager
-from ..hem_process import ProcessManager
+from ..control.hem_http import NativeClient, registration
+from ..control.hem_instances import InstanceManager
+from ..control.hem_process import ProcessManager
 from .hem_server_cli import ObservationResult, resolve_server
-from ..hem_state import Registry
+from ..control.hem_state import Registry
 
 
 def configure(parser):

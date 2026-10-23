@@ -15,12 +15,13 @@ import time
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_bootstrap, hem_process
+from binding.python import hem_bootstrap
+from binding.python.control import hem_process
 from binding.python.cli import hem_server_cli
 from binding.python._launcher import native_environment
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
-from binding.python.hem_http import NativeClient
-from binding.python.hem_state import Registry
+from binding.python.control.hem_http import NativeClient
+from binding.python.control.hem_state import Registry
 
 from tests.hem_lifecycle_fixture import PROCESS_NATIVE as NATIVE, port, wait_exit
 
@@ -442,7 +443,7 @@ class ProcessTests(unittest.TestCase):
 import json, os, sys
 from pathlib import Path
 from binding.python import hem_bootstrap as b
-from binding.python.hem_process import identity
+from binding.python.control.hem_process import identity
 from binding.python.hem_common import Deadline
 stage = sys.argv[6]
 if stage:
@@ -502,8 +503,8 @@ b.bootstrap(sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), Deadline(fl
         self.registry.create_server('one', saved_settings=settings)
         program = '''
 import json, os, subprocess, sys
-from binding.python.hem_state import Registry
-from binding.python.hem_process import ProcessManager
+from binding.python.control.hem_state import Registry
+from binding.python.control.hem_process import ProcessManager
 from binding.python.hem_common import Deadline
 original = subprocess.Popen
 def spawn(*a, **kw):

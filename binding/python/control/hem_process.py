@@ -20,9 +20,9 @@ import sys
 import time
 import uuid
 
-from . import hem_display
-from ._launcher import native_environment
-from .hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
+from .. import hem_display
+from .._launcher import native_environment
+from ..hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from .hem_http import NativeClient
 
 
@@ -407,7 +407,7 @@ class ProcessManager:
     """Lock-owning launch/reconcile operations; server CLI remains a thin caller."""
     def __init__(self, registry, *, package_root=None, emit=hem_display.emit):
         self.registry = registry
-        self.package_root = Path(package_root or Path(__file__).resolve().parent)
+        self.package_root = Path(package_root or Path(__file__).resolve().parents[1])
         self.emit = emit
         self.children = {}  # Only direct children of this invocation, for reaping.
 
@@ -513,7 +513,7 @@ class ProcessManager:
                 return record
             # Persist all configured connection targets before accepting any
             # native launch. This short publication never spans readiness waits.
-            from .integrations.pi.hem_pi_endpoints import publish_endpoints
+            from ..integrations.pi.hem_pi_endpoints import publish_endpoints
             publish_endpoints(self.registry, deadline)
             token = uuid.uuid4().hex
             record = self.registry.reserve_launch(server_id, launch_token=token,
@@ -534,7 +534,7 @@ class ProcessManager:
                       ('LOOM_SERVE_DIR', 'LD_LIBRARY_PATH', 'IREE_HAL_AMDGPU_LIBHSA_PATH') if key in environment}) +
                       ' # background via identity bootstrap; bounded process.log capture')
             deadline.remaining()
-            child = subprocess.Popen([sys.executable, '-m', f'{__package__}.hem_bootstrap',
+            child = subprocess.Popen([sys.executable, '-m', f'{__package__.rsplit(".", 1)[0]}.hem_bootstrap',
                                       str(self.registry.root), server_id, token, str(lock.fileno()),
                                       str(deadline.expires_at)],
                                      pass_fds=(lock.fileno(),), env=environment,

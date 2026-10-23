@@ -10,10 +10,10 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from binding.python import hem_operation_targets as targets, hem_process, hem_state
+from binding.python.control import hem_operation_targets as targets, hem_process, hem_state
 from binding.python.models import hem_model_operations as operations
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
-from binding.python.hem_state import Registry
+from binding.python.control.hem_state import Registry
 
 
 DIGESTS = dict(native_sha256='a' * 64, payload_sha256='b' * 64, catalog_sha256='c' * 64)

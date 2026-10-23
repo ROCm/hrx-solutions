@@ -12,9 +12,9 @@ import threading
 from typing import Optional, Sequence
 
 from ..hem_common import Deadline, HemError, InvalidInput
-from ..hem_http import NativeClient, registration
-from ..hem_process import PinnedProcess, _confirmed_exit
-from ..hem_state import _name
+from ..control.hem_http import NativeClient, registration
+from ..control.hem_process import PinnedProcess, _confirmed_exit
+from ..control.hem_state import _name
 from .hem_tui_provider import _read_snapshot
 from ..runtime_paths import state_root
 

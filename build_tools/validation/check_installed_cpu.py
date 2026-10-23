@@ -177,6 +177,8 @@ def verify_wheel_payload(wheel, package):
     for name in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
                      'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'):
         assert name in checked, f'wheel is missing TUI module: {name}'
+    for name in ('control/__init__.py', 'control/hem_http.py', 'control/hem_instances.py', 'control/hem_operation_targets.py', 'control/hem_process.py', 'control/hem_shutdown.py', 'control/hem_state.py'):
+        assert name in checked, f'wheel is missing Control module: {name}'
     assert '__init__.py' in checked and '_native/bin/loom-serve' in checked
     assert any(name.startswith('loom-pipeline/') for name in checked)
     return {'wheel': str(wheel), 'wheel_sha256': digest(wheel), 'installed_files': checked}

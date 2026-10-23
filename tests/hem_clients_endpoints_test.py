@@ -14,7 +14,7 @@ clients = importlib.import_module(PACKAGE + '.integrations.hem_clients_endpoints
 common = importlib.import_module(PACKAGE + '.hem_common')
 contracts = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_contracts')
 state = importlib.import_module(PACKAGE + '.integrations.pi.hem_pi_state')
-Registry = importlib.import_module(PACKAGE + '.hem_state').Registry
+Registry = importlib.import_module(PACKAGE + '.control.hem_state').Registry
 from tests import hem_server_cli_test as fixtures
 
 
@@ -164,7 +164,7 @@ class ProjectionTest(unittest.TestCase):
 
     def test_shared_integration_lock_concurrency_timeout_and_no_reentrancy(self):
         code = (f'from {PACKAGE}.integrations.hem_clients_endpoints import ensure_endpoints; '
-                f'from {PACKAGE}.hem_common import Deadline; from {PACKAGE}.hem_state import Registry; '
+                f'from {PACKAGE}.hem_common import Deadline; from {PACKAGE}.control.hem_state import Registry; '
                 'import sys; r=Registry(sys.argv[1],deadline=Deadline.after(2)); ensure_endpoints(r,Deadline.after(2))')
         children = [subprocess.Popen([sys.executable, '-c', code, str(self.registry.root)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(3)]

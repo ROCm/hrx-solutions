@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
-from binding.python.hem_http import NativeResponse, NativeClient, active_ready, registration, retired
+from binding.python.control.hem_http import NativeResponse, NativeClient, active_ready, registration, retired
 
 from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
 
@@ -377,7 +377,7 @@ class ObservationTest(unittest.TestCase):
                 def expire_during_sleep(seconds):
                     now[0] = deadline.expires_at
                 with patch.object(client, "status", return_value=inventory(model())) as observe, \
-                     patch("binding.python.hem_http.time.sleep", side_effect=expire_during_sleep):
+                     patch("binding.python.control.hem_http.time.sleep", side_effect=expire_during_sleep):
                     with self.assertRaises(expected) as caught:
                         client.wait(lambda _: False, accepted=accepted)
                 self.assertIs(caught.exception.accepted, accepted)
@@ -402,10 +402,10 @@ class ObservationTest(unittest.TestCase):
                     elif boundary == "during-poll":
                         observation = patch.object(client, "status", side_effect=expire)
                     elif boundary == "connection-preparation":
-                        observation = patch("binding.python.hem_http._connect", side_effect=expire)
+                        observation = patch("binding.python.control.hem_http._connect", side_effect=expire)
                     else:
                         observation = patch.object(client, "status", side_effect=pending)
-                    with observation as observed, patch("binding.python.hem_http.time.sleep") as sleep:
+                    with observation as observed, patch("binding.python.control.hem_http.time.sleep") as sleep:
                         with self.assertRaises(expected) as caught:
                             client.wait(lambda _: False, accepted=accepted)
                     self.assertIs(caught.exception.accepted, accepted)

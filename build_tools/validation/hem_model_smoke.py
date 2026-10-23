@@ -385,8 +385,8 @@ class Gate:
         script = """
 import json, os, sys
 from pathlib import Path
-from hrx_solutions.hem_state import Registry
-from hrx_solutions.hem_process import _confirmed_exit
+from hrx_solutions.control.hem_state import Registry
+from hrx_solutions.control.hem_process import _confirmed_exit
 root = Path(os.environ['LOOM_SERVE_DIR'])
 rows = Registry(root).list_servers() if root.exists() else []
 record = next((row for row in rows if row['id'] == sys.argv[1]), None)

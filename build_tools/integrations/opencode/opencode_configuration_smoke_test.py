@@ -86,7 +86,7 @@ class AcceptanceProofTest(unittest.TestCase):
         child.poll.return_value = None
         child.wait.return_value = 130
         error = RuntimeError('identity unavailable')
-        module = types.ModuleType('hrx_solutions.hem_process')
+        module = types.ModuleType('hrx_solutions.control.hem_process')
         module.identity = Mock(side_effect=error)
         import socket
         closed = Mock()
@@ -94,7 +94,7 @@ class AcceptanceProofTest(unittest.TestCase):
         closed.__exit__ = Mock(return_value=False)
         closed.connect_ex.return_value = 1
         closed.getsockname.return_value = ('127.0.0.1',18089)
-        with patch.dict('sys.modules', {'hrx_solutions.hem_process': module}), \
+        with patch.dict('sys.modules', {'hrx_solutions.control.hem_process': module}), \
              patch('build_tools.integrations.opencode.opencode_configuration_smoke.subprocess.Popen',return_value=child), \
              patch('build_tools.integrations.opencode.opencode_configuration_smoke.socket.socket',return_value=closed):
             with self.assertRaises(RuntimeError) as caught:

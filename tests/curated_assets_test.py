@@ -15,7 +15,7 @@ from binding.python import hem_cli
 from binding.python.cli import hem_render
 from binding.python.models import curated_catalog as catalogs, hem_config, hem_models, model_download
 from binding.python.hem_common import Deadline, HemError, InvalidInput
-from binding.python.hem_state import Registry
+from binding.python.control.hem_state import Registry
 from binding.python.models.model_store import AcquisitionInput, RuntimeMapping, CatalogAssets, ModelImportError
 from binding.python.models.pipeline_validation import available_pipelines, resolve_catalog
 
@@ -261,7 +261,7 @@ class CuratedAssetsTest(unittest.TestCase):
         self.assertNotIn('Tokenizer fingerprint', lines)
 
     def test_managed_lifecycle_reserves_named_files_and_retained_catalog(self):
-        from binding.python import hem_instances, hem_process
+        from binding.python.control import hem_instances, hem_process
         from tests.hem_instances_test import Processes
         from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
         self.descriptor['definition']['options'] = {'stream': {'frames': [1, {'capacity': 8}]}}

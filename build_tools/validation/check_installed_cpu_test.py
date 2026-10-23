@@ -69,6 +69,8 @@ class InstalledPayloadTest(unittest.TestCase):
         for relative in ('tui/__init__.py', 'tui/hem_tui.py', 'tui/hem_tui_details.py',
                      'tui/hem_tui_logs.py', 'tui/hem_tui_provider.py'):
             self.files[relative] = (source / relative).read_bytes()
+        for relative in ('control/__init__.py', 'control/hem_http.py', 'control/hem_instances.py', 'control/hem_operation_targets.py', 'control/hem_process.py', 'control/hem_shutdown.py', 'control/hem_state.py'):
+            self.files[relative] = (source / relative).read_bytes()
         from build_tools.validation.check_installed_cpu import CLI_FILES
         for name in CLI_FILES:
             self.files[name] = (source / name).read_bytes()
@@ -267,6 +269,8 @@ class InstalledPayloadTest(unittest.TestCase):
                                ('cli/__init__.py', 'hrx_solutions.cli'),
                                ('tui/fixture.py', 'hrx_solutions.tui.fixture'),
                                ('tui/__init__.py', 'hrx_solutions.tui'),
+                               ('control/fixture.py', 'hrx_solutions.control.fixture'),
+                               ('control/__init__.py', 'hrx_solutions.control'),
                                ('integrations/__init__.py', 'hrx_solutions.integrations'),
                                ('integrations/hem_integrations.py', 'hrx_solutions.integrations.hem_integrations'),
                                ('integrations/hem_client_documents.py', 'hrx_solutions.integrations.hem_client_documents'),

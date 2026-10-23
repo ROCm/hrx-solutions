@@ -14,9 +14,9 @@ import time
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_process, hem_state, hem_shutdown
+from binding.python.control import hem_process, hem_state, hem_shutdown
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, UncertainOutcome
-from binding.python.hem_http import NativeClient
+from binding.python.control.hem_http import NativeClient
 from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
 from tests.hem_lifecycle_fixture import port, wait_exit
 from tests.hem_lifecycle_fixture import INSTANCES_NATIVE as NATIVE
