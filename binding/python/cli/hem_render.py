@@ -7,8 +7,8 @@ import shlex
 import shutil
 import textwrap
 
-from .models.hem_config import SETTINGS
-from .hem_http import primary_parameters
+from ..models.hem_config import SETTINGS
+from ..hem_http import primary_parameters
 
 
 class Literal(str):

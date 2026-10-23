@@ -34,10 +34,9 @@ package_root = Path(hrx_solutions.__file__).resolve().parent
 package_root.relative_to(Path(sys.prefix).resolve())
 for name in (
     "hem_integrations", "hem_client_documents", "hem_openwebui_wire", "hem_openwebui_receipts",
-    "hem_arguments", "hem_bootstrap", "hem_cli", "hem_common",
-    "hem_display", "hem_help", "hem_http", "hem_instance_cli", "hem_instances", "hem_render",
-    "hem_model_cli", "hem_pipeline_cli", "hem_process",
-    "hem_server_cli", "hem_shutdown", "hem_state",
+    "hem_bootstrap", "hem_cli", "hem_common",
+    "hem_display", "hem_http", "hem_instances", "hem_process",
+    "hem_shutdown", "hem_state",
 ):
     module = importlib.import_module("hrx_solutions." + name)
     assert Path(module.__file__).resolve().parent == package_root
@@ -56,6 +55,23 @@ for name in (
 ):
     module = importlib.import_module("hrx_solutions.models." + name)
     assert Path(module.__file__).resolve().parent == package_root / "models"
+for name in (
+    'cli',
+    'cli.hem_arguments',
+    'cli.hem_help',
+    'cli.hem_render',
+    'cli.hem_instance_cli',
+    'cli.hem_model_cli',
+    'cli.hem_server_cli',
+    'cli.hem_pipeline_cli',
+    'cli.hem_pi_cli',
+    'cli.hem_omp_cli',
+    'cli.hem_opencode_cli',
+    'cli.hem_openwebui_cli',
+):
+    module = importlib.import_module("hrx_solutions." + name)
+    expected = package_root / (name.replace(".", "/") + ".py" if name != "cli" else "cli/__init__.py")
+    assert Path(module.__file__).resolve() == expected.resolve()
 entrypoints = {entry.name: entry.value for entry in
                importlib.metadata.distribution("hrx-solutions").entry_points
                if entry.group == "console_scripts"}

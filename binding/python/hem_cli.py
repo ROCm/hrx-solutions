@@ -8,7 +8,7 @@ import shlex
 import sys
 import textwrap
 
-from . import hem_arguments, hem_help, hem_instance_cli, hem_model_cli, hem_pi_cli, hem_opencode_cli, hem_omp_cli, hem_openwebui_cli, hem_pipeline_cli, hem_server_cli, hem_render
+from .cli import hem_arguments, hem_help, hem_instance_cli, hem_model_cli, hem_pi_cli, hem_opencode_cli, hem_omp_cli, hem_openwebui_cli, hem_pipeline_cli, hem_server_cli, hem_render
 from .hem_common import Deadline, HemError, InvalidInput, result
 
 

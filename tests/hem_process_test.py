@@ -15,7 +15,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_bootstrap, hem_process, hem_server_cli
+from binding.python import hem_bootstrap, hem_process
+from binding.python.cli import hem_server_cli
 from binding.python._launcher import native_environment
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.hem_http import NativeClient

@@ -9,7 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_cli, hem_help
+from binding.python import hem_cli
+from binding.python.cli import hem_help
 from binding.python.models import hem_config
 
 

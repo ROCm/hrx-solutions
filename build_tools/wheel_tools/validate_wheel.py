@@ -39,11 +39,10 @@ STABLE_RUNTIME_NAMES = {
 ROCM_LIBRARY_PREFIXES = ("libamd", "libhsa", "libroc")
 HEM_MODULES = (
     "hem_integrations", "hem_client_documents", "hem_openwebui_wire", "hem_openwebui_receipts",
-    "hem_arguments", "hem_bootstrap", "hem_cli", "hem_common", "hem_tui",
-    "hem_display", "hem_help", "hem_http", "hem_instance_cli", "hem_instances", "hem_render",
-    "hem_model_cli", "hem_operation_targets", "hem_pipeline_cli", "hem_process",
-    "hem_server_cli", "hem_shutdown", "hem_state", "hem_pi_assets",
-    "hem_pi_cli", "hem_pi_contracts", "hem_pi", "hem_pi_endpoints",
+    "hem_bootstrap", "hem_cli", "hem_common", "hem_tui",
+    "hem_display", "hem_http", "hem_instances", "hem_operation_targets", "hem_process",
+    "hem_shutdown", "hem_state", "hem_pi_assets",
+    "hem_pi_contracts", "hem_pi", "hem_pi_endpoints",
     "hem_pi_files", "hem_pi_state",
 )
 MODEL_MODULES = (
@@ -59,6 +58,21 @@ MODEL_MODULES = (
     'pipeline_validation',
     'qwen_validation',
 )
+CLI_FILES = (
+    'cli/__init__.py',
+    'cli/hem_arguments.py',
+    'cli/hem_help.py',
+    'cli/hem_render.py',
+    'cli/hem_instance_cli.py',
+    'cli/hem_model_cli.py',
+    'cli/hem_server_cli.py',
+    'cli/hem_pipeline_cli.py',
+    'cli/hem_pi_cli.py',
+    'cli/hem_omp_cli.py',
+    'cli/hem_opencode_cli.py',
+    'cli/hem_openwebui_cli.py',
+)
+
 PI_ASSETS = ("index.ts", "discovery.ts", "budgets.ts", "stream.ts",
              "profile.json", "package.json")
 # Independent authored resource inventory; do not derive acceptance from installers.
@@ -70,6 +84,18 @@ CLIENT_ASSETS = (
     "opencode_plugin/profile.json", "opencode_plugin/package.json",
 )
 OBSOLETE_MODULES = (
+    'hem_arguments',
+    'hem_help',
+    'hem_render',
+    'hem_instance_cli',
+    'hem_model_cli',
+    'hem_server_cli',
+    'hem_pipeline_cli',
+    'hem_pi_cli',
+    'hem_omp_cli',
+    'hem_opencode_cli',
+    'hem_openwebui_cli',
+
     "setup_cli", "serve_start", "connection_manager", "server_manager",
     "remote_registry", "state_store",
 )
@@ -117,6 +143,19 @@ def validate_models_sdist(path: Path) -> None:
             expected = (REPO_ROOT / 'binding/python' / name).read_bytes()
             if matches[0].size != len(expected) or archive.extractfile(matches[0]).read() != expected:
                 raise RuntimeError('sdist model source differs from reviewed source: ' + name)
+
+
+def validate_cli_sdist(path: Path) -> None:
+    """Require the complete regular CLI package with reviewed source bytes."""
+    with tarfile.open(path) as archive:
+        for name in CLI_FILES:
+            matches = [member for member in archive.getmembers()
+                       if member.name.endswith("/binding/python/" + name)]
+            if len(matches) != 1 or not matches[0].isfile():
+                raise RuntimeError("sdist is missing or duplicates CLI module: " + name)
+            expected = (REPO_ROOT / "binding/python" / name).read_bytes()
+            if matches[0].size != len(expected) or archive.extractfile(matches[0]).read() != expected:
+                raise RuntimeError("sdist CLI module differs from reviewed source: " + name)
 
 
 def validate_wheel(path: Path) -> tuple[int, int]:
@@ -176,6 +215,7 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         required_files.update(PACKAGE_PREFIX + name + ".py" for name in HEM_MODULES)
         required_files.add(PACKAGE_PREFIX + "models/__init__.py")
         required_files.update(PACKAGE_PREFIX + "models/" + name + ".py" for name in MODEL_MODULES)
+        required_files.update(PACKAGE_PREFIX + name for name in CLI_FILES)
         required_files.update(PACKAGE_PREFIX + "pi_extension/" + name for name in PI_ASSETS)
         required_files.update(PACKAGE_PREFIX + name for name in CLIENT_ASSETS)
         required_files.update(target.split(":")[0].replace(".", "/") + ".py"
@@ -197,6 +237,12 @@ def validate_wheel(path: Path) -> tuple[int, int]:
                     or stat.S_IFMT(matches[0].external_attr >> 16) not in (0, stat.S_IFREG)
                     or wheel.read(matches[0]) != expected):
                 raise RuntimeError('wheel model source duplicates or differs from reviewed source: ' + member)
+
+        for name in CLI_FILES:
+            member = PACKAGE_PREFIX + name
+            expected = (REPO_ROOT / "binding/python" / name).read_bytes()
+            if wheel.namelist().count(member) != 1 or wheel.read(member) != expected:
+                raise RuntimeError("wheel CLI module duplicates or differs from reviewed source: " + member)
 
         for name in PI_ASSETS:
             member = PACKAGE_PREFIX + "pi_extension/" + name
@@ -291,6 +337,7 @@ def main() -> int:
         validate_pi_sdist(args.sdist)
         validate_client_sdist(args.sdist)
         validate_models_sdist(args.sdist)
+        validate_cli_sdist(args.sdist)
         with tarfile.open(args.sdist) as source_archive:
             moonshine_catalog.validate_source_archive(source_archive, REPO_ROOT)
     print(f"Validated {args.wheel}: {count} native libraries, {size} bytes")

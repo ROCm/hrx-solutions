@@ -11,7 +11,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_cli, hem_render
+from binding.python import hem_cli
+from binding.python.cli import hem_render
 from binding.python.models import curated_catalog as catalogs, hem_config, hem_models, model_download
 from binding.python.hem_common import Deadline, HemError, InvalidInput
 from binding.python.hem_state import Registry

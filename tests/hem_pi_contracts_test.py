@@ -13,7 +13,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_cli, hem_pi_cli
+from binding.python import hem_cli
+from binding.python.cli import hem_pi_cli
 from binding.python.hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.hem_pi_contracts import PiResult, provider_id
 

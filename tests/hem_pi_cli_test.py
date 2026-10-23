@@ -13,7 +13,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_cli, hem_pi_cli, hem_pi
+from binding.python import hem_cli, hem_pi
+from binding.python.cli import hem_pi_cli
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.hem_pi_contracts import MANIFEST_PATH
 from binding.python.hem_state import Registry

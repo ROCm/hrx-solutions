@@ -39,7 +39,7 @@ class CheckerCleanupTest(unittest.TestCase):
             '#!' + sys.executable + '\n'
             'import functools,sys\n'
             f'sys.path.insert(0,{str(root)!r})\n'
-            'from binding.python import hem_cli,hem_server_cli\n'
+            'from binding.python import hem_cli; from binding.python.cli import hem_server_cli\n'
             f'hem_server_cli.ProcessManager=functools.partial(hem_server_cli.ProcessManager,package_root={str(self.case.package)!r})\n'
             'args=sys.argv[1:]\n'
             'if args[:2]==["server","start"]:\n'

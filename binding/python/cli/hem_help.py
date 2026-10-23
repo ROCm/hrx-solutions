@@ -8,8 +8,8 @@ from __future__ import annotations
 import argparse
 import textwrap
 
-from .models.hem_config import SETTINGS, EXPORT_RESPONSIBILITY
-from .hem_common import DEFAULT_TIMEOUT
+from ..models.hem_config import SETTINGS, EXPORT_RESPONSIBILITY
+from ..hem_common import DEFAULT_TIMEOUT
 
 RESOURCES = {
     'openwebui': 'Owned Open WebUI chat connections and selected finite dictation.',

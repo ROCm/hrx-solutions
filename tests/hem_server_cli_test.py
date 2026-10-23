@@ -24,7 +24,7 @@ process_module = importlib.import_module(PACKAGE + '.hem_process')
 Registry = importlib.import_module(PACKAGE + '.hem_state').Registry
 Deadline = importlib.import_module(PACKAGE + '.hem_common').Deadline
 InvalidInput = importlib.import_module(PACKAGE + '.hem_common').InvalidInput
-resolve_server = importlib.import_module(PACKAGE + '.hem_server_cli').resolve_server
+resolve_server = importlib.import_module(PACKAGE + '.cli.hem_server_cli').resolve_server
 NativeClient = importlib.import_module(PACKAGE + '.hem_http').NativeClient
 
 
@@ -59,7 +59,7 @@ class ServerCliTest(unittest.TestCase):
         # injection selects fixture payload discovery, leaving lifecycle intact.
         self.launcher = [sys.executable, '-c',
             'import functools,sys; '
-            f'from {PACKAGE} import hem_cli,hem_server_cli; '
+            f'from {PACKAGE} import hem_cli; from {PACKAGE}.cli import hem_server_cli; '
             'hem_server_cli.ProcessManager=functools.partial(hem_server_cli.ProcessManager,package_root=sys.argv[1]); '
             'raise SystemExit(hem_cli.main(sys.argv[2:]))', str(self.package)]
         self.records = []

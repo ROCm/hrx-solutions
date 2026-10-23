@@ -9,10 +9,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from binding.python import hem_cli, hem_display, hem_help, hem_render, hem_server_cli
+from binding.python import hem_cli, hem_display
+from binding.python.cli import hem_help, hem_render, hem_server_cli
 from binding.python.models import hem_config
 from binding.python.hem_common import HemError, DeadlineExpired, UncertainOutcome
-from binding.python.hem_server_cli import ObservationResult
+from binding.python.cli.hem_server_cli import ObservationResult
 
 
 SETTINGS = {'rows': 4, 'context_capacity': 8192, 'pool_capacity': 32768,

@@ -2,7 +2,7 @@
 from pathlib import Path
 
 from . import hem_arguments as arguments
-from .hem_integrations import configure_integration
+from ..hem_integrations import configure_integration
 
 
 def configure(parser):

@@ -79,7 +79,7 @@ class InstanceCliTest(unittest.TestCase):
         package = hem_config.__package__.rsplit('.', 1)[0]
         script = (
             'import functools,sys; '
-            f'from {package} import hem_cli,hem_instance_cli,hem_server_cli; from {package}.models import hem_config,pipeline_validation; '
+            f'from {package} import hem_cli; from {package}.cli import hem_instance_cli,hem_server_cli; from {package}.models import hem_config,pipeline_validation; '
             'from pathlib import Path; '
             'pipeline_validation.__file__=str(Path(sys.argv[1])/"models/pipeline_validation.py"); '
             'original=hem_config.load_profile; '

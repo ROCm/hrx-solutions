@@ -1,8 +1,8 @@
 """Packaged pipeline inventory grammar."""
 
 from . import hem_arguments as arguments
-from .models.hem_config import pipeline_info
-from .models.pipeline_validation import available_pipelines
+from ..models.hem_config import pipeline_info
+from ..models.pipeline_validation import available_pipelines
 
 
 def configure(parser):

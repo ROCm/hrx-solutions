@@ -24,6 +24,22 @@ import unittest
 import zipfile
 
 
+CLI_FILES = (
+    'cli/__init__.py',
+    'cli/hem_arguments.py',
+    'cli/hem_help.py',
+    'cli/hem_render.py',
+    'cli/hem_instance_cli.py',
+    'cli/hem_model_cli.py',
+    'cli/hem_server_cli.py',
+    'cli/hem_pipeline_cli.py',
+    'cli/hem_pi_cli.py',
+    'cli/hem_omp_cli.py',
+    'cli/hem_opencode_cli.py',
+    'cli/hem_openwebui_cli.py',
+)
+
+
 MODEL_PYTHON_PATHS = (
     'models/__init__.py',
     'models/curated_catalog.py',
@@ -82,6 +98,7 @@ def verify_wheel_payload(wheel, package):
             expected = hashlib.sha256(archive.read(name)).hexdigest()
             assert target.is_file() and digest(target) == expected, f'installed wheel mismatch: {name}'
             checked[relative] = expected
+    assert set(CLI_FILES) <= checked.keys(), 'wheel is missing required CLI modules'
     assert '__init__.py' in checked and '_native/bin/loom-serve' in checked
     assert any(name.startswith('loom-pipeline/') for name in checked)
     return {'wheel': str(wheel), 'wheel_sha256': digest(wheel), 'installed_files': checked}

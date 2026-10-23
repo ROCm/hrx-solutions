@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from binding.python import hem_cli, hem_display
-from binding.python.hem_arguments import select_server
+from binding.python.cli.hem_arguments import select_server
 from binding.python.hem_common import (
     Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome, result,
 )

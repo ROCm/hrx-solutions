@@ -433,7 +433,7 @@ class PackagingTest(unittest.TestCase):
                         for name in PI_ASSETS})
         members.update({'hrx_solutions/'+name:(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
                         for name in wheel_validation.CLIENT_ASSETS})
-        for name in ('pipeline_validation.py','runtime_paths.py','loom_serve.py','models/__init__.py', *(name+'.py' for name in HEM_MODULES), *('models/'+name+'.py' for name in MODEL_MODULES)):
+        for name in ('pipeline_validation.py','runtime_paths.py','loom_serve.py','models/__init__.py', *(name+'.py' for name in HEM_MODULES), *('models/'+name+'.py' for name in MODEL_MODULES), *wheel_validation.CLI_FILES):
             members['hrx_solutions/'+name]=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
         version=read_package_version()
         prefix=f'hrx_solutions-{version}.dist-info/'
@@ -466,41 +466,51 @@ class PackagingTest(unittest.TestCase):
         for name in wheel_validation.CLIENT_ASSETS:
             with self.subTest(missing=name), self.assertRaisesRegex(RuntimeError,'missing setup assets'):
                 validate_wheel(self.wheel(missing='hrx_solutions/'+name))
-        for failure in ('changed','duplicate'):
-            with self.subTest(failure=failure):
-                wheel=self.wheel()
-                with zipfile.ZipFile(wheel) as archive:
-                    members={name:archive.read(name) for name in archive.namelist()}
-                member='hrx_solutions/native_protocol.ts'
-                if failure=='changed':members[member]+=b'// changed'
-                with zipfile.ZipFile(wheel,'w') as archive:
-                    for name,data in members.items():archive.writestr(name,data)
-                    if failure=='duplicate':
-                        import warnings
-                        with warnings.catch_warnings():
-                            warnings.simplefilter('ignore',UserWarning)
-                            archive.writestr(member,members[member])
-                with self.assertRaisesRegex(RuntimeError,'client asset duplicates or differs'):
-                    validate_wheel(wheel)
+        for selected in ('native_protocol.ts', *wheel_validation.CLI_FILES):
+            for failure in ('changed','duplicate'):
+                with self.subTest(failure=failure):
+                    wheel=self.wheel()
+                    with zipfile.ZipFile(wheel) as archive:
+                        members={name:archive.read(name) for name in archive.namelist()}
+                    member='hrx_solutions/'+selected
+                    if failure=='changed':members[member]+=b'// changed'
+                    with zipfile.ZipFile(wheel,'w') as archive:
+                        for name,data in members.items():archive.writestr(name,data)
+                        if failure=='duplicate':
+                            import warnings
+                            with warnings.catch_warnings():
+                                warnings.simplefilter('ignore',UserWarning)
+                                archive.writestr(member,members[member])
+                    with self.assertRaisesRegex(RuntimeError,'client asset duplicates or differs|CLI module duplicates or differs'):
+                        validate_wheel(wheel)
 
     def test_sdist_requires_each_exact_regular_client_resource_once(self):
-        for failure in (None,'missing','changed','symlink','duplicate'):
-            path=self.root/'client-source.tar.gz'
-            with tarfile.open(path,'w:gz') as archive:
-                for name in wheel_validation.CLIENT_ASSETS:
-                    data=(packaging.REPO_ROOT/'binding/python'/name).read_bytes()
-                    if name=='native_protocol.ts' and failure=='missing':continue
-                    if name=='native_protocol.ts' and failure=='changed':data+=b'// changed'
-                    member=tarfile.TarInfo('hrx-solutions/binding/python/'+name);member.size=len(data)
-                    if name=='native_protocol.ts' and failure=='symlink':
-                        member.type=tarfile.SYMTYPE;member.linkname='/unreviewed/native_protocol.ts'
-                    archive.addfile(member,io.BytesIO(data))
-                    if name=='native_protocol.ts' and failure=='duplicate':archive.addfile(member,io.BytesIO(data))
-            with self.subTest(failure=failure):
-                if failure:
-                    with self.assertRaisesRegex(RuntimeError,'client asset'):
-                        wheel_validation.validate_client_sdist(path)
-                else:wheel_validation.validate_client_sdist(path)
+        for assets, validator in ((wheel_validation.CLIENT_ASSETS, wheel_validation.validate_client_sdist),
+                                  (wheel_validation.CLI_FILES, wheel_validation.validate_cli_sdist)):
+            for selected in assets:
+                for failure in (None, 'missing', 'changed', 'symlink', 'duplicate'):
+                    path = self.root / 'client-source.tar.gz'
+                    with tarfile.open(path, 'w:gz') as archive:
+                        for name in assets:
+                            data = (packaging.REPO_ROOT / 'binding/python' / name).read_bytes()
+                            if name == selected and failure == 'missing':
+                                continue
+                            if name == selected and failure == 'changed':
+                                data += b'changed'
+                            member = tarfile.TarInfo('hrx-solutions/binding/python/' + name)
+                            member.size = len(data)
+                            if name == selected and failure == 'symlink':
+                                member.type = tarfile.SYMTYPE
+                                member.linkname = '/unreviewed/module.py'
+                            archive.addfile(member, io.BytesIO(data))
+                            if name == selected and failure == 'duplicate':
+                                archive.addfile(member, io.BytesIO(data))
+                    with self.subTest(selected=selected, failure=failure):
+                        if failure:
+                            with self.assertRaisesRegex(RuntimeError, 'client asset|CLI module'):
+                                validator(path)
+                        else:
+                            validator(path)
 
     def test_sdist_requires_each_exact_regular_model_source_once(self):
         names = (
@@ -629,7 +639,8 @@ class PackagingTest(unittest.TestCase):
         command.build_lib = str(self.root / 'python-stage')
         command.ensure_finalized()
         command.run()
-        expected = {'models/__init__.py', *('models/'+name+'.py' for name in MODEL_MODULES)}
+        expected = {'models/__init__.py', *('models/'+name+'.py' for name in MODEL_MODULES),
+                    *wheel_validation.CLI_FILES}
         staged = Path(command.build_lib) / 'hrx_solutions'
         self.assertTrue(expected <= {path.relative_to(staged).as_posix()
                                      for path in staged.rglob('*.py')})
@@ -700,9 +711,9 @@ class PackagingTest(unittest.TestCase):
                 validate_wheel(wheel)
 
     def test_wheel_requires_every_hem_component_and_entrypoint(self):
-        for module in HEM_MODULES:
-            with self.subTest(module=module), self.assertRaisesRegex(RuntimeError, module):
-                validate_wheel(self.wheel(missing='hrx_solutions/'+module+'.py'))
+        for name in (*(module+'.py' for module in HEM_MODULES), *wheel_validation.CLI_FILES):
+            with self.subTest(module=name), self.assertRaisesRegex(RuntimeError, name):
+                validate_wheel(self.wheel(missing='hrx_solutions/'+name))
         for target in REQUIRED_ENTRY_POINTS.values():
             module = target.split(":")[0].replace(".", "/") + ".py"
             with self.subTest(entrypoint_module=module), self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
