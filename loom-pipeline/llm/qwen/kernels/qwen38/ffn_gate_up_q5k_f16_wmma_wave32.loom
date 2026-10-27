@@ -1,3 +1,7 @@
+template.decl @ggml.q5k.gate_up.f16_wmma.c64t128.wave32.output_f16.body(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer)
+
+template.decl @ggml.q5k.gate_up.f16_wmma.c64t128.wave32.owned_output_f16.body(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer)
+
 // Model geometry is supplied by the selected architecture catalog.
 config.decl @qwen.model.hidden_qk_blocks : index
 config.decl @qwen.model.hidden_size : index
@@ -95,23 +99,11 @@ kernel.def target(@qwen38_ffn_gate_up_q5k_f16_gfx11_wave32) @qwen38_swiglu_f16_p
   kernel.return
 }
 
-kernel.def target(@qwen38_ffn_gate_up_q5k_f16_gfx11_wave32) export("qwen38_ffn_gate_up_q5k_f16_wmma_c64_t128_wave32_owned_output_f16") @qwen38_ffn_gate_up_q5k_f16_wmma_c64_t128_wave32_owned_output_f16(%token_count0: index, %input_size0: index, %output_size0: index) {
-  %token_count = index.assume %token_count0 [range(%token_count0, 0, 512)] : index
-  %input_size = index.assume %input_size0 [range(%input_size0, 256, 32768), multiple_of(%input_size0, 256)] : index
-  %output_size = index.assume %output_size0 [range(%output_size0, 1, 32768)] : index
-  %c1 = index.constant 1 : index
-  %c63 = index.constant 63 : index
-  %c64 = index.constant 64 : index
-  %c127 = index.constant 127 : index
-  %c128 = index.constant 128 : index
-  %c512 = index.constant 512 : index
-  %padded_output_size = index.add %output_size, %c63 : index
-  %output_tiles = index.div %padded_output_size, %c64 : index
-  %padded_token_count = index.add %token_count, %c127 : index
-  %token_tiles = index.div %padded_token_count, %c128 : index
-  kernel.launch.config workgroups(%output_tiles, %token_tiles, %c1) workgroup_size(%c512, %c1, %c1) : index
-} launch(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer) {
-  %shape_gdn_qkv_size = config.get @qwen.model.gdn_qkv_size : index
+// Canonical Q5_K with contiguous F16 activations/output and explicit K/N.
+// Requires the 512-thread wave32, 64-channel by 128-token grid below.
+// F32 projection accumulators and SwiGLU round once to F16 at publication;
+// token/channel tails and noalias ownership follow the original schedule.
+template.def<@ggml.q5k.gate_up.f16_wmma.c64t128.wave32.owned_output_f16.body> device @ggml_q5k_gate_up_f16_wmma_c64t128_wave32_owned_output_f16_body(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer) {
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
@@ -389,14 +381,10 @@ kernel.def target(@qwen38_ffn_gate_up_q5k_f16_gfx11_wave32) export("qwen38_ffn_g
     %mask = vector.mask.range [%channel0 to %output_size step %c1] : index -> vector<8xi1>
     vector.store.mask %values, %output_view[%bounded_token, %channel0], %mask : vector<8xf16>, view<[%token_count]x[%output_size]xf16>, vector<8xi1>
   }
-  kernel.return
+  template.return
 }
 
-// Paired-wave schedule. Eight subgroups contract gate and eight contract up;
-// matching waves rendezvous through a 128-token by 64-channel F32 LDS tile.
-// This keeps the four-accumulator register footprint of the accepted linear
-// kernel while eliminating the three global gate/up/SwiGLU tensor passes.
-kernel.def target(@qwen38_ffn_gate_up_q5k_f16_gfx11_wave32) export("qwen38_ffn_gate_up_q5k_f16_wmma_c64_t128_wave32_output_f16") @qwen38_ffn_gate_up_q5k_f16_wmma_c64_t128_wave32_output_f16(%token_count0: index, %input_size0: index, %output_size0: index) {
+kernel.def target(@qwen38_ffn_gate_up_q5k_f16_gfx11_wave32) export("qwen38_ffn_gate_up_q5k_f16_wmma_c64_t128_wave32_owned_output_f16") @qwen38_ffn_gate_up_q5k_f16_wmma_c64_t128_wave32_owned_output_f16(%token_count0: index, %input_size0: index, %output_size0: index) {
   %token_count = index.assume %token_count0 [range(%token_count0, 0, 512)] : index
   %input_size = index.assume %input_size0 [range(%input_size0, 256, 32768), multiple_of(%input_size0, 256)] : index
   %output_size = index.assume %output_size0 [range(%output_size0, 1, 32768)] : index
@@ -412,7 +400,19 @@ kernel.def target(@qwen38_ffn_gate_up_q5k_f16_gfx11_wave32) export("qwen38_ffn_g
   %token_tiles = index.div %padded_token_count, %c128 : index
   kernel.launch.config workgroups(%output_tiles, %token_tiles, %c1) workgroup_size(%c512, %c1, %c1) : index
 } launch(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer) {
-  %shape_gdn_qkv_size = config.get @qwen.model.gdn_qkv_size : index
+  template.apply<@ggml.q5k.gate_up.f16_wmma.c64t128.wave32.owned_output_f16.body>(%token_count_data, %input_size0, %output_size0, %input, %gate_weight, %up_weight, %output) : (buffer, index, index, buffer, buffer, buffer, buffer)
+  kernel.return
+}
+
+// Paired-wave schedule. Eight subgroups contract gate and eight contract up;
+// matching waves rendezvous through a 128-token by 64-channel F32 LDS tile.
+// This keeps the four-accumulator register footprint of the accepted linear
+// kernel while eliminating the three global gate/up/SwiGLU tensor passes.
+// Canonical Q5_K with contiguous F16 activations/output and explicit K/N.
+// Requires the 512-thread wave32, 64-channel by 128-token grid below.
+// F32 projection accumulators and SwiGLU round once to F16 at publication;
+// token/channel tails and noalias ownership follow the original schedule.
+template.def<@ggml.q5k.gate_up.f16_wmma.c64t128.wave32.output_f16.body> device @ggml_q5k_gate_up_f16_wmma_c64t128_wave32_output_f16_body(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer) {
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
@@ -723,6 +723,26 @@ kernel.def target(@qwen38_ffn_gate_up_q5k_f16_gfx11_wave32) export("qwen38_ffn_g
       vector.store.mask %values, %output_view[%bounded_token, %global_channel], %mask : vector<8xf16>, view<[%token_count]x[%output_size]xf16>, vector<8xi1>
     }
   }
+  template.return
+}
+
+kernel.def target(@qwen38_ffn_gate_up_q5k_f16_gfx11_wave32) export("qwen38_ffn_gate_up_q5k_f16_wmma_c64_t128_wave32_output_f16") @qwen38_ffn_gate_up_q5k_f16_wmma_c64_t128_wave32_output_f16(%token_count0: index, %input_size0: index, %output_size0: index) {
+  %token_count = index.assume %token_count0 [range(%token_count0, 0, 512)] : index
+  %input_size = index.assume %input_size0 [range(%input_size0, 256, 32768), multiple_of(%input_size0, 256)] : index
+  %output_size = index.assume %output_size0 [range(%output_size0, 1, 32768)] : index
+  %c1 = index.constant 1 : index
+  %c63 = index.constant 63 : index
+  %c64 = index.constant 64 : index
+  %c127 = index.constant 127 : index
+  %c128 = index.constant 128 : index
+  %c512 = index.constant 512 : index
+  %padded_output_size = index.add %output_size, %c63 : index
+  %output_tiles = index.div %padded_output_size, %c64 : index
+  %padded_token_count = index.add %token_count, %c127 : index
+  %token_tiles = index.div %padded_token_count, %c128 : index
+  kernel.launch.config workgroups(%output_tiles, %token_tiles, %c1) workgroup_size(%c512, %c1, %c1) : index
+} launch(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer) {
+  template.apply<@ggml.q5k.gate_up.f16_wmma.c64t128.wave32.output_f16.body>(%token_count_data, %input_size0, %output_size0, %input, %gate_weight, %up_weight, %output) : (buffer, index, index, buffer, buffer, buffer, buffer)
   kernel.return
 }
 

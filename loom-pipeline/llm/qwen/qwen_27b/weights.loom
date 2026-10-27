@@ -3,6 +3,8 @@
 // Licensed under the Apache License v2.0 with LLVM Exceptions.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+config.decl @qwen.model.ffn_gate_weight_bytes : index
+
 func.decl import("prepare") @stage(%root: buffer, %tag: i64) -> (i32)
 
 // Read-only UTF-8 byte strings: "blk.", ".ffn_gate.weight",
@@ -58,7 +60,8 @@ func.def public @prepare_weight(%key: buffer) -> (i64) {
     %prepare = global.load @prepare : buffer
     %tag = scalar.constant 0 : i64
     %stage = func.call @stage(%prepare, %tag) : (buffer, i64) -> (i32)
-    %size = scalar.constant 61276160 : i64
+    %size_index = config.get @qwen.model.ffn_gate_weight_bytes : index
+    %size = index.cast %size_index : index to i64
     scf.yield %size : i64
   } else {
     %size = scalar.constant 0 : i64

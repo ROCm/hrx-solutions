@@ -1,0 +1,349 @@
+kernel.decl @ggml_quantize_q8_1_x4_qk_compat_f32(%capacity: index, %input_size: index) launch(%capacity: index, %input_size: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer, %input: buffer, %output: buffer)
+// Copyright 2026 The IREE Authors
+//
+// Licensed under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+// Model-owned weight bindings use shared numerical implementations.
+// Projection callers supply canonical Q8_1 x4 packed rows and receive F32;
+// normalization and embedding use F32 rows. Activation packing, attention,
+// residuals, cache/stage policy and sampling belong to consumers.
+// Layer/weight encoding is fixed by this exact variant, not a Q4_K_M label.
+config.decl @llama.model.attention_output_weight_bytes : index
+config.decl @llama.model.embedding_weight_bytes : index
+config.decl @llama.model.ffn_down_q4_weight_bytes : index
+config.decl @llama.model.ffn_down_q6_weight_bytes : index
+config.decl @llama.model.ffn_gate_up_weight_bytes : index
+config.decl @llama.model.ffn_size : index
+config.decl @llama.model.hidden_size : index
+config.decl @llama.model.key_weight_bytes : index
+config.decl @llama.model.kv_size : index
+config.decl @llama.model.query_weight_bytes : index
+config.decl @llama.model.norm_weight_bytes : index
+config.decl @llama.model.rms_epsilon : f32
+config.decl @llama.model.v_down_q6_layers : i32
+config.decl @llama.model.value_q4_weight_bytes : index
+config.decl @llama.model.value_q6_weight_bytes : index
+config.decl @llama.model.vocabulary_size : index
+
+kernel.decl @ggml_linear_q4k_q8_1_x4_compat(%capacity: index, %input_size: index, %output_size: index) launch(%capacity: index, %input_size: index, %output_size: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_linear_q6k_q8_1_x4_compat(%capacity: index, %input_size: index, %output_size: index) launch(%capacity: index, %input_size: index, %output_size: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_linear_q4k_q8_1_x4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_linear_q6k_q8_1_x4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
+
+command.program.def public @llama32_project_q(%layer: index, %token_count: index) launch(%parameters: buffer, %packed_input: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %projection_row_origin = index.constant 0 : index
+  %projection_count_origin = index.constant 0 : offset
+  %projection_count = index.cast %token_count : index to i32
+  %input_size = config.get @llama.model.hidden_size : index
+  %output_size = config.get @llama.model.hidden_size : index
+  %weight_bytes = config.get @llama.model.query_weight_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.attn_q.weight"[%layer] : view<[%weight_bytes]xi8>
+  kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %projection_row_origin, %projection_count, %projection_count_origin, %packed_input, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}
+
+command.program.def public @llama32_project_k(%layer: index, %token_count: index) launch(%parameters: buffer, %packed_input: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %projection_row_origin = index.constant 0 : index
+  %projection_count_origin = index.constant 0 : offset
+  %projection_count = index.cast %token_count : index to i32
+  %input_size = config.get @llama.model.hidden_size : index
+  %output_size = config.get @llama.model.kv_size : index
+  %weight_bytes = config.get @llama.model.key_weight_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.attn_k.weight"[%layer] : view<[%weight_bytes]xi8>
+  kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %projection_row_origin, %projection_count, %projection_count_origin, %packed_input, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}
+
+command.program.def public @llama32_project_v(%layer: index, %token_count: index) launch(%parameters: buffer, %packed_input: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %projection_row_origin = index.constant 0 : index
+  %projection_count_origin = index.constant 0 : offset
+  %projection_count = index.cast %token_count : index to i32
+  %input_size = config.get @llama.model.hidden_size : index
+  %output_size = config.get @llama.model.kv_size : index
+  %mask = config.get @llama.model.v_down_q6_layers : i32
+  %layer32 = index.cast %layer : index to i32
+  %one32 = scalar.constant 1 : i32
+  %zero32 = scalar.constant 0 : i32
+  %bit = scalar.shli %one32, %layer32 : i32
+  %selected = scalar.andi %mask, %bit : i32
+  %q6 = scalar.cmpi ne, %selected, %zero32 : i32
+  %q4_bytes = config.get @llama.model.value_q4_weight_bytes : index
+  %q6_bytes = config.get @llama.model.value_q6_weight_bytes : index
+  %weight_bytes = scf.select %q6, %q6_bytes, %q4_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.attn_v.weight"[%layer] : view<[%weight_bytes]xi8>
+  scf.if %q6 {
+    kernel.launch @ggml_linear_q6k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %projection_row_origin, %projection_count, %projection_count_origin, %packed_input, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+    scf.yield
+  } else {
+    kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %projection_row_origin, %projection_count, %projection_count_origin, %packed_input, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+    scf.yield
+  }
+  command.return
+}
+
+command.program.def public @llama32_project_attention_output(%layer: index, %token_count: index) launch(%parameters: buffer, %packed_input: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %projection_row_origin = index.constant 0 : index
+  %projection_count_origin = index.constant 0 : offset
+  %projection_count = index.cast %token_count : index to i32
+  %input_size = config.get @llama.model.hidden_size : index
+  %output_size = config.get @llama.model.hidden_size : index
+  %weight_bytes = config.get @llama.model.attention_output_weight_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.attn_output.weight"[%layer] : view<[%weight_bytes]xi8>
+  kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %projection_row_origin, %projection_count, %projection_count_origin, %packed_input, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}
+
+command.program.def public @llama32_project_ffn_gate(%layer: index, %token_count: index) launch(%parameters: buffer, %packed_input: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %projection_row_origin = index.constant 0 : index
+  %projection_count_origin = index.constant 0 : offset
+  %projection_count = index.cast %token_count : index to i32
+  %input_size = config.get @llama.model.hidden_size : index
+  %output_size = config.get @llama.model.ffn_size : index
+  %weight_bytes = config.get @llama.model.ffn_gate_up_weight_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.ffn_gate.weight"[%layer] : view<[%weight_bytes]xi8>
+  kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %projection_row_origin, %projection_count, %projection_count_origin, %packed_input, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}
+
+command.program.def public @llama32_project_ffn_up(%layer: index, %token_count: index) launch(%parameters: buffer, %packed_input: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %projection_row_origin = index.constant 0 : index
+  %projection_count_origin = index.constant 0 : offset
+  %projection_count = index.cast %token_count : index to i32
+  %input_size = config.get @llama.model.hidden_size : index
+  %output_size = config.get @llama.model.ffn_size : index
+  %weight_bytes = config.get @llama.model.ffn_gate_up_weight_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.ffn_up.weight"[%layer] : view<[%weight_bytes]xi8>
+  kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %projection_row_origin, %projection_count, %projection_count_origin, %packed_input, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}
+
+command.program.def public @llama32_project_ffn_down(%layer: index, %token_count: index) launch(%parameters: buffer, %packed_input: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %projection_row_origin = index.constant 0 : index
+  %projection_count_origin = index.constant 0 : offset
+  %projection_count = index.cast %token_count : index to i32
+  %input_size = config.get @llama.model.ffn_size : index
+  %output_size = config.get @llama.model.hidden_size : index
+  %mask = config.get @llama.model.v_down_q6_layers : i32
+  %layer32 = index.cast %layer : index to i32
+  %one32 = scalar.constant 1 : i32
+  %zero32 = scalar.constant 0 : i32
+  %bit = scalar.shli %one32, %layer32 : i32
+  %selected = scalar.andi %mask, %bit : i32
+  %q6 = scalar.cmpi ne, %selected, %zero32 : i32
+  %q4_bytes = config.get @llama.model.ffn_down_q4_weight_bytes : index
+  %q6_bytes = config.get @llama.model.ffn_down_q6_weight_bytes : index
+  %weight_bytes = scf.select %q6, %q6_bytes, %q4_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.ffn_down.weight"[%layer] : view<[%weight_bytes]xi8>
+  scf.if %q6 {
+    kernel.launch @ggml_linear_q6k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %projection_row_origin, %projection_count, %projection_count_origin, %packed_input, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+    scf.yield
+  } else {
+    kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %projection_row_origin, %projection_count, %projection_count_origin, %packed_input, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+    scf.yield
+  }
+  command.return
+}
+
+command.program.def public @llama32_project_output(%token_count: index) launch(%parameters: buffer, %packed_input: buffer, %output: buffer) where [range(%token_count, 1, 2048)] {
+  %projection_row_origin = index.constant 0 : index
+  %projection_count_origin = index.constant 0 : offset
+  %projection_count = index.cast %token_count : index to i32
+  %input_size = config.get @llama.model.hidden_size : index
+  %output_size = config.get @llama.model.vocabulary_size : index
+  %weight_bytes = config.get @llama.model.embedding_weight_bytes : index
+  %weight = command.parameter %parameters, "token_embd.weight" : view<[%weight_bytes]xi8>
+  kernel.launch @ggml_linear_q6k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %projection_row_origin, %projection_count, %projection_count_origin, %packed_input, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}
+
+// Llama lookup uses the true-F32 shared Q6 row contract. Qwen's F16-rounded
+// row implementation remains separate. This adapter supplies only row geometry,
+// valid token bounds and a 256-workitem launch for the shared row computation.
+template.decl @llm.token_embedding_q6k_f32.row(%hidden_size: index, %embedding_row_bytes: index, %token_id_i32: i32, %output_byte_offset: offset, %weight: buffer, %output: buffer)
+
+kernel.def export("llama32_token_embedding_q6k_f32") @llama32_token_embedding_q6k_f32(%token_count0: index) {
+  %token_count = index.assume %token_count0 [range(%token_count0, 1, 2048)] : index
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  kernel.launch.config workgroups(%token_count, %one, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%token_count0: index, %token_ids: buffer, %weight: buffer, %output: buffer) {
+  %token_count = index.assume %token_count0 [range(%token_count0, 1, 2048)] : index
+  %hidden_size = config.get @llama.model.hidden_size : index
+  %vocabulary = config.get @llama.model.vocabulary_size : index
+  %block_values = index.constant 256 : index
+  %block_bytes = index.constant 210 : index
+  %blocks = index.div %hidden_size, %block_values : index
+  %embedding_row_bytes = index.mul %blocks, %block_bytes : index
+  %row_value = kernel.workgroup.id<x> : index
+  %row = index.assume %row_value [range(%row_value, 0, 2047), lt(%row_value, %token_count)] : index
+  %origin = index.constant 0 : offset
+  %word_bytes = index.constant 4 : offset
+  %row_bytes = index.scale %hidden_size, %word_bytes : index, offset -> offset
+  %output_origin = index.scale %row, %row_bytes : index, offset -> offset
+  %ids = buffer.view %token_ids[%origin] : buffer -> view<[%token_count]xi32>
+  %id32 = view.load %ids[%row] : view<[%token_count]xi32> -> i32
+  %id_value = index.cast %id32 : i32 to index
+  %id = index.assume %id_value [range(%id_value, 0, 128255), lt(%id_value, %vocabulary)] : index
+  %bounded_id = index.cast %id : index to i32
+  template.apply<@llm.token_embedding_q6k_f32.row>(%hidden_size, %embedding_row_bytes, %bounded_id, %output_origin, %weight, %output) : (index, index, i32, offset, buffer, buffer)
+  kernel.return
+}
+
+// T=1 serves decode; a prepared known-input stage passes its explicit T.
+command.program.def public @llama32_embedding(%token_count: index) launch(%parameters: buffer, %token_ids: buffer, %residual: buffer) where [range(%token_count, 1, 2048)] {
+  %weight_bytes = config.get @llama.model.embedding_weight_bytes : index
+  %weight = command.parameter %parameters, "token_embd.weight" : view<[%weight_bytes]xi8>
+  kernel.launch @llama32_token_embedding_q6k_f32[%token_count](%token_count, %token_ids, %weight, %residual) : [index](index, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}
+
+// The shared row owns weighted RMS arithmetic and its reduction order. The
+// model supplies epsilon, width/divisor, row offsets and raw F32 gamma bindings.
+// Input, gamma and output must be disjoint, as required by the shared body.
+template.decl @llm.rmsnorm.row(%hidden_size0: index, %element_count_f32: f32, %input_row_count: index, %input_row: index, %output_origin: offset, %output_is_f16: i1, %epsilon: f32, %input: buffer, %weight: buffer, %output: buffer)
+
+kernel.def export("llama32_rmsnorm_f32") @llama32_rmsnorm_f32(%token_count0: index) {
+  %token_count = index.assume %token_count0 [range(%token_count0, 1, 2048)] : index
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  kernel.launch.config workgroups(%one, %token_count, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%token_count0: index, %input: buffer, %weight: buffer, %output: buffer) {
+  %token_count = index.assume %token_count0 [range(%token_count0, 1, 2048)] : index
+  %hidden_size = config.get @llama.model.hidden_size : index
+  %width32 = index.cast %hidden_size : index to i32
+  %divisor = scalar.uitofp %width32 : i32 to f32
+  %epsilon = config.get @llama.model.rms_epsilon : f32
+  %row_value = kernel.workgroup.id<y> : index
+  %row = index.assume %row_value [range(%row_value, 0, 2047), lt(%row_value, %token_count)] : index
+  %word_bytes = index.constant 4 : offset
+  %row_bytes = index.scale %hidden_size, %word_bytes : index, offset -> offset
+  %output_origin = index.scale %row, %row_bytes : index, offset -> offset
+  %half_output = scalar.constant false : i1
+  template.apply<@llm.rmsnorm.row>(%hidden_size, %divisor, %token_count, %row, %output_origin, %half_output, %epsilon, %input, %weight, %output) : (index, f32, index, index, offset, i1, f32, buffer, buffer, buffer)
+  kernel.return
+}
+
+command.program.def public @llama32_attention_norm(%layer: index, %token_count: index) launch(%parameters: buffer, %input: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %weight_bytes = config.get @llama.model.norm_weight_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.attn_norm.weight"[%layer] : view<[%weight_bytes]xi8>
+  kernel.launch @llama32_rmsnorm_f32[%token_count](%token_count, %input, %weight, %output) : [index](index, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}
+
+command.program.def public @llama32_ffn_norm(%layer: index, %token_count: index) launch(%parameters: buffer, %input: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %weight_bytes = config.get @llama.model.norm_weight_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.ffn_norm.weight"[%layer] : view<[%weight_bytes]xi8>
+  kernel.launch @llama32_rmsnorm_f32[%token_count](%token_count, %input, %weight, %output) : [index](index, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}
+
+command.program.def public @llama32_output_norm(%token_count: index) launch(%parameters: buffer, %input: buffer, %output: buffer) where [range(%token_count, 1, 2048)] {
+  %weight_bytes = config.get @llama.model.norm_weight_bytes : index
+  %weight = command.parameter %parameters, "output_norm.weight" : view<[%weight_bytes]xi8>
+  kernel.launch @llama32_rmsnorm_f32[%token_count](%token_count, %input, %weight, %output) : [index](index, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}
+
+// Model-owned active-count adapters; decode count is fixed independently of position.
+command.program.def public @llama32_quantize_q8_controlled(%capacity: index, %input_size: index, %row_origin: index, %count_origin: offset, %kind: index) launch(%input: buffer, %control: buffer, %output: buffer) where [range(%capacity, 1, 2048)] {
+  %decode_kind = index.constant 1 : index
+  %decode = index.cmp eq, %kind, %decode_kind : index
+  %fixed_count = scf.if %decode -> (i32) {
+    %one = scalar.constant 1 : i32
+    scf.yield %one : i32
+  } else {
+    %from_view = scalar.constant -1 : i32
+    scf.yield %from_view : i32
+  }
+  kernel.launch @ggml_quantize_q8_1_x4_qk_compat_f32[%capacity, %input_size](%capacity, %input_size, %row_origin, %fixed_count, %count_origin, %control, %input, %output) : [index, index](index, index, index, i32, offset, buffer, buffer, buffer)
+  command.return
+}
+
+command.program.def public @llama32_project_q_controlled(%layer: index, %token_count: index, %row_origin: index, %count_origin: offset, %kind: index) launch(%parameters: buffer, %packed_input: buffer, %control: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %decode_kind = index.constant 1 : index
+  %decode = index.cmp eq, %kind, %decode_kind : index
+  %fixed_count = scf.if %decode -> (i32) {
+    %one = scalar.constant 1 : i32
+    scf.yield %one : i32
+  } else {
+    %from_view = scalar.constant -1 : i32
+    scf.yield %from_view : i32
+  }
+  %input_size = config.get @llama.model.hidden_size : index
+  %output_size = config.get @llama.model.hidden_size : index
+  %weight_bytes = config.get @llama.model.query_weight_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.attn_q.weight"[%layer] : view<[%weight_bytes]xi8>
+  kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %row_origin, %fixed_count, %count_origin, %control, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}
+
+command.program.def public @llama32_project_k_controlled(%layer: index, %token_count: index, %row_origin: index, %count_origin: offset, %kind: index) launch(%parameters: buffer, %packed_input: buffer, %control: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %decode_kind = index.constant 1 : index
+  %decode = index.cmp eq, %kind, %decode_kind : index
+  %fixed_count = scf.if %decode -> (i32) {
+    %one = scalar.constant 1 : i32
+    scf.yield %one : i32
+  } else {
+    %from_view = scalar.constant -1 : i32
+    scf.yield %from_view : i32
+  }
+  %input_size = config.get @llama.model.hidden_size : index
+  %output_size = config.get @llama.model.kv_size : index
+  %weight_bytes = config.get @llama.model.key_weight_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.attn_k.weight"[%layer] : view<[%weight_bytes]xi8>
+  kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %row_origin, %fixed_count, %count_origin, %control, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}
+
+command.program.def public @llama32_project_v_controlled(%layer: index, %token_count: index, %row_origin: index, %count_origin: offset, %kind: index) launch(%parameters: buffer, %packed_input: buffer, %control: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %decode_kind = index.constant 1 : index
+  %decode = index.cmp eq, %kind, %decode_kind : index
+  %fixed_count = scf.if %decode -> (i32) {
+    %one = scalar.constant 1 : i32
+    scf.yield %one : i32
+  } else {
+    %from_view = scalar.constant -1 : i32
+    scf.yield %from_view : i32
+  }
+  %input_size = config.get @llama.model.hidden_size : index
+  %output_size = config.get @llama.model.kv_size : index
+  %mask = config.get @llama.model.v_down_q6_layers : i32
+  %layer32 = index.cast %layer : index to i32
+  %one32 = scalar.constant 1 : i32
+  %zero32 = scalar.constant 0 : i32
+  %bit = scalar.shli %one32, %layer32 : i32
+  %selected = scalar.andi %mask, %bit : i32
+  %q6 = scalar.cmpi ne, %selected, %zero32 : i32
+  %q4_bytes = config.get @llama.model.value_q4_weight_bytes : index
+  %q6_bytes = config.get @llama.model.value_q6_weight_bytes : index
+  %weight_bytes = scf.select %q6, %q6_bytes, %q4_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.attn_v.weight"[%layer] : view<[%weight_bytes]xi8>
+  scf.if %q6 {
+    kernel.launch @ggml_linear_q6k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %row_origin, %fixed_count, %count_origin, %control, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+    scf.yield
+  } else {
+    kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %row_origin, %fixed_count, %count_origin, %control, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+    scf.yield
+  }
+  command.return
+}
+
+command.program.def public @llama32_project_attention_output_controlled(%layer: index, %token_count: index, %row_origin: index, %count_origin: offset, %kind: index) launch(%parameters: buffer, %packed_input: buffer, %control: buffer, %output: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 2048)] {
+  %decode_kind = index.constant 1 : index
+  %decode = index.cmp eq, %kind, %decode_kind : index
+  %fixed_count = scf.if %decode -> (i32) {
+    %one = scalar.constant 1 : i32
+    scf.yield %one : i32
+  } else {
+    %from_view = scalar.constant -1 : i32
+    scf.yield %from_view : i32
+  }
+  %input_size = config.get @llama.model.hidden_size : index
+  %output_size = config.get @llama.model.hidden_size : index
+  %weight_bytes = config.get @llama.model.attention_output_weight_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.attn_output.weight"[%layer] : view<[%weight_bytes]xi8>
+  kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %input_size, %output_size](%token_count, %input_size, %output_size, %row_origin, %fixed_count, %count_origin, %control, %packed_input, %weight, %output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%weight_bytes]xi8>, buffer)
+  command.return
+}

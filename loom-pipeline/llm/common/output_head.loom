@@ -1,0 +1,99 @@
+kernel.decl @ggml_quantize_q8_1_x4_qk_compat_f32(%capacity: index, %input_size: index) launch(%capacity: index, %input_size: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer, %input: buffer, %output: buffer)
+kernel.decl @ggml_linear_q6k_q8_1_x4_compat(%capacity: index, %input_size: index, %output_size: index) launch(%capacity: index, %input_size: index, %output_size: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer, %input: buffer, %weight: buffer, %output: buffer)
+// Shared deterministic output sequence for canonical Q6_K weights.
+// Model adapters bind tied/untied weights and normalization. Explicit F32 row
+// geometry, packed strides and a static schedule choice own this composition.
+// Grouped projection preserves qualified Qwen32/8/m4 cohorts; generic projection
+// supports the selected Llama shape without implying arbitrary tuned support.
+// T is1..64, H is a full K256 width, and partial-row bytes are ceil(V/4096)*4.
+// Normalized input, immutable weights and output IDs are disjoint; logits and
+// packing/reduction scratch are transient command-local storage.
+kernel.decl @ggml_quantize_q8_1_x4_f32(%token_count: index, %input_size: index) launch(%token_count: index, %input_size: index, %input: buffer, %output: buffer)
+kernel.decl @ggml_linear_q6k_q8_1_x4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_linear_q6k_q8_1_x4_m4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_output_projection_q6k_m8(%vocabulary_size: index) launch(%input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_output_projection_q6k_m32(%vocabulary_size: index) launch(%input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_greedy_argmax_partial_rows_f32(%token_count: index, %output_size: index) launch(%token_count: index, %output_size: index, %logits: buffer, %partial_logits: buffer, %partial_token_ids: buffer)
+kernel.decl @qwen38_greedy_argmax_reduce_rows_f32(%token_count: index, %output_size: index) launch(%token_count: index, %output_size: index, %partial_logits: buffer, %partial_token_ids: buffer, %token_ids: buffer)
+
+template.decl @llm.output.project_greedy(%token_count: index, %normalized_origin: offset, %output_origin: offset, %shape_hidden_size: index, %shape_vocabulary_size: index, %shape_argmax_partial_row_bytes: index, %shape_hidden_q8_row_bytes: index, %shape_logits_row_bytes: index, %shape_output_weight_bytes: index, %use_grouped_projection: i1, %use_mmvq_compat: i1, %output_weight: view<[%shape_output_weight_bytes]xi8>, %normalized: buffer, %token_id: buffer)
+
+template.def<@llm.output.project_greedy> @llm_output_project_greedy(%token_count: index, %normalized_origin: offset, %output_origin: offset, %shape_hidden_size: index, %shape_vocabulary_size: index, %shape_argmax_partial_row_bytes: index, %shape_hidden_q8_row_bytes: index, %shape_logits_row_bytes: index, %shape_output_weight_bytes: index, %use_grouped_projection: i1, %use_mmvq_compat: i1, %output_weight: view<[%shape_output_weight_bytes]xi8>, %normalized: buffer, %token_id: buffer) {
+  %hidden_q8_row_bytes = index.cast %shape_hidden_q8_row_bytes : index to offset
+  %logits_row_bytes = index.cast %shape_logits_row_bytes : index to offset
+  %partial_row_bytes = index.cast %shape_argmax_partial_row_bytes : index to offset
+  %hidden_q8_bytes = index.scale %token_count, %hidden_q8_row_bytes : index, offset -> offset
+  %logits_bytes = index.scale %token_count, %logits_row_bytes : index, offset -> offset
+  %partial_bytes = index.scale %token_count, %partial_row_bytes : index, offset -> offset
+  %normalized_q8 = buffer.alloca<global> align(256) %hidden_q8_bytes : buffer
+  %logits = buffer.alloca<global> align(256) %logits_bytes : buffer
+  %partial_logits = buffer.alloca<global> align(256) %partial_bytes : buffer
+  %partial_token_ids = buffer.alloca<global> align(256) %partial_bytes : buffer
+  %normalized_rows = buffer.view %normalized[%normalized_origin] : buffer -> view<[%token_count]x[%shape_hidden_size]xf32>
+  %output_rows = buffer.view %token_id[%output_origin] : buffer -> view<[%token_count]xi32>
+
+  scf.if %use_mmvq_compat {
+    %quantize_row_origin = index.constant 0 : index
+    %quantize_count_origin = index.constant 0 : offset
+    %quantize_count = index.cast %token_count : index to i32
+    kernel.launch @ggml_quantize_q8_1_x4_qk_compat_f32[%token_count, %shape_hidden_size](%token_count, %shape_hidden_size, %quantize_row_origin, %quantize_count, %quantize_count_origin, %normalized, %normalized_rows, %normalized_q8) : [index, index](index, index, index, i32, offset, buffer, view<[%token_count]x[%shape_hidden_size]xf32>, buffer)
+  } else {
+    kernel.launch @ggml_quantize_q8_1_x4_f32[%token_count, %shape_hidden_size](%token_count, %shape_hidden_size, %normalized_rows, %normalized_q8) : [index, index](index, index, view<[%token_count]x[%shape_hidden_size]xf32>, buffer)
+  }
+  scf.if %use_grouped_projection {
+    %zero = index.constant 0 : index
+    %one = index.constant 1 : index
+    %four = index.constant 4 : index
+    %eight = index.constant 8 : index
+    %thirty_two = index.constant 32 : index
+    %wide_groups = index.div %token_count, %thirty_two : index
+    %wide_rows = index.mul %wide_groups, %thirty_two : index
+    scf.for %group = [%zero to %wide_groups step %one] unroll {
+      %row = index.mul %group, %thirty_two : index
+      %input_origin = index.scale %row, %hidden_q8_row_bytes : index, offset -> offset
+      %logits_origin = index.scale %row, %logits_row_bytes : index, offset -> offset
+      %input_group = buffer.view %normalized_q8[%input_origin] : buffer -> view<32x[%shape_hidden_q8_row_bytes]xi8>
+      %logits_group = buffer.view %logits[%logits_origin] : buffer -> view<32x[%shape_vocabulary_size]xf32>
+      kernel.launch @qwen38_output_projection_q6k_m32[%shape_vocabulary_size](%input_group, %output_weight, %logits_group) : [index](view<32x[%shape_hidden_q8_row_bytes]xi8>, view<[%shape_output_weight_bytes]xi8>, view<32x[%shape_vocabulary_size]xf32>)
+    }
+    %remaining_rows = index.sub %token_count, %wide_rows : index
+    %groups = index.div %remaining_rows, %eight : index
+    scf.for %group = [%zero to %groups step %one] unroll {
+      %relative_row = index.mul %group, %eight : index
+      %row = index.add %wide_rows, %relative_row : index
+      %input_origin = index.scale %row, %hidden_q8_row_bytes : index, offset -> offset
+      %logits_origin = index.scale %row, %logits_row_bytes : index, offset -> offset
+      %input_group = buffer.view %normalized_q8[%input_origin] : buffer -> view<8x[%shape_hidden_q8_row_bytes]xi8>
+      %logits_group = buffer.view %logits[%logits_origin] : buffer -> view<8x[%shape_vocabulary_size]xf32>
+      kernel.launch @qwen38_output_projection_q6k_m8[%shape_vocabulary_size](%input_group, %output_weight, %logits_group) : [index](view<8x[%shape_hidden_q8_row_bytes]xi8>, view<[%shape_output_weight_bytes]xi8>, view<8x[%shape_vocabulary_size]xf32>)
+    }
+    %grouped_rows = index.mul %groups, %eight : index
+    %tail_begin = index.add %wide_rows, %grouped_rows : index
+    scf.for %row = [%tail_begin to %token_count step %four] unroll {
+      %remaining = index.sub %token_count, %row : index
+      %count = index.min %remaining, %four : index
+      %input_origin = index.scale %row, %hidden_q8_row_bytes : index, offset -> offset
+      %logits_origin = index.scale %row, %logits_row_bytes : index, offset -> offset
+      %input_group = buffer.view %normalized_q8[%input_origin] : buffer -> view<[%count]x[%shape_hidden_q8_row_bytes]xi8>
+      %logits_group = buffer.view %logits[%logits_origin] : buffer -> view<[%count]x[%shape_vocabulary_size]xf32>
+      %uses_m4 = index.cmp eq, %count, %four : index
+      scf.if %uses_m4 {
+        kernel.launch @ggml_linear_q6k_q8_1_x4_m4[%count, %shape_hidden_size, %shape_vocabulary_size](%count, %shape_hidden_size, %shape_vocabulary_size, %input_group, %output_weight, %logits_group) : [index, index, index](index, index, index, view<[%count]x[%shape_hidden_q8_row_bytes]xi8>, view<[%shape_output_weight_bytes]xi8>, view<[%count]x[%shape_vocabulary_size]xf32>)
+      } else {
+        kernel.launch @ggml_linear_q6k_q8_1_x4[%count, %shape_hidden_size, %shape_vocabulary_size](%count, %shape_hidden_size, %shape_vocabulary_size, %input_group, %output_weight, %logits_group) : [index, index, index](index, index, index, view<[%count]x[%shape_hidden_q8_row_bytes]xi8>, view<[%shape_output_weight_bytes]xi8>, view<[%count]x[%shape_vocabulary_size]xf32>)
+      }
+    }
+  } else {
+    scf.if %use_mmvq_compat {
+      %projection_row_origin = index.constant 0 : index
+      %projection_count_origin = index.constant 0 : offset
+      %projection_count = index.cast %token_count : index to i32
+      kernel.launch @ggml_linear_q6k_q8_1_x4_compat[%token_count, %shape_hidden_size, %shape_vocabulary_size](%token_count, %shape_hidden_size, %shape_vocabulary_size, %projection_row_origin, %projection_count, %projection_count_origin, %normalized_q8, %normalized_q8, %output_weight, %logits) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_output_weight_bytes]xi8>, buffer)
+    } else {
+      kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %shape_hidden_size, %shape_vocabulary_size](%token_count, %shape_hidden_size, %shape_vocabulary_size, %normalized_q8, %output_weight, %logits) : [index, index, index](index, index, index, buffer, view<[%shape_output_weight_bytes]xi8>, buffer)
+    }
+  }
+  kernel.launch @qwen38_greedy_argmax_partial_rows_f32[%token_count, %shape_vocabulary_size](%token_count, %shape_vocabulary_size, %logits, %partial_logits, %partial_token_ids) : [index, index](index, index, buffer, buffer, buffer)
+  kernel.launch @qwen38_greedy_argmax_reduce_rows_f32[%token_count, %shape_vocabulary_size](%token_count, %shape_vocabulary_size, %partial_logits, %partial_token_ids, %output_rows) : [index, index](index, index, buffer, buffer, view<[%token_count]xi32>)
+  template.return
+}

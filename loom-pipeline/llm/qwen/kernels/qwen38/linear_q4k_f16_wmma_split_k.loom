@@ -1,3 +1,5 @@
+template.decl @ggml.q4k.f16_wmma.split_k_5120x48.body(%partial_split_bytes: offset, %token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %partials: buffer)
+
 // Model geometry is supplied by the selected architecture catalog.
 config.decl @qwen.model.embedding_chunks : index
 config.decl @qwen.model.gdn_gate_capacity_bytes : index
@@ -59,21 +61,10 @@ func.def inline @qwen38_q4k_f16_vector4_prescaled(%weight: buffer, %row_byte_bas
 
 amdgpu.target<gfx11-generic> @qwen38_q4k_gfx11_wave64_split_k {subgroup_size = 64}
 
-kernel.def target(@qwen38_q4k_gfx11_wave64_split_k) export("qwen38_linear_q4k_f16_wmma_beta_split_k") @qwen38_linear_q4k_f16_wmma_beta_split_k(%token_count0: index, %input_size0: index, %output_size0: index) {
-  %token_count = index.assume %token_count0 [range(%token_count0, 0, 512)] : index
-  %input_size = index.assume %input_size0 [range(%input_size0, 5120, 5120)] : index
-  %output_size = index.assume %output_size0 [range(%output_size0, 48, 48)] : index
-  %c1 = index.constant 1 : index
-  %c7 = index.constant 7 : index
-  %c31 = index.constant 31 : index
-  %c32 = index.constant 32 : index
-  %c256 = index.constant 256 : index
-  %padded_token_count = index.add %token_count, %c31 : index
-  %token_tiles = index.div %padded_token_count, %c32 : index
-  kernel.launch.config workgroups(%c1, %token_tiles, %c7) workgroup_size(%c256, %c1, %c1) : index
-} launch(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %partials: buffer) {
-  %shape_gdn_gate_capacity_bytes = config.get @qwen.model.gdn_gate_capacity_bytes : index
-  %shape_hidden_size = config.get @qwen.model.hidden_size : index
+// Canonical Q4_K, K5120/N48, seven ordered split planes. The caller supplies
+// the plane stride and the existing 256-thread wave64 grid; input is F16.
+// Weights round to F16 before WMMA; partials accumulate/store in F32.
+template.def<@ggml.q4k.f16_wmma.split_k_5120x48.body> device @ggml_q4k_f16_wmma_split_k_5120x48_body(%partial_split_bytes: offset, %token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %partials: buffer) {
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
@@ -96,7 +87,6 @@ kernel.def target(@qwen38_q4k_gfx11_wave64_split_k) export("qwen38_linear_q4k_f1
   %metadata_stage_bytes = index.constant 4096 : offset
   %wave_result_stage_bytes = index.constant 1024 : offset
   %result_stage_bytes = index.constant 4096 : offset
-  %partial_split_bytes = index.cast %shape_gdn_gate_capacity_bytes : index to offset
   %c0_f16x4 = vector.constant 0.0 : vector<4xf16>
   %c0_f16x2 = vector.constant 0.0 : vector<2xf16>
   %c0_f32x2 = vector.constant 0.0 : vector<2xf32>
@@ -128,7 +118,7 @@ kernel.def target(@qwen38_q4k_gfx11_wave64_split_k) export("qwen38_linear_q4k_f1
   %subgroup_channel_add = index.mul %subgroup, %c16 : index
   %partial_offset = index.scale %split_index, %partial_split_bytes : index, offset -> offset
   %input_noalias, %weight_noalias, %partials_noalias = buffer.assume.noalias %input, %weight, %partials : buffer, buffer, buffer
-  %input_view = buffer.view %input_noalias[%c0_offset] : buffer -> view<[%token_count]x[%shape_hidden_size]xf16>
+  %input_view = buffer.view %input_noalias[%c0_offset] : buffer -> view<[%token_count]x[%input_size]xf16>
   %partial_view = buffer.view %partials_noalias[%partial_offset] : buffer -> view<512x48xf32>
   %weight_stage = buffer.alloca<workgroup> align(16) %weight_stage_bytes : buffer
   %activation_stage = buffer.alloca<workgroup> align(16) %activation_stage_bytes : buffer
@@ -209,7 +199,7 @@ kernel.def target(@qwen38_q4k_gfx11_wave64_split_k) export("qwen38_linear_q4k_f1
         %valid_input_token = index.cmp ult, %input_token0, %token_count : index
         %activation_values = scf.if %valid_input_token -> (vector<2xf16>) {
           %input_token = index.assume %input_token0 [lt(%input_token0, %token_count)] : index
-          %loaded = vector.load %input_view[%input_token, %input_k] : view<[%token_count]x[%shape_hidden_size]xf16> -> vector<2xf16>
+          %loaded = vector.load %input_view[%input_token, %input_k] : view<[%token_count]x[%input_size]xf16> -> vector<2xf16>
           scf.yield %loaded : vector<2xf16>
         } else {
           scf.yield %c0_f16x2 : vector<2xf16>
@@ -262,6 +252,25 @@ kernel.def target(@qwen38_q4k_gfx11_wave64_split_k) export("qwen38_linear_q4k_f1
     %values1 = vector.load %result_physical_view[%publish_token, %publish_channel_add] : view<16x16xf32> -> vector<4xf32>
     vector.store %values1, %partial_view[%output_token1, %channel] : vector<4xf32>, view<512x48xf32>
   }
+  template.return
+}
+
+kernel.def target(@qwen38_q4k_gfx11_wave64_split_k) export("qwen38_linear_q4k_f16_wmma_beta_split_k") @qwen38_linear_q4k_f16_wmma_beta_split_k(%token_count0: index, %input_size0: index, %output_size0: index) {
+  %token_count = index.assume %token_count0 [range(%token_count0, 0, 512)] : index
+  %input_size = index.assume %input_size0 [range(%input_size0, 5120, 5120)] : index
+  %output_size = index.assume %output_size0 [range(%output_size0, 48, 48)] : index
+  %c1 = index.constant 1 : index
+  %c7 = index.constant 7 : index
+  %c31 = index.constant 31 : index
+  %c32 = index.constant 32 : index
+  %c256 = index.constant 256 : index
+  %padded_token_count = index.add %token_count, %c31 : index
+  %token_tiles = index.div %padded_token_count, %c32 : index
+  kernel.launch.config workgroups(%c1, %token_tiles, %c7) workgroup_size(%c256, %c1, %c1) : index
+} launch(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %partials: buffer) {
+  %shape_gdn_gate_capacity_bytes = config.get @qwen.model.gdn_gate_capacity_bytes : index
+  %partial_split_bytes = index.cast %shape_gdn_gate_capacity_bytes : index to offset
+  template.apply<@ggml.q4k.f16_wmma.split_k_5120x48.body>(%partial_split_bytes, %token_count_data, %input_size0, %output_size0, %input, %weight, %partials) : (offset, buffer, index, index, buffer, buffer, buffer)
   kernel.return
 }
 

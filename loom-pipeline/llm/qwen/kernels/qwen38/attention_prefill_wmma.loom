@@ -27,9 +27,12 @@ func.decl @qwen38_kv_position(%logical_capacity: index, %map: buffer, %map_origi
 
 template.decl @qwen38.attention.wmma(%logical_capacity: index, %query_tile: index, %query_head: index, %workitem: index, %subgroup: index, %lane: index, %control: buffer, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer, %control_origin: offset, %token_begin: index, %key_cache_origin: offset, %value_cache_origin: offset, %map: buffer, %map_origin: offset, %pool_capacity: index)
 
-template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capacity: index, %query_tile: index, %query_head: index, %workitem: index, %subgroup: index, %lane: index, %control: buffer, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer, %control_origin: offset, %token_begin: index, %key_cache_origin: offset, %value_cache_origin: offset, %map: buffer, %map_origin: offset, %pool_capacity: index) {
-  %shape_kv_size = config.get @qwen.model.kv_size : index
-  %shape_attention_width = config.get @qwen.model.attention_width : index
+// H256/256-thread WMMA schedule with F16 staging and F16-rounded result.
+// 16 query rows per tile, 64 cache rows per iteration; packed/paged cache
+// addressing, causal positions and gate multiplication match the adapter ABI.
+template.decl @llm.attention.prefill_wmma_h256(%shape_kv_size: index, %shape_attention_width: index, %query_heads: index, %key_heads: index, %c256: index, %attention_scale: f32, %logical_capacity: index, %query_tile: index, %query_head: index, %workitem: index, %subgroup: index, %lane: index, %control: buffer, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer, %control_origin: offset, %token_begin: index, %key_cache_origin: offset, %value_cache_origin: offset, %map: buffer, %map_origin: offset, %pool_capacity: index)
+
+template.def<@llm.attention.prefill_wmma_h256> device @llm_attention_prefill_wmma_h256(%shape_kv_size: index, %shape_attention_width: index, %query_heads: index, %key_heads: index, %c256: index, %attention_scale: f32, %logical_capacity: index, %query_tile: index, %query_head: index, %workitem: index, %subgroup: index, %lane: index, %control: buffer, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer, %control_origin: offset, %token_begin: index, %key_cache_origin: offset, %value_cache_origin: offset, %map: buffer, %map_origin: offset, %pool_capacity: index) where [eq(%c256, 256)] {
   %zero = index.constant 0 : index
   %paged = index.cmp ne, %pool_capacity, %zero : index
   %physical_capacity = scf.select %paged, %pool_capacity, %logical_capacity : index
@@ -38,13 +41,10 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
   %c2 = index.constant 2 : index
   %c3 = index.constant 3 : index
   %c4 = index.constant 4 : index
-  %query_heads = config.get @qwen.model.attention_heads : index
-  %key_heads = config.get @qwen.model.kv_heads : index
   %queries_per_kv = index.div %query_heads, %key_heads : index
   %c15 = index.constant 15 : index
   %c16 = index.constant 16 : index
   %c64 = index.constant 64 : index
-  %c256 = config.get @qwen.model.head_size : index
 
   %c0_offset = index.constant 0 : offset
   %query_stage_bytes = index.constant 8448 : offset
@@ -54,7 +54,6 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
   %tail_key_value_stage_bytes = index.constant 8192 : offset
   %c0_f16 = scalar.constant 0.0 : f16
   %c1_f32 = scalar.constant 1.0 : f32
-  %attention_scale = config.get @qwen.model.attention_scale : f32
   %negative_large = scalar.constant -1e+30 : f32
   %output_zero0 = vector.constant 0.0 : vector<4xf16>
   %output_zero1 = vector.constant 0.0 : vector<4xf16>
@@ -454,6 +453,17 @@ template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capa
     %gated = vector.mulf<nnan|ninf|nsz> %normalized3, %gate_values : vector<4xf32>
     vector.store %gated, %output_view[%bounded_query_token, %output_channel] : vector<4xf32>, view<[%token_count]x[%shape_attention_width]xf32>
   }
+  template.return
+}
+
+template.def<@qwen38.attention.wmma> device @qwen38_attention_wmma(%logical_capacity: index, %query_tile: index, %query_head: index, %workitem: index, %subgroup: index, %lane: index, %control: buffer, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer, %control_origin: offset, %token_begin: index, %key_cache_origin: offset, %value_cache_origin: offset, %map: buffer, %map_origin: offset, %pool_capacity: index) {
+  %shape_kv_size = config.get @qwen.model.kv_size : index
+  %shape_attention_width = config.get @qwen.model.attention_width : index
+  %query_heads = config.get @qwen.model.attention_heads : index
+  %key_heads = config.get @qwen.model.kv_heads : index
+  %c256 = config.get @qwen.model.head_size : index
+  %attention_scale = config.get @qwen.model.attention_scale : f32
+  template.apply<@llm.attention.prefill_wmma_h256>(%shape_kv_size, %shape_attention_width, %query_heads, %key_heads, %c256, %attention_scale, %logical_capacity, %query_tile, %query_head, %workitem, %subgroup, %lane, %control, %query, %gate, %key_cache, %value_cache, %output, %control_origin, %token_begin, %key_cache_origin, %value_cache_origin, %map, %map_origin, %pool_capacity) : (index, index, index, index, index, f32, index, index, index, index, index, index, buffer, buffer, buffer, buffer, buffer, buffer, offset, index, offset, offset, buffer, offset, index)
   template.return
 }
 

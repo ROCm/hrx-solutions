@@ -1,0 +1,208 @@
+// Materialized attention with explicit half probability/product pair partials.
+// Callers select this family only for small active-query counts (at most3).
+// Independently, small causal prefixes have at most128 token pairs: each virtual half2 partial
+// receives one product, then widens to F32. Larger prefixes need a separate
+// accumulation contract; callers choose their existing alternative explicitly.
+func.decl @qwen38_kv_position(%logical_capacity: index, %map: buffer, %map_origin: offset, %position: index, %pool_capacity: index) -> (index)
+
+func.def inline @llm_attention_half_pair(%p0: f32, %p1: f32, %v0: f16, %v1: f16) -> (f32) {
+  %ph0 = scalar.fptrunc %p0 : f32 to f16
+  %ph1 = scalar.fptrunc %p1 : f32 to f16
+  %product0 = scalar.mulf %ph0, %v0 : f16
+  %product1 = scalar.mulf %ph1, %v1 : f16
+  %wide0 = scalar.extf %product0 : f16 to f32
+  %wide1 = scalar.extf %product1 : f16 to f32
+  %pair = scalar.addf %wide0, %wide1 : f32
+  func.return %pair : f32
+}
+
+// Probabilities are normalized F32 rows; conversion belongs to this consumer.
+// Cache mapping is shared with the existing attention paths. Invalid/unused
+// positions are not loaded, including the second member of an odd final pair.
+func.def public inline @llm_attention_pv_f16_pairs(%context_count0: index, %logical_capacity: index, %pool_capacity: index, %cache_width: index, %key_head_base: index, %lane: index, %map_origin: offset, %probability_origin: offset, %value_origin: offset, %map: buffer, %probabilities: buffer, %value_cache: buffer) -> (f32) {
+  %count = index.assume %context_count0 [range(%context_count0, 1, 256), le(%context_count0, %logical_capacity)] : index
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %two = index.constant 2 : index
+  %zero_f32 = scalar.constant 0.0 : f32
+  %zero_f16 = scalar.constant 0.0 : f16
+  %pooled = index.cmp ne, %pool_capacity, %zero : index
+  %physical_capacity = scf.select %pooled, %pool_capacity, %logical_capacity : index
+  %p = buffer.view %probabilities[%probability_origin] : buffer -> view<[%count]xf32>
+  %v = buffer.view %value_cache[%value_origin] : buffer -> view<[%physical_capacity]x[%cache_width]xf16>
+  %column = index.add %key_head_base, %lane : index
+  %result = scf.for %first = [%zero to %count step %two](%accumulator = %zero_f32 : f32) -> (f32) {
+    %logical_first = index.assume %first [lt(%first, %logical_capacity)] : index
+    %physical0 = scf.if %pooled -> (index) {
+      %mapped = func.call @qwen38_kv_position(%logical_capacity, %map, %map_origin, %logical_first, %pool_capacity) : (index, buffer, offset, index, index) -> (index)
+      scf.yield %mapped : index
+    } else {
+      scf.yield %first : index
+    }
+    %physical = index.assume %physical0 [lt(%physical0, %physical_capacity)] : index
+    %p0 = view.load %p[%first] : view<[%count]xf32> -> f32
+    %v0 = view.load %v[%physical, %column] : view<[%physical_capacity]x[%cache_width]xf16> -> f16
+    %second = index.add %first, %one : index
+    %has_second = index.cmp ult, %second, %count : index
+    %p1, %v1 = scf.if %has_second -> (f32, f16) {
+      %logical_second = index.assume %second [lt(%second, %logical_capacity)] : index
+      %physical1 = scf.if %pooled -> (index) {
+        %mapped = func.call @qwen38_kv_position(%logical_capacity, %map, %map_origin, %logical_second, %pool_capacity) : (index, buffer, offset, index, index) -> (index)
+        scf.yield %mapped : index
+      } else {
+        scf.yield %second : index
+      }
+      %slot = index.assume %physical1 [lt(%physical1, %physical_capacity)] : index
+      %probability = view.load %p[%second] : view<[%count]xf32> -> f32
+      %value = view.load %v[%slot, %column] : view<[%physical_capacity]x[%cache_width]xf16> -> f16
+      scf.yield %probability, %value : f32, f16
+    } else {
+      scf.yield %zero_f32, %zero_f16 : f32, f16
+    }
+    %pair = func.call @llm_attention_half_pair(%p0, %p1, %v0, %v1) : (f32, f32, f16, f16) -> (f32)
+    // This F32 fold is explicit; it does not promise a particular GPU warp tree.
+    %next = scalar.addf %accumulator, %pair : f32
+    scf.yield %next : f32
+  }
+  func.return %result : f32
+}
+
+template.decl @llm.attention.row_f16_pv_small(%query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %logical_capacity: index, %pool_capacity: index, %map_origin: offset, %query_origin: offset, %output_origin: offset, %key_origin: offset, %value_origin: offset, %map: buffer, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer)
+
+// One complete head/workgroup. QK stays F32 over widened F16 K. Separate scores
+// and probabilities make normalized P available before the typed PV consumer.
+// Pinned nonquantized RDNA3 BLAS PV has F16 normalized-P operands and F16
+// output. This consumer implements those visible cast boundaries. Its F32
+// accumulation order is explicit; internal BLAS COMPUTE_16F grouping is not
+// emulated or claimed equivalent.
+func.def public inline @llm_attention_pv_f16_blas_boundary(%context_count0: index, %logical_capacity: index, %pool_capacity: index, %cache_width: index, %key_head_base: index, %lane: index, %map_origin: offset, %probability_origin: offset, %value_origin: offset, %map: buffer, %probabilities: buffer, %value_cache: buffer) -> (f32) {
+  %count = index.assume %context_count0 [range(%context_count0, 1, 256), le(%context_count0, %logical_capacity)] : index
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %pooled = index.cmp ne, %pool_capacity, %zero : index
+  %physical_capacity = scf.select %pooled, %pool_capacity, %logical_capacity : index
+  %p = buffer.view %probabilities[%probability_origin] : buffer -> view<[%count]xf32>
+  %v = buffer.view %value_cache[%value_origin] : buffer -> view<[%physical_capacity]x[%cache_width]xf16>
+  %column = index.add %key_head_base, %lane : index
+  %initial = scalar.constant 0.0 : f32
+  %sum = scf.for %token = [%zero to %count step %one](%acc = %initial : f32) -> (f32) {
+    %physical0 = scf.if %pooled -> (index) {
+      %slot = func.call @qwen38_kv_position(%logical_capacity, %map, %map_origin, %token, %pool_capacity) : (index, buffer, offset, index, index) -> (index)
+      scf.yield %slot : index
+    } else {
+      scf.yield %token : index
+    }
+    %physical = index.assume %physical0 [lt(%physical0, %physical_capacity)] : index
+    %probability = view.load %p[%token] : view<[%count]xf32> -> f32
+    %probability16 = scalar.fptrunc %probability : f32 to f16
+    %probability32 = scalar.extf %probability16 : f16 to f32
+    %value16 = view.load %v[%physical, %column] : view<[%physical_capacity]x[%cache_width]xf16> -> f16
+    %value32 = scalar.extf %value16 : f16 to f32
+    %next = scalar.fmaf %probability32, %value32, %acc : f32
+    scf.yield %next : f32
+  }
+  %result16 = scalar.fptrunc %sum : f32 to f16
+  %result32 = scalar.extf %result16 : f16 to f32
+  func.return %result32 : f32
+}
+
+template.decl @llm.attention.row_materialized_pv_policy(%blas_pv: i1, %query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %logical_capacity: index, %pool_capacity: index, %map_origin: offset, %query_origin: offset, %output_origin: offset, %key_origin: offset, %value_origin: offset, %map: buffer, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer)
+template.decl @llm.attention.row_f16_pv_blas_boundary(%query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %logical_capacity: index, %pool_capacity: index, %map_origin: offset, %query_origin: offset, %output_origin: offset, %key_origin: offset, %value_origin: offset, %map: buffer, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer)
+template.def<@llm.attention.row_materialized_pv_policy> device @llm_attention_row_materialized_pv_policy(%blas_pv: i1, %query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %logical_capacity: index, %pool_capacity: index, %map_origin: offset, %query_origin: offset, %output_origin: offset, %key_origin: offset, %value_origin: offset, %map: buffer, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer) {
+  %head_width = index.assume %head_size [range(%head_size, 1, 256)] : index
+  %head = index.assume %head0 [range(%head0, 0, 127), lt(%head0, %query_heads)] : index
+  %lane = index.assume %lane0 [range(%lane0, 0, 255), lt(%lane0, %head_size)] : index
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %origin = index.constant 0 : offset
+  %scratch_bytes = index.constant 1024 : offset
+  %zero_f32 = scalar.constant 0.0 : f32
+  %negative_large = scalar.constant -3.4028234663852886e+38 : f32
+  %position0 = index.cast %position_i32 : i32 to index
+  %position = index.assume %position0 [range(%position0, 0, 255), lt(%position0, %logical_capacity)] : index
+  %count0 = index.add %position, %one : index
+  %count = index.assume %count0 [range(%count0, 1, 256), le(%count0, %logical_capacity)] : index
+  %queries_per_kv = index.div %query_heads, %key_heads : index
+  %key_head = index.div %head, %queries_per_kv : index
+  %key_head_base = index.mul %key_head, %head_size : index
+  %column = index.add %key_head_base, %lane : index
+  %head_base = index.mul %head, %head_size : index
+  %element = index.add %head_base, %lane : index
+  %pooled = index.cmp ne, %pool_capacity, %zero : index
+  %physical_capacity = scf.select %pooled, %pool_capacity, %logical_capacity : index
+  %q = buffer.view %query[%query_origin] : buffer -> view<[%query_width]xf32>
+  %k = buffer.view %key_cache[%key_origin] : buffer -> view<[%physical_capacity]x[%cache_width]xf16>
+  %out = buffer.view %output[%output_origin] : buffer -> view<[%query_width]xf32>
+  %scores = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
+  %probabilities = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
+  %score_view = buffer.view %scores[%origin] : buffer -> view<256xf32>
+  %probability_view = buffer.view %probabilities[%origin] : buffer -> view<256xf32>
+  %query_value = view.load %q[%element] : view<[%query_width]xf32> -> f32
+  %is_writer = index.cmp eq, %lane, %zero : index
+  %maximum = scf.for %token = [%zero to %count step %one](%old_max = %negative_large : f32) -> (f32) {
+    %logical_token = index.assume %token [lt(%token, %logical_capacity)] : index
+    %physical0 = scf.if %pooled -> (index) {
+      %mapped = func.call @qwen38_kv_position(%logical_capacity, %map, %map_origin, %logical_token, %pool_capacity) : (index, buffer, offset, index, index) -> (index)
+      scf.yield %mapped : index
+    } else {
+      scf.yield %token : index
+    }
+    %physical = index.assume %physical0 [lt(%physical0, %physical_capacity)] : index
+    %key_f16 = view.load %k[%physical, %column] : view<[%physical_capacity]x[%cache_width]xf16> -> f16
+    %key = scalar.extf %key_f16 : f16 to f32
+    %product = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %query_value, %key : f32
+    %dot = kernel.workgroup.reduce<addf> %product : f32
+    %score = scalar.mulf %dot, %attention_scale : f32
+    scf.if %is_writer {
+      view.store %score, %score_view[%token] : f32, view<256xf32>
+    }
+    %next_max = scalar.maxnumf %old_max, %score : f32
+    scf.yield %next_max : f32
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %partial_sum = scf.for %token = [%lane to %count step %head_width](%sum = %zero_f32 : f32) -> (f32) {
+    %score = view.load %score_view[%token] : view<256xf32> -> f32
+    %shifted = scalar.subf %score, %maximum : f32
+    %weight = scalar.expf<afn> %shifted : f32
+    view.store %weight, %probability_view[%token] : f32, view<256xf32>
+    %next = scalar.addf %sum, %weight : f32
+    scf.yield %next : f32
+  }
+  %denominator = kernel.workgroup.reduce<addf> %partial_sum : f32
+  scf.for %token = [%lane to %count step %head_width] {
+    %weight = view.load %probability_view[%token] : view<256xf32> -> f32
+    %probability = scalar.divf %weight, %denominator : f32
+    view.store %probability, %probability_view[%token] : f32, view<256xf32>
+    scf.yield
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %attention = scf.if %blas_pv -> (f32) {
+    %large_value = func.call @llm_attention_pv_f16_blas_boundary(%count, %logical_capacity, %pool_capacity, %cache_width, %key_head_base, %lane, %map_origin, %origin, %value_origin, %map, %probabilities, %value_cache) : (index, index, index, index, index, index, offset, offset, offset, buffer, buffer, buffer) -> (f32)
+    scf.yield %large_value : f32
+  } else {
+    %small_value = func.call @llm_attention_pv_f16_pairs(%count, %logical_capacity, %pool_capacity, %cache_width, %key_head_base, %lane, %map_origin, %origin, %value_origin, %map, %probabilities, %value_cache) : (index, index, index, index, index, index, offset, offset, offset, buffer, buffer, buffer) -> (f32)
+    scf.yield %small_value : f32
+  }
+  %result = scf.if %has_gate -> (f32) {
+    %gate_view = buffer.view %gate[%query_origin] : buffer -> view<[%query_width]xf32>
+    %gate_value = view.load %gate_view[%element] : view<[%query_width]xf32> -> f32
+    %gated = scalar.mulf %attention, %gate_value : f32
+    scf.yield %gated : f32
+  } else {
+    scf.yield %attention : f32
+  }
+  view.store %result, %out[%element] : f32, view<[%query_width]xf32>
+  template.return
+}
+
+template.def<@llm.attention.row_f16_pv_small> device @llm_attention_row_f16_pv_small(%query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %logical_capacity: index, %pool_capacity: index, %map_origin: offset, %query_origin: offset, %output_origin: offset, %key_origin: offset, %value_origin: offset, %map: buffer, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer) {
+  %blas_pv = scalar.constant false : i1
+  template.apply<@llm.attention.row_materialized_pv_policy>(%blas_pv, %query_heads, %key_heads, %head_size, %query_width, %cache_width, %logical_capacity, %pool_capacity, %map_origin, %query_origin, %output_origin, %key_origin, %value_origin, %map, %attention_scale, %position_i32, %head0, %lane0, %has_gate, %query, %gate, %key_cache, %value_cache, %output) : (i1, index, index, index, index, index, index, index, offset, offset, offset, offset, offset, buffer, f32, i32, index, index, i1, buffer, buffer, buffer, buffer, buffer)
+  template.return
+}
+
+template.def<@llm.attention.row_f16_pv_blas_boundary> device @llm_attention_row_f16_pv_blas_boundary(%query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %logical_capacity: index, %pool_capacity: index, %map_origin: offset, %query_origin: offset, %output_origin: offset, %key_origin: offset, %value_origin: offset, %map: buffer, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer) {
+  %blas_pv = scalar.constant true : i1
+  template.apply<@llm.attention.row_materialized_pv_policy>(%blas_pv, %query_heads, %key_heads, %head_size, %query_width, %cache_width, %logical_capacity, %pool_capacity, %map_origin, %query_origin, %output_origin, %key_origin, %value_origin, %map, %attention_scale, %position_i32, %head0, %lane0, %has_gate, %query, %gate, %key_cache, %value_cache, %output) : (i1, index, index, index, index, index, index, index, offset, offset, offset, offset, offset, buffer, f32, i32, index, index, i1, buffer, buffer, buffer, buffer, buffer)
+  template.return
+}

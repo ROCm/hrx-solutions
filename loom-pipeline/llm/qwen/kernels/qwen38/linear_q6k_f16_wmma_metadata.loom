@@ -1,3 +1,5 @@
+template.decl @ggml.q6k.f16_wmma.metadata.direct_c64t128_o5120.body(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %output: buffer)
+
 // Model geometry is supplied by the selected architecture catalog.
 config.decl @qwen.model.attention_width : index
 config.decl @qwen.model.ffn_qk_blocks : index
@@ -881,20 +883,11 @@ kernel.def target(@qwen38_q6k_metadata_gfx11_wave64) export("qwen38_linear_q6k_f
 // Rotates the WMMA operands so the native result is token-major and can be
 // written directly. Eight waves share one 64-channel by 128-token tile and one
 // decoded Q6_K metadata table without an accumulator transpose through LDS.
-kernel.def target(@qwen38_q6k_metadata_gfx11_wave64) export("qwen38_linear_q6k_f16_wmma_metadata_direct_c64_t128_o5120") @qwen38_linear_q6k_f16_wmma_metadata_direct_c64_t128_o5120(%token_count0: index, %input_size0: index, %output_size0: index) {
-  %token_count = index.assume %token_count0 [range(%token_count0, 0, 512), multiple_of(%token_count0, 128)] : index
-  %input_size = index.assume %input_size0 [range(%input_size0, 256, 32768), multiple_of(%input_size0, 256)] : index
-  %output_size = index.assume %output_size0 [range(%output_size0, 5120, 5120)] : index
-  %c1 = index.constant 1 : index
-  %c64 = index.constant 64 : index
-  %c128 = index.constant 128 : index
-  %c512 = index.constant 512 : index
-  %output_tiles = index.div %output_size, %c64 : index
-  %token_tiles = index.div %token_count, %c128 : index
-  kernel.launch.config workgroups(%output_tiles, %token_tiles, %c1) workgroup_size(%c512, %c1, %c1) : index
-} launch(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %output: buffer) {
+// Canonical Q6_K and F32 input/output; direct publication uses explicit N.
+// This schedule retains N5120, full 128-token tiles and its 512-thread
+// wave64 grid. Weight/activation operands round to F16, WMMA sums in F32.
+template.def<@ggml.q6k.f16_wmma.metadata.direct_c64t128_o5120.body> device @ggml_q6k_f16_wmma_metadata_direct_c64t128_o5120_body(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %output: buffer) {
 
-  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
@@ -947,7 +940,7 @@ kernel.def target(@qwen38_q6k_metadata_gfx11_wave64) export("qwen38_linear_q6k_f
 
   %input_noalias, %weight_noalias, %output_noalias = buffer.assume.noalias %input, %weight, %output : buffer, buffer, buffer
   %input_view = buffer.view %input_noalias[%c0_offset] : buffer -> view<[%token_count]x[%input_size]xf32>
-  %output_view = buffer.view %output_noalias[%c0_offset] : buffer -> view<[%token_count]x[%shape_hidden_size]xf32>
+  %output_view = buffer.view %output_noalias[%c0_offset] : buffer -> view<[%token_count]x[%output_size]xf32>
   %weight_stage = buffer.alloca<workgroup> align(16) %weight_stage_bytes : buffer
   %activation_stage = buffer.alloca<workgroup> align(16) %activation_stage_bytes : buffer
   %metadata_stage = buffer.alloca<workgroup> align(16) %metadata_stage_bytes : buffer
@@ -1045,10 +1038,26 @@ kernel.def target(@qwen38_q6k_metadata_gfx11_wave64) export("qwen38_linear_q6k_f
   %last_channel_start = index.sub %output_size, %c15 : index
   %channel_origin0 = index.add %channel_tile_base, %subgroup_channel_add : index
   %channel_origin = index.assume %channel_origin0 [lt(%channel_origin0, %last_channel_start)] : index
-  vector.fragment.store<result> %result0, %output_view[%token_origin0, %channel_origin] shape [%m, %n] : vector<4xf32>, view<[%token_count]x[%shape_hidden_size]xf32>
-  vector.fragment.store<result> %result1, %output_view[%token_origin1, %channel_origin] shape [%m, %n] : vector<4xf32>, view<[%token_count]x[%shape_hidden_size]xf32>
-  vector.fragment.store<result> %result2, %output_view[%token_origin2, %channel_origin] shape [%m, %n] : vector<4xf32>, view<[%token_count]x[%shape_hidden_size]xf32>
-  vector.fragment.store<result> %result3, %output_view[%token_origin3, %channel_origin] shape [%m, %n] : vector<4xf32>, view<[%token_count]x[%shape_hidden_size]xf32>
+  vector.fragment.store<result> %result0, %output_view[%token_origin0, %channel_origin] shape [%m, %n] : vector<4xf32>, view<[%token_count]x[%output_size]xf32>
+  vector.fragment.store<result> %result1, %output_view[%token_origin1, %channel_origin] shape [%m, %n] : vector<4xf32>, view<[%token_count]x[%output_size]xf32>
+  vector.fragment.store<result> %result2, %output_view[%token_origin2, %channel_origin] shape [%m, %n] : vector<4xf32>, view<[%token_count]x[%output_size]xf32>
+  vector.fragment.store<result> %result3, %output_view[%token_origin3, %channel_origin] shape [%m, %n] : vector<4xf32>, view<[%token_count]x[%output_size]xf32>
+  template.return
+}
+
+kernel.def target(@qwen38_q6k_metadata_gfx11_wave64) export("qwen38_linear_q6k_f16_wmma_metadata_direct_c64_t128_o5120") @qwen38_linear_q6k_f16_wmma_metadata_direct_c64_t128_o5120(%token_count0: index, %input_size0: index, %output_size0: index) {
+  %token_count = index.assume %token_count0 [range(%token_count0, 0, 512), multiple_of(%token_count0, 128)] : index
+  %input_size = index.assume %input_size0 [range(%input_size0, 256, 32768), multiple_of(%input_size0, 256)] : index
+  %output_size = index.assume %output_size0 [range(%output_size0, 5120, 5120)] : index
+  %c1 = index.constant 1 : index
+  %c64 = index.constant 64 : index
+  %c128 = index.constant 128 : index
+  %c512 = index.constant 512 : index
+  %output_tiles = index.div %output_size, %c64 : index
+  %token_tiles = index.div %token_count, %c128 : index
+  kernel.launch.config workgroups(%output_tiles, %token_tiles, %c1) workgroup_size(%c512, %c1, %c1) : index
+} launch(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %output: buffer) {
+  template.apply<@ggml.q6k.f16_wmma.metadata.direct_c64t128_o5120.body>(%token_count_data, %input_size0, %output_size0, %input, %weight, %output) : (buffer, index, index, buffer, buffer, buffer)
   kernel.return
 }
 

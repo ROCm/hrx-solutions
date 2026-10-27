@@ -136,7 +136,7 @@ class PackagingTest(unittest.TestCase):
         self.assertIs(contexts[0],contexts[1]);self.assertIs(contexts[2],contexts[3])
         self.assertEqual(set(first),set(final));self.assertEqual(len(final),len(set(final)))
         self.assertEqual({str(p) for p in package.rglob('*') if p.is_file()},set(final))
-        self.assertEqual(sum(p.suffix=='.loombc' for p in command._catalog_outputs),6)
+        self.assertEqual(sum(p.suffix=='.loombc' for p in command._catalog_outputs),7)
         from binding.python.models import recipes,pipelines
         recipe_inventory.validate_installed_catalogs(package,recipes.parse,pipelines.parse,self.fixture.repository)
 
@@ -942,8 +942,8 @@ class PackagingTest(unittest.TestCase):
         self.assertGreater(size,0)
         with zipfile.ZipFile(self.root/'fixture.whl') as archive:
             catalog = [name for name in archive.namelist() if name.startswith('hrx_solutions/loom-pipeline/llm/')]
-            self.assertEqual(len(catalog), 9)
-            self.assertEqual(sum(name.endswith('.loombc') for name in catalog), 2)
+            self.assertEqual(len(catalog), 12)
+            self.assertEqual(sum(name.endswith('.loombc') for name in catalog), 3)
             self.assertFalse(any(name.endswith('sources.txt') for name in catalog))
         with self.assertRaisesRegex(RuntimeError,'recipe inventory'):
             validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/qwen_27b/recipes/qwen38-27b-q5-k-xl.json'))

@@ -61,7 +61,7 @@ func.def public inline @ggml_q4k_chunk(%weight: buffer, %row_byte_base: offset, 
 // Computes one lane's partial for a complete Q4_K row. The active target's
 // subgroup size controls whether each loop iteration covers two or four
 // consecutive 256-value blocks.
-func.def inline @ggml_q4k_q8_1_x4_row_lane(%input_size: index, %weight: buffer, %weight_row_byte_base: offset, %q8_input: buffer, %q8_row_byte_base: offset, %lane: index) -> (f32) {
+func.def public inline @ggml_q4k_q8_1_x4_row_lane_policy(%round_weight_scales: i1, %input_size: index, %weight: buffer, %weight_row_byte_base: offset, %q8_input: buffer, %q8_row_byte_base: offset, %lane: index) -> (f32) {
   %bounded_input_size = index.assume %input_size [range(%input_size, 256, 32768), multiple_of(%input_size, 256)] : index
   %subgroup_size = target.subgroup.size : index
   %c0 = index.constant 0 : index
@@ -119,7 +119,18 @@ func.def inline @ggml_q4k_q8_1_x4_row_lane(%input_size: index, %weight: buffer, 
       %q8_s = scalar.extf %q8_s_f16 : f16 to f32
       %q8_words = vector.load %q8_words_view[%q8_word_index] : view<32xi32> -> vector<4xi32>
       %q8_values = vector.bitcast %q8_words : vector<4xi32> to vector<16xi8>
-      %q4_values, %d_scale, %dmin_scale = func.call @ggml_q4k_chunk(%weight, %weight_row_byte_base, %q4_block, %q4_group, %q4_half) : (buffer, offset, index, index, index) -> (vector<16xi8>, f32, f32)
+      %q4_values, %d_scale_f32, %dmin_scale_f32 = func.call @ggml_q4k_chunk(%weight, %weight_row_byte_base, %q4_block, %q4_group, %q4_half) : (buffer, offset, index, index, index) -> (vector<16xi8>, f32, f32)
+      %d_scale, %dmin_scale = scf.if %round_weight_scales -> (f32, f32) {
+        // DS4 MMQ folds the F16 block scales and six-bit integers into F16
+        // combined weight metadata before widening for the dot/minimum terms.
+        %d_half = scalar.fptrunc %d_scale_f32 : f32 to f16
+        %dmin_half = scalar.fptrunc %dmin_scale_f32 : f32 to f16
+        %d_folded = scalar.extf %d_half : f16 to f32
+        %dmin_folded = scalar.extf %dmin_half : f16 to f32
+        scf.yield %d_folded, %dmin_folded : f32, f32
+      } else {
+        scf.yield %d_scale_f32, %dmin_scale_f32 : f32, f32
+      }
       %dot = template.apply<@ggml.qk.unsigned_q8_1_dot>(%q4_values, %d_scale, %dmin_scale, %q8_values, %q8_d, %q8_s) : (vector<16xi8>, f32, f32, vector<16xi8>, f32, f32) -> (f32)
       scf.yield %dot : f32
     } else {
@@ -129,6 +140,13 @@ func.def inline @ggml_q4k_q8_1_x4_row_lane(%input_size: index, %weight: buffer, 
     scf.yield %next : f32
   }
   func.return %sum : f32
+}
+
+// Canonical callers keep the existing public ABI and F32 combined scales.
+func.def public inline @ggml_q4k_q8_1_x4_row_lane(%input_size: index, %weight: buffer, %weight_row_byte_base: offset, %q8_input: buffer, %q8_row_byte_base: offset, %lane: index) -> (f32) {
+  %round_weight_scales = scalar.constant false : i1
+  %value = func.call @ggml_q4k_q8_1_x4_row_lane_policy(%round_weight_scales, %input_size, %weight, %weight_row_byte_base, %q8_input, %q8_row_byte_base, %lane) : (i1, index, buffer, offset, buffer, offset, index) -> (f32)
+  func.return %value : f32
 }
 
 // Dense raw-layout projection. One subgroup owns one output channel while the

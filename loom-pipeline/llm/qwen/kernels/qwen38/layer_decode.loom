@@ -4,6 +4,9 @@ config.decl @qwen.model.hidden_divisor : f32
 config.decl @qwen.model.hidden_size : index
 
 template.decl @qwen38.rmsnorm_f32.row(%input_row_count: index, %input_row: index, %output_origin: offset, %epsilon: f32, %input: buffer, %weight: buffer, %output: buffer)
+template.decl @llm.rmsnorm.row(%hidden_size0: index, %element_count_f32: f32, %input_row_count: index, %input_row: index, %output_origin: offset, %output_is_f16: i1, %epsilon: f32, %input: buffer, %weight: buffer, %output: buffer)
+template.decl @llm.residual_add_f32.row(%hidden_size0: index, %row_count0: index, %row0: index, %lhs: buffer, %rhs: buffer, %output: buffer)
+template.decl @llm.swiglu_f32.row(%ffn_size0: index, %row_count0: index, %row0: index, %gate: buffer, %up: buffer, %output: buffer)
 
 // Elementwise and normalization primitives shared by Qwen3.8 decode layers.
 // Quantized projections and attention/GDN state transitions remain in their
@@ -11,44 +14,103 @@ template.decl @qwen38.rmsnorm_f32.row(%input_row_count: index, %input_row: index
 
 amdgpu.target<gfx11-generic> @qwen38_layer_gfx11_wave32 {subgroup_size = 32}
 
-// Normalizes one row from a row-major 5120-wide input. Decode provides its
-// single row while prefill selects the final active row from its full slab.
-template.def<@qwen38.rmsnorm_f32.row> device @qwen38_rmsnorm_f32_row(%input_row_count: index, %input_row: index, %output_origin: offset, %epsilon: f32, %input: buffer, %weight: buffer, %output: buffer) {
-  %shape_hidden_size = config.get @qwen.model.hidden_size : index
+// Callers provide a contiguous F32 row domain, its F32 width divisor, and
+// disjoint input/weight/output buffers. All 256 threads participate in the
+// original reduction order. Output precision specializes only the final store.
+template.def<@llm.rmsnorm.row> device @llm_rmsnorm_row(%hidden_size0: index, %element_count_f32: f32, %input_row_count: index, %input_row: index, %output_origin: offset, %output_is_f16: i1, %epsilon: f32, %input: buffer, %weight: buffer, %output: buffer) {
+  %hidden_size = index.assume %hidden_size0 [range(%hidden_size0, 1, 32768)] : index
   %lane0 = kernel.workitem.id<x> : index
   %lane = index.assume %lane0 [range(%lane0, 0, 255)] : index
   %workgroup_size = index.constant 256 : index
-  %hidden_size = config.get @qwen.model.hidden_size : index
   %c0_offset = index.constant 0 : offset
   %c0_f32 = scalar.constant 0.0 : f32
   %input_noalias, %weight_noalias, %output_noalias = buffer.assume.noalias %input, %weight, %output : buffer, buffer, buffer
-  %input_view = buffer.view %input_noalias[%c0_offset] : buffer -> view<[%input_row_count]x[%shape_hidden_size]xf32>
-  %weight_view = buffer.view %weight_noalias[%c0_offset] : buffer -> view<[%shape_hidden_size]xf32>
-  %output_view = buffer.view %output_noalias[%output_origin] : buffer -> view<[%shape_hidden_size]xf32>
+  %input_view = buffer.view %input_noalias[%c0_offset] : buffer -> view<[%input_row_count]x[%hidden_size]xf32>
+  %weight_view = buffer.view %weight_noalias[%c0_offset] : buffer -> view<[%hidden_size]xf32>
   %thread_sum = scf.for %element = [%lane to %hidden_size step %workgroup_size](%partial_sum = %c0_f32 : f32) -> (f32) {
-    %input_value = view.load %input_view[%input_row, %element] : view<[%input_row_count]x[%shape_hidden_size]xf32> -> f32
+    %input_value = view.load %input_view[%input_row, %element] : view<[%input_row_count]x[%hidden_size]xf32> -> f32
     %square = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %input_value, %input_value : f32
     %next_sum = scalar.addf<reassoc|nnan|ninf|nsz> %partial_sum, %square : f32
     scf.yield %next_sum : f32
   }
   %sum = kernel.workgroup.reduce<addf> %thread_sum : f32
-  %element_count_f32 = config.get @qwen.model.hidden_divisor : f32
   %mean = scalar.divf<nnan|ninf|nsz|arcp> %sum, %element_count_f32 : f32
   %biased_mean = scalar.addf<nnan|ninf|nsz> %mean, %epsilon : f32
   %inverse_rms = scalar.rsqrtf<nnan|ninf|nsz|afn> %biased_mean : f32
   scf.for %element = [%lane to %hidden_size step %workgroup_size] {
-    %input_value = view.load %input_view[%input_row, %element] : view<[%input_row_count]x[%shape_hidden_size]xf32> -> f32
-    %weight = view.load %weight_view[%element] : view<[%shape_hidden_size]xf32> -> f32
+    %input_value = view.load %input_view[%input_row, %element] : view<[%input_row_count]x[%hidden_size]xf32> -> f32
+    %weight = view.load %weight_view[%element] : view<[%hidden_size]xf32> -> f32
     %normalized = scalar.mulf<nnan|ninf|nsz> %input_value, %inverse_rms : f32
     %result = scalar.mulf<nnan|ninf|nsz> %normalized, %weight : f32
-    view.store %result, %output_view[%element] : f32, view<[%shape_hidden_size]xf32>
+    scf.if %output_is_f16 {
+      %output_view = buffer.view %output_noalias[%output_origin] : buffer -> view<[%hidden_size]xf16>
+      %result_f16 = scalar.fptrunc %result : f32 to f16
+      view.store %result_f16, %output_view[%element] : f16, view<[%hidden_size]xf16>
+    } else {
+      %output_view = buffer.view %output_noalias[%output_origin] : buffer -> view<[%hidden_size]xf32>
+      view.store %result, %output_view[%element] : f32, view<[%hidden_size]xf32>
+    }
   }
   template.return
 }
 
-// Computes one exact 5120-wide F32 RMSNorm row. Each lane owns 20 strided
-// values so adjacent lanes issue coalesced accesses while preserving the
-// contribution order shared with prefill and speculative verification.
+// Keep the existing model adapter for decode, final-row and output-span
+// callers. Geometry belongs to the catalog; arithmetic belongs to the body.
+template.def<@qwen38.rmsnorm_f32.row> device @qwen38_rmsnorm_f32_row(%input_row_count: index, %input_row: index, %output_origin: offset, %epsilon: f32, %input: buffer, %weight: buffer, %output: buffer) {
+  %hidden_size = config.get @qwen.model.hidden_size : index
+  %divisor = config.get @qwen.model.hidden_divisor : f32
+  %output_is_f16 = scalar.constant false : i1
+  template.apply<@llm.rmsnorm.row>(%hidden_size, %divisor, %input_row_count, %input_row, %output_origin, %output_is_f16, %epsilon, %input, %weight, %output) : (index, f32, index, index, offset, i1, f32, buffer, buffer, buffer)
+  template.return
+}
+
+// Contiguous rows, complete 1024-channel tiles, four F32 values per lane.
+// No noalias promise: the output may update either input in place.
+template.def<@llm.residual_add_f32.row> device @llm_residual_add_f32_row(%hidden_size0: index, %row_count0: index, %row0: index, %lhs: buffer, %rhs: buffer, %output: buffer) {
+  %hidden_size = index.assume %hidden_size0 [range(%hidden_size0, 1024, 32768), multiple_of(%hidden_size0, 1024)] : index
+  %row_count, %row = index.assume %row_count0, %row0 [range(%row_count0, 1, 512), lt(%row0, %row_count0)] : index, index
+  %workgroup = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %c4 = index.constant 4 : index
+  %workgroup_size = index.constant 256 : index
+  %c0_offset = index.constant 0 : offset
+  %workgroup_base = index.mul %workgroup, %workgroup_size : index
+  %vector_ordinal = index.add %workgroup_base, %lane : index
+  %element0 = index.mul %vector_ordinal, %c4 : index
+  %element = index.assume %element0 [range(%element0, 0, 32764), multiple_of(%element0, 4), lt(%element0, %hidden_size)] : index
+  %lhs_view = buffer.view %lhs[%c0_offset] : buffer -> view<[%row_count]x[%hidden_size]xf32>
+  %rhs_view = buffer.view %rhs[%c0_offset] : buffer -> view<[%row_count]x[%hidden_size]xf32>
+  %output_view = buffer.view %output[%c0_offset] : buffer -> view<[%row_count]x[%hidden_size]xf32>
+  %lhs_values = vector.load %lhs_view[%row, %element] : view<[%row_count]x[%hidden_size]xf32> -> vector<4xf32>
+  %rhs_values = vector.load %rhs_view[%row, %element] : view<[%row_count]x[%hidden_size]xf32> -> vector<4xf32>
+  %result = vector.addf<nnan|ninf|nsz> %lhs_values, %rhs_values : vector<4xf32>
+  vector.store %result, %output_view[%row, %element] : vector<4xf32>, view<[%row_count]x[%hidden_size]xf32>
+  template.return
+}
+
+// Scalar SiLU and multiply retain the F32 boundary and original flags.
+template.def<@llm.swiglu_f32.row> device @llm_swiglu_f32_row(%ffn_size0: index, %row_count0: index, %row0: index, %gate: buffer, %up: buffer, %output: buffer) {
+  %ffn_size = index.assume %ffn_size0 [range(%ffn_size0, 256, 32768), multiple_of(%ffn_size0, 256)] : index
+  %row_count, %row = index.assume %row_count0, %row0 [range(%row_count0, 1, 512), lt(%row0, %row_count0)] : index, index
+  %workgroup = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %workgroup_size = index.constant 256 : index
+  %c0_offset = index.constant 0 : offset
+  %workgroup_base = index.mul %workgroup, %workgroup_size : index
+  %element0 = index.add %workgroup_base, %lane : index
+  %element = index.assume %element0 [range(%element0, 0, 32767), lt(%element0, %ffn_size)] : index
+  %gate_view = buffer.view %gate[%c0_offset] : buffer -> view<[%row_count]x[%ffn_size]xf32>
+  %up_view = buffer.view %up[%c0_offset] : buffer -> view<[%row_count]x[%ffn_size]xf32>
+  %output_view = buffer.view %output[%c0_offset] : buffer -> view<[%row_count]x[%ffn_size]xf32>
+  %gate_value = view.load %gate_view[%row, %element] : view<[%row_count]x[%ffn_size]xf32> -> f32
+  %up_value = view.load %up_view[%row, %element] : view<[%row_count]x[%ffn_size]xf32> -> f32
+  %activated_gate = scalar.siluf<afn> %gate_value : f32
+  %result = scalar.mulf<nnan|ninf|nsz> %activated_gate, %up_value : f32
+  view.store %result, %output_view[%row, %element] : f32, view<[%row_count]x[%ffn_size]xf32>
+  template.return
+}
+
+// Decode keeps the same coalesced reduction schedule as the shared row body.
 kernel.def target(@qwen38_layer_gfx11_wave32) export("qwen38_rmsnorm_f32_decode") @qwen38_rmsnorm_f32_decode() {
   %unit = index.constant 1 : index
   %workgroup_size = index.constant 256 : index
@@ -93,23 +155,10 @@ kernel.def export("qwen38_residual_add_f32_decode") @qwen38_residual_add_f32_dec
   %workgroup_size = index.constant 256 : index
   kernel.launch.config workgroups(%workgroup_count, %c1, %c1) workgroup_size(%workgroup_size, %c1, %c1) : index
 } launch(%lhs: buffer, %rhs: buffer, %output: buffer) {
-  %shape_hidden_size = config.get @qwen.model.hidden_size : index
-  %workgroup = kernel.workgroup.id<x> : index
-  %lane = kernel.workitem.id<x> : index
-  %c4 = index.constant 4 : index
-  %workgroup_size = index.constant 256 : index
-  %c0_offset = index.constant 0 : offset
-  %workgroup_base = index.mul %workgroup, %workgroup_size : index
-  %vector_ordinal = index.add %workgroup_base, %lane : index
-  %element0 = index.mul %vector_ordinal, %c4 : index
-  %element = index.assume %element0 [range(%element0, 0, 32764), multiple_of(%element0, 4), lt(%element0, %shape_hidden_size)] : index
-  %lhs_view = buffer.view %lhs[%c0_offset] : buffer -> view<[%shape_hidden_size]xf32>
-  %rhs_view = buffer.view %rhs[%c0_offset] : buffer -> view<[%shape_hidden_size]xf32>
-  %output_view = buffer.view %output[%c0_offset] : buffer -> view<[%shape_hidden_size]xf32>
-  %lhs_values = vector.load %lhs_view[%element] : view<[%shape_hidden_size]xf32> -> vector<4xf32>
-  %rhs_values = vector.load %rhs_view[%element] : view<[%shape_hidden_size]xf32> -> vector<4xf32>
-  %result = vector.addf<nnan|ninf|nsz> %lhs_values, %rhs_values : vector<4xf32>
-  vector.store %result, %output_view[%element] : vector<4xf32>, view<[%shape_hidden_size]xf32>
+  %hidden_size = config.get @qwen.model.hidden_size : index
+  %row_count = index.constant 1 : index
+  %row = index.constant 0 : index
+  template.apply<@llm.residual_add_f32.row>(%hidden_size, %row_count, %row, %lhs, %rhs, %output) : (index, index, index, buffer, buffer, buffer)
   kernel.return
 }
 
@@ -125,27 +174,18 @@ kernel.def export("qwen38_swiglu_f32_decode") @qwen38_swiglu_f32_decode() {
   %workgroup_size = index.constant 256 : index
   kernel.launch.config workgroups(%workgroup_count, %c1, %c1) workgroup_size(%workgroup_size, %c1, %c1) : index
 } launch(%gate: buffer, %up: buffer, %output: buffer) {
-  %shape_ffn_size = config.get @qwen.model.ffn_size : index
-  %workgroup = kernel.workgroup.id<x> : index
-  %lane = kernel.workitem.id<x> : index
-  %workgroup_size = index.constant 256 : index
-  %c0_offset = index.constant 0 : offset
-  %workgroup_base = index.mul %workgroup, %workgroup_size : index
-  %element0 = index.add %workgroup_base, %lane : index
-  %element = index.assume %element0 [range(%element0, 0, 32767), lt(%element0, %shape_ffn_size)] : index
-  %gate_view = buffer.view %gate[%c0_offset] : buffer -> view<[%shape_ffn_size]xf32>
-  %up_view = buffer.view %up[%c0_offset] : buffer -> view<[%shape_ffn_size]xf32>
-  %output_view = buffer.view %output[%c0_offset] : buffer -> view<[%shape_ffn_size]xf32>
-  %gate_value = view.load %gate_view[%element] : view<[%shape_ffn_size]xf32> -> f32
-  %up_value = view.load %up_view[%element] : view<[%shape_ffn_size]xf32> -> f32
-  %activated_gate = scalar.siluf<afn> %gate_value : f32
-  %result = scalar.mulf<nnan|ninf|nsz> %activated_gate, %up_value : f32
-  view.store %result, %output_view[%element] : f32, view<[%shape_ffn_size]xf32>
+  %ffn_size = config.get @qwen.model.ffn_size : index
+  %row_count = index.constant 1 : index
+  %row = index.constant 0 : index
+  template.apply<@llm.swiglu_f32.row>(%ffn_size, %row_count, %row, %gate, %up, %output) : (index, index, index, buffer, buffer, buffer)
   kernel.return
 }
 
+// The pinned testbench accepts check literals, not case-body config.get.
+// Existing case names cover 27B; _08b_case names cover 0.8B. Link each case
+// with the matching variant config so fixture and kernel dimensions agree.
 check.case public @qwen38_rmsnorm_f32_decode_known_case {
-  %shape_hidden_size = config.get @qwen.model.hidden_size : index
+  %shape_hidden_size = check.literal value(5120) : index
   %epsilon = check.literal value(0.000001) : f32
   %input = check.generate.fill value(2.0) : tensor<[%shape_hidden_size]xf32>
   %weight = check.generate.fill value(0.5) : tensor<[%shape_hidden_size]xf32>
@@ -157,7 +197,7 @@ check.case public @qwen38_rmsnorm_f32_decode_known_case {
 }
 
 check.case public @qwen38_residual_add_f32_decode_known_case {
-  %shape_hidden_size = config.get @qwen.model.hidden_size : index
+  %shape_hidden_size = check.literal value(5120) : index
   %lhs = check.generate.fill value(0.125) : tensor<[%shape_hidden_size]xf32>
   %rhs = check.generate.fill value(-0.0625) : tensor<[%shape_hidden_size]xf32>
   %output = check.generate.fill value(0.0) : tensor<[%shape_hidden_size]xf32>
@@ -168,7 +208,7 @@ check.case public @qwen38_residual_add_f32_decode_known_case {
 }
 
 check.case public @qwen38_swiglu_f32_decode_known_case {
-  %shape_ffn_size = config.get @qwen.model.ffn_size : index
+  %shape_ffn_size = check.literal value(17408) : index
   %gate = check.generate.fill value(0.25) : tensor<[%shape_ffn_size]xf32>
   %up = check.generate.fill value(0.5) : tensor<[%shape_ffn_size]xf32>
   %output = check.generate.fill value(0.0) : tensor<[%shape_ffn_size]xf32>
@@ -179,8 +219,8 @@ check.case public @qwen38_swiglu_f32_decode_known_case {
 }
 
 check.case public @qwen38_layer_decode_primitives_known_case {
-  %shape_ffn_size = config.get @qwen.model.ffn_size : index
-  %shape_hidden_size = config.get @qwen.model.hidden_size : index
+  %shape_ffn_size = check.literal value(17408) : index
+  %shape_hidden_size = check.literal value(5120) : index
   %epsilon = check.literal value(0.000001) : f32
   %norm_input = check.generate.fill value(2.0) : tensor<[%shape_hidden_size]xf32>
   %norm_weight = check.generate.fill value(0.5) : tensor<[%shape_hidden_size]xf32>
@@ -202,6 +242,161 @@ check.case public @qwen38_layer_decode_primitives_known_case {
   %expected_swiglu = check.generate.fill value(0.07027235627174377) : tensor<[%shape_ffn_size]xf32>
   kernel.launch @qwen38_swiglu_f32_decode(%gate, %up, %swiglu) : (tensor<[%shape_ffn_size]xf32>, tensor<[%shape_ffn_size]xf32>, tensor<[%shape_ffn_size]xf32>)
   check.expect.close actual(%swiglu) expected(%expected_swiglu) atol(0.000001) rtol(0.000001) nan(same) : tensor<[%shape_ffn_size]xf32>
+  check.return
+}
+
+check.case public @qwen38_rmsnorm_f32_decode_known_08b_case {
+  %shape_hidden_size = check.literal value(1024) : index
+  %epsilon = check.literal value(0.000001) : f32
+  %input = check.generate.fill value(2.0) : tensor<[%shape_hidden_size]xf32>
+  %weight = check.generate.fill value(0.5) : tensor<[%shape_hidden_size]xf32>
+  %output = check.generate.fill value(0.0) : tensor<[%shape_hidden_size]xf32>
+  %expected = check.generate.fill value(0.49999994) : tensor<[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_rmsnorm_f32_decode(%epsilon, %input, %weight, %output) : (f32, tensor<[%shape_hidden_size]xf32>, tensor<[%shape_hidden_size]xf32>, tensor<[%shape_hidden_size]xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.000001) rtol(0.000001) nan(same) : tensor<[%shape_hidden_size]xf32>
+  check.return
+}
+
+check.case public @qwen38_residual_add_f32_decode_known_08b_case {
+  %shape_hidden_size = check.literal value(1024) : index
+  %lhs = check.generate.fill value(0.125) : tensor<[%shape_hidden_size]xf32>
+  %rhs = check.generate.fill value(-0.0625) : tensor<[%shape_hidden_size]xf32>
+  %output = check.generate.fill value(0.0) : tensor<[%shape_hidden_size]xf32>
+  %expected = check.generate.fill value(0.0625) : tensor<[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_residual_add_f32_decode(%lhs, %rhs, %output) : (tensor<[%shape_hidden_size]xf32>, tensor<[%shape_hidden_size]xf32>, tensor<[%shape_hidden_size]xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.0) rtol(0.0) nan(same) : tensor<[%shape_hidden_size]xf32>
+  check.return
+}
+
+check.case public @qwen38_swiglu_f32_decode_known_08b_case {
+  %shape_ffn_size = check.literal value(3584) : index
+  %gate = check.generate.fill value(0.25) : tensor<[%shape_ffn_size]xf32>
+  %up = check.generate.fill value(0.5) : tensor<[%shape_ffn_size]xf32>
+  %output = check.generate.fill value(0.0) : tensor<[%shape_ffn_size]xf32>
+  %expected = check.generate.fill value(0.07027235627174377) : tensor<[%shape_ffn_size]xf32>
+  kernel.launch @qwen38_swiglu_f32_decode(%gate, %up, %output) : (tensor<[%shape_ffn_size]xf32>, tensor<[%shape_ffn_size]xf32>, tensor<[%shape_ffn_size]xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.000001) rtol(0.000001) nan(same) : tensor<[%shape_ffn_size]xf32>
+  check.return
+}
+
+check.case public @qwen38_layer_decode_primitives_known_08b_case {
+  %shape_ffn_size = check.literal value(3584) : index
+  %shape_hidden_size = check.literal value(1024) : index
+  %epsilon = check.literal value(0.000001) : f32
+  %norm_input = check.generate.fill value(2.0) : tensor<[%shape_hidden_size]xf32>
+  %norm_weight = check.generate.fill value(0.5) : tensor<[%shape_hidden_size]xf32>
+  %normalized = check.generate.fill value(0.0) : tensor<[%shape_hidden_size]xf32>
+  %expected_normalized = check.generate.fill value(0.49999994) : tensor<[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_rmsnorm_f32_decode(%epsilon, %norm_input, %norm_weight, %normalized) : (f32, tensor<[%shape_hidden_size]xf32>, tensor<[%shape_hidden_size]xf32>, tensor<[%shape_hidden_size]xf32>)
+  check.expect.close actual(%normalized) expected(%expected_normalized) atol(0.000001) rtol(0.000001) nan(same) : tensor<[%shape_hidden_size]xf32>
+
+  %lhs = check.generate.fill value(0.125) : tensor<[%shape_hidden_size]xf32>
+  %rhs = check.generate.fill value(-0.0625) : tensor<[%shape_hidden_size]xf32>
+  %sum = check.generate.fill value(0.0) : tensor<[%shape_hidden_size]xf32>
+  %expected_sum = check.generate.fill value(0.0625) : tensor<[%shape_hidden_size]xf32>
+  kernel.launch @qwen38_residual_add_f32_decode(%lhs, %rhs, %sum) : (tensor<[%shape_hidden_size]xf32>, tensor<[%shape_hidden_size]xf32>, tensor<[%shape_hidden_size]xf32>)
+  check.expect.close actual(%sum) expected(%expected_sum) atol(0.0) rtol(0.0) nan(same) : tensor<[%shape_hidden_size]xf32>
+
+  %gate = check.generate.fill value(0.25) : tensor<[%shape_ffn_size]xf32>
+  %up = check.generate.fill value(0.5) : tensor<[%shape_ffn_size]xf32>
+  %swiglu = check.generate.fill value(0.0) : tensor<[%shape_ffn_size]xf32>
+  %expected_swiglu = check.generate.fill value(0.07027235627174377) : tensor<[%shape_ffn_size]xf32>
+  kernel.launch @qwen38_swiglu_f32_decode(%gate, %up, %swiglu) : (tensor<[%shape_ffn_size]xf32>, tensor<[%shape_ffn_size]xf32>, tensor<[%shape_ffn_size]xf32>)
+  check.expect.close actual(%swiglu) expected(%expected_swiglu) atol(0.000001) rtol(0.000001) nan(same) : tensor<[%shape_ffn_size]xf32>
+  check.return
+}
+
+// Check-only launches use the shared bodies at Llama's 3072/8192 widths.
+// They do not bind a Qwen profile or define a model execution path.
+kernel.def @llm_rmsnorm_f32_known_fixture() {
+  %one = index.constant 1 : index
+  %rows = index.constant 3 : index
+  %threads = index.constant 256 : index
+  kernel.launch.config workgroups(%one, %rows, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%epsilon: f32, %input: buffer, %weight: buffer, %output: buffer) {
+  %width = index.constant 3072 : index
+  %divisor = scalar.constant 3072.0 : f32
+  %rows = index.constant 3 : index
+  %row0 = kernel.workgroup.id<y> : index
+  %row = index.assume %row0 [range(%row0, 0, 2)] : index
+  %row_bytes = index.constant 12288 : offset
+  %origin = index.scale %row, %row_bytes : index, offset -> offset
+  %half_output = scalar.constant false : i1
+  template.apply<@llm.rmsnorm.row>(%width, %divisor, %rows, %row, %origin, %half_output, %epsilon, %input, %weight, %output) : (index, f32, index, index, offset, i1, f32, buffer, buffer, buffer)
+  kernel.return
+}
+
+kernel.def @llm_rmsnorm_f16_known_fixture() {
+  %one = index.constant 1 : index
+  %rows = index.constant 3 : index
+  %threads = index.constant 256 : index
+  kernel.launch.config workgroups(%one, %rows, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%epsilon: f32, %input: buffer, %weight: buffer, %output: buffer) {
+  %width = index.constant 3072 : index
+  %divisor = scalar.constant 3072.0 : f32
+  %rows = index.constant 3 : index
+  %row0 = kernel.workgroup.id<y> : index
+  %row = index.assume %row0 [range(%row0, 0, 2)] : index
+  %row_bytes = index.constant 6144 : offset
+  %origin = index.scale %row, %row_bytes : index, offset -> offset
+  %half_output = scalar.constant true : i1
+  template.apply<@llm.rmsnorm.row>(%width, %divisor, %rows, %row, %origin, %half_output, %epsilon, %input, %weight, %output) : (index, f32, index, index, offset, i1, f32, buffer, buffer, buffer)
+  kernel.return
+}
+
+kernel.def @llm_residual_add_f32_known_fixture() {
+  %one = index.constant 1 : index
+  %groups = index.constant 3 : index
+  %rows = index.constant 3 : index
+  %threads = index.constant 256 : index
+  kernel.launch.config workgroups(%groups, %rows, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%lhs: buffer, %rhs: buffer, %output: buffer) {
+  %width = index.constant 3072 : index
+  %rows = index.constant 3 : index
+  %row0 = kernel.workgroup.id<y> : index
+  %row = index.assume %row0 [range(%row0, 0, 2)] : index
+  template.apply<@llm.residual_add_f32.row>(%width, %rows, %row, %lhs, %rhs, %output) : (index, index, index, buffer, buffer, buffer)
+  kernel.return
+}
+
+kernel.def @llm_swiglu_f32_known_fixture() {
+  %one = index.constant 1 : index
+  %groups = index.constant 32 : index
+  %rows = index.constant 3 : index
+  %threads = index.constant 256 : index
+  kernel.launch.config workgroups(%groups, %rows, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%gate: buffer, %up: buffer, %output: buffer) {
+  %width = index.constant 8192 : index
+  %rows = index.constant 3 : index
+  %row0 = kernel.workgroup.id<y> : index
+  %row = index.assume %row0 [range(%row0, 0, 2)] : index
+  template.apply<@llm.swiglu_f32.row>(%width, %rows, %row, %gate, %up, %output) : (index, index, index, buffer, buffer, buffer)
+  kernel.return
+}
+
+check.case public @llm_primitives_llama_known_case {
+  %epsilon = check.literal value(0.00001) : f32
+  %input = check.generate.fill value(2.0) : tensor<3x3072xf32>
+  %weight = check.generate.fill value(0.5) : tensor<3072xf32>
+  %normalized = check.generate.fill value(0.0) : tensor<3x3072xf32>
+  %expected_normalized = check.generate.fill value(0.49999937415122986) : tensor<3x3072xf32>
+  kernel.launch @llm_rmsnorm_f32_known_fixture(%epsilon, %input, %weight, %normalized) : (f32, tensor<3x3072xf32>, tensor<3072xf32>, tensor<3x3072xf32>)
+  check.expect.close actual(%normalized) expected(%expected_normalized) atol(0.000001) rtol(0.000001) nan(same) : tensor<3x3072xf32>
+  %normalized_f16 = check.generate.fill value(0.0) : tensor<3x3072xf16>
+  %expected_normalized_f16 = check.generate.fill value(0.5) : tensor<3x3072xf16>
+  kernel.launch @llm_rmsnorm_f16_known_fixture(%epsilon, %input, %weight, %normalized_f16) : (f32, tensor<3x3072xf32>, tensor<3072xf32>, tensor<3x3072xf16>)
+  check.expect.close actual(%normalized_f16) expected(%expected_normalized_f16) atol(0.0) rtol(0.0) nan(same) : tensor<3x3072xf16>
+  %lhs = check.generate.fill value(0.125) : tensor<3x3072xf32>
+  %rhs = check.generate.fill value(-0.0625) : tensor<3x3072xf32>
+  %expected_sum = check.generate.fill value(0.0625) : tensor<3x3072xf32>
+  kernel.launch @llm_residual_add_f32_known_fixture(%lhs, %rhs, %lhs) : (tensor<3x3072xf32>, tensor<3x3072xf32>, tensor<3x3072xf32>)
+  check.expect.close actual(%lhs) expected(%expected_sum) atol(0.0) rtol(0.0) nan(same) : tensor<3x3072xf32>
+  %gate = check.generate.fill value(0.25) : tensor<3x8192xf32>
+  %up = check.generate.fill value(0.5) : tensor<3x8192xf32>
+  %swiglu = check.generate.fill value(0.0) : tensor<3x8192xf32>
+  %expected_swiglu = check.generate.fill value(0.07027235627174377) : tensor<3x8192xf32>
+  kernel.launch @llm_swiglu_f32_known_fixture(%gate, %up, %swiglu) : (tensor<3x8192xf32>, tensor<3x8192xf32>, tensor<3x8192xf32>)
+  check.expect.close actual(%swiglu) expected(%expected_swiglu) atol(0.000001) rtol(0.000001) nan(same) : tensor<3x8192xf32>
   check.return
 }
 

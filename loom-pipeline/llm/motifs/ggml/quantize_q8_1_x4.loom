@@ -1,3 +1,4 @@
+template.decl @ggml.quantize_q8_1_x4.group_body_policy(%native_estimate: i1, %mmq_estimate: i1, %publish_output: i1, %group_count0: index, %group0: index, %input: buffer, %output: buffer)
 template.decl @ggml.q8_1_x4.word(%q8_input: buffer, %row_byte_base: offset, %q8_block: index, %word_in_block: index) -> (vector<4xi8>, f32)
 template.decl @ggml.quantize_q8_1_x4.group_body(%publish_output: i1, %group_count0: index, %group0: index, %input: buffer, %output: buffer)
 
@@ -131,7 +132,7 @@ func.def public inline @ggml_q8_1_x4_store_subgroup_block(%row_byte_base: offset
 // 32-lane wave executes after all 128 source values are visible. The uniform
 // publication predicate suppresses only destination writes so every lane still
 // reaches the workgroup barriers.
-template.def<@ggml.quantize_q8_1_x4.group_body> device @ggml_quantize_q8_1_x4_group_body(%publish_output: i1, %group_count0: index, %group0: index, %input: buffer, %output: buffer) {
+template.def<@ggml.quantize_q8_1_x4.group_body_policy> device @ggml_quantize_q8_1_x4_group_body_policy(%native_estimate: i1, %mmq_estimate: i1, %publish_output: i1, %group_count0: index, %group0: index, %input: buffer, %output: buffer) {
   %group_count, %group = index.assume %group_count0, %group0 [range(%group_count0, 1, 524288), lt(%group0, %group_count0)] : index, index
   %lane = kernel.workitem.id<x> : index
   %c0 = index.constant 0 : index
@@ -144,7 +145,7 @@ template.def<@ggml.quantize_q8_1_x4.group_body> device @ggml_quantize_q8_1_x4_gr
   %group_bytes = index.constant 144 : offset
   %payload_byte_add = index.constant 16 : offset
   %scratch_d_byte_add = index.constant 128 : offset
-  %scratch_bytes = index.constant 144 : offset
+  %scratch_bytes = index.constant 160 : offset
   %c0_f32 = scalar.constant 0.0 : f32
   %c1_f32 = scalar.constant 1.0 : f32
   %c127 = scalar.constant 127.0 : f32
@@ -168,6 +169,8 @@ template.def<@ggml.quantize_q8_1_x4.group_body> device @ggml_quantize_q8_1_x4_gr
   %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
   %scratch_values = buffer.view %scratch[%c0_offset] : buffer -> view<32xf32>
   %scratch_d = buffer.view %scratch[%scratch_d_byte_add] : buffer -> view<4xf32>
+  %scratch_inverse_add = index.constant 144 : offset
+  %scratch_inverse = buffer.view %scratch[%scratch_inverse_add] : buffer -> view<4xf32>
   view.store %thread_max, %scratch_values[%lane] : f32, view<32xf32>
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %is_cohort_leader = index.cmp eq, %word_in_block, %c0 : index
@@ -175,17 +178,63 @@ template.def<@ggml.quantize_q8_1_x4.group_body> device @ggml_quantize_q8_1_x4_gr
     %cohort_base = index.mul %block_in_group, %c8 : index
     %cohort_maxima = vector.load %scratch_values[%cohort_base] : view<32xf32> -> vector<8xf32>
     %amax = vector.reduce<maxnumf> %cohort_maxima, %c0_f32 : vector<8xf32>, f32
-    %d = scalar.divf %amax, %c127 : f32
+    %d, %mmq_inverse = scf.if %mmq_estimate -> (f32, f32) {
+      %amax_nonzero = scalar.cmpf one, %amax, %c0_f32 : f32
+      %inverse = scf.if %amax_nonzero -> (f32) {
+        %amax_inverse = scalar.divf<arcp> %c1_f32, %amax : f32
+        %scaled_inverse = scalar.mulf %c127, %amax_inverse : f32
+        scf.yield %scaled_inverse : f32
+      } else {
+        scf.yield %c0_f32 : f32
+      }
+      %inverse_nonzero = scalar.cmpf one, %inverse, %c0_f32 : f32
+      %scale = scf.if %inverse_nonzero -> (f32) {
+        %native_scale = scalar.divf<arcp> %c1_f32, %inverse : f32
+        scf.yield %native_scale : f32
+      } else {
+        scf.yield %c0_f32 : f32
+      }
+      scf.yield %scale, %inverse : f32, f32
+    } else {
+      %d = scf.if %native_estimate -> (f32) {
+        // F32(1/127), paired with the native reciprocal MMVQ policy.
+        %one_over_127 = scalar.constant 0.007874015718698502 : f32
+        %estimate_d = scalar.mulf %amax, %one_over_127 : f32
+        scf.yield %estimate_d : f32
+      } else {
+        %canonical_d = scalar.divf %amax, %c127 : f32
+        scf.yield %canonical_d : f32
+      }
+      scf.yield %d, %c0_f32 : f32, f32
+    }
     view.store %d, %scratch_d[%block_in_group] : f32, view<4xf32>
+    scf.if %mmq_estimate {
+      view.store %mmq_inverse, %scratch_inverse[%block_in_group] : f32, view<4xf32>
+    }
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %d = view.load %scratch_d[%block_in_group] : view<4xf32> -> f32
-  %d_nonzero = scalar.cmpf one, %d, %c0_f32 : f32
-  %d_inverse = scf.if %d_nonzero -> (f32) {
-    %inverse = scalar.divf %c1_f32, %d : f32
+  // MMQ quantizes with the original native inverse; recomputing it from d
+  // would introduce a second reciprocal and change rounding-boundary codes.
+  %d_inverse = scf.if %mmq_estimate -> (f32) {
+    %inverse = view.load %scratch_inverse[%block_in_group] : view<4xf32> -> f32
     scf.yield %inverse : f32
   } else {
-    scf.yield %c0_f32 : f32
+    %d_nonzero = scalar.cmpf one, %d, %c0_f32 : f32
+    %d_inverse = scf.if %d_nonzero -> (f32) {
+      %inverse = scf.if %native_estimate -> (f32) {
+        // ARCP requests native reciprocal without exact-division refinement.
+        %estimate_inverse = scalar.divf<arcp> %c1_f32, %d : f32
+        scf.yield %estimate_inverse : f32
+      } else {
+        %canonical_inverse = scalar.divf %c1_f32, %d : f32
+        scf.yield %canonical_inverse : f32
+      }
+      scf.yield %inverse : f32
+    } else {
+      scf.yield %c0_f32 : f32
+    }
+    scf.yield %d_inverse : f32
   }
   %d_inverse_vector = vector.splat %d_inverse : vector<4xf32>
   %scaled_values = vector.mulf %input_values, %d_inverse_vector : vector<4xf32>
@@ -201,15 +250,48 @@ template.def<@ggml.quantize_q8_1_x4.group_body> device @ggml_quantize_q8_1_x4_gr
   scf.if %publish_output {
     vector.store %packed_word, %group_qs[%packed_word_index] : vector<1xi32>, view<32xi32>
   }
-  %thread_sum = vector.reduce<addf> %rounded_values, %c0_f32 : vector<4xf32>, f32
+  %thread_sum = scf.if %mmq_estimate -> (f32) {
+    %x0 = vector.extract %input_values[0] : vector<4xf32> -> f32
+    %x1 = vector.extract %input_values[1] : vector<4xf32> -> f32
+    %x2 = vector.extract %input_values[2] : vector<4xf32> -> f32
+    %x3 = vector.extract %input_values[3] : vector<4xf32> -> f32
+    %s01 = scalar.addf %x0, %x1 : f32
+    %s012 = scalar.addf %s01, %x2 : f32
+    %s0123 = scalar.addf %s012, %x3 : f32
+    scf.yield %s0123 : f32
+  } else {
+    %quantized_sum = vector.reduce<addf> %rounded_values, %c0_f32 : vector<4xf32>, f32
+    scf.yield %quantized_sum : f32
+  }
   view.store %thread_sum, %scratch_values[%lane] : f32, view<32xf32>
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %publishes_metadata = scalar.andi %is_cohort_leader, %publish_output : i1
   scf.if %publishes_metadata {
     %cohort_base = index.mul %block_in_group, %c8 : index
     %cohort_sums = vector.load %scratch_values[%cohort_base] : view<32xf32> -> vector<8xf32>
-    %quantized_sum = vector.reduce<addf> %cohort_sums, %c0_f32 : vector<8xf32>, f32
-    %s = scalar.mulf %quantized_sum, %d : f32
+    %s = scf.if %mmq_estimate -> (f32) {
+      %t0 = vector.extract %cohort_sums[0] : vector<8xf32> -> f32
+      %t1 = vector.extract %cohort_sums[1] : vector<8xf32> -> f32
+      %t2 = vector.extract %cohort_sums[2] : vector<8xf32> -> f32
+      %t3 = vector.extract %cohort_sums[3] : vector<8xf32> -> f32
+      %t4 = vector.extract %cohort_sums[4] : vector<8xf32> -> f32
+      %t5 = vector.extract %cohort_sums[5] : vector<8xf32> -> f32
+      %t6 = vector.extract %cohort_sums[6] : vector<8xf32> -> f32
+      %t7 = vector.extract %cohort_sums[7] : vector<8xf32> -> f32
+      // Lane-zero result of the MMQ eight-lane XOR4, XOR2, XOR1 sum.
+      %p04 = scalar.addf %t0, %t4 : f32
+      %p26 = scalar.addf %t2, %t6 : f32
+      %p15 = scalar.addf %t1, %t5 : f32
+      %p37 = scalar.addf %t3, %t7 : f32
+      %p0426 = scalar.addf %p04, %p26 : f32
+      %p1537 = scalar.addf %p15, %p37 : f32
+      %original_sum = scalar.addf %p0426, %p1537 : f32
+      scf.yield %original_sum : f32
+    } else {
+      %quantized_sum = vector.reduce<addf> %cohort_sums, %c0_f32 : vector<8xf32>, f32
+      %scaled_sum = scalar.mulf %quantized_sum, %d : f32
+      scf.yield %scaled_sum : f32
+    }
     %d_f16 = scalar.fptrunc %d : f32 to f16
     %s_f16 = scalar.fptrunc %s : f32 to f16
     %ds_index = index.mul %block_in_group, %c2 : index
@@ -217,6 +299,14 @@ template.def<@ggml.quantize_q8_1_x4.group_body> device @ggml_quantize_q8_1_x4_gr
     %s_index = index.add %ds_index, %c1 : index
     view.store %s_f16, %group_ds[%s_index] : f16, view<8xf16>
   }
+  template.return
+}
+
+// Canonical callers retain exact divisions and the existing public contract.
+template.def<@ggml.quantize_q8_1_x4.group_body> device @ggml_quantize_q8_1_x4_group_body(%publish_output: i1, %group_count0: index, %group0: index, %input: buffer, %output: buffer) {
+  %native_estimate = scalar.constant false : i1
+  %mmq_estimate = scalar.constant false : i1
+  template.apply<@ggml.quantize_q8_1_x4.group_body_policy>(%native_estimate, %mmq_estimate, %publish_output, %group_count0, %group0, %input, %output) : (i1, i1, i1, index, index, buffer, buffer)
   template.return
 }
 

@@ -1,0 +1,440 @@
+// Llama 3.2 3B attention composition. Caller supplies normalized F32 input
+// and mutable residual rows; this operation has no Q/K norm or output gate.
+// Q/K/V and output projections consume the qualified canonical Q4/Q6 bindings.
+// All temporary projection, Q8 and attention storage is command-local.
+config.decl @llama.model.hidden_size : index
+config.decl @llama.model.query_heads : index
+config.decl @llama.model.kv_heads : index
+config.decl @llama.model.head_size : index
+config.decl @llama.model.kv_size : index
+config.decl @llama.model.layer_count : index
+config.decl @llama.attention.cache_capacity : %value: index where [range(%value, 1, 131072)]
+config.decl @llama.attention.pool_capacity : %value: index where [range(%value, 0, 4194304), multiple_of(%value, 64)]
+func.decl @llama32_rotary_position(%token_capacity: index, %token: index, %position_limit: index, %token_begin: index, %control_kind: index, %control_origin: offset, %control: buffer) -> (i1, index, i32)
+template.decl @llm.attention.row_f32(%query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %logical_capacity: index, %pool_capacity: index, %map_origin: offset, %query_origin: offset, %output_origin: offset, %key_origin: offset, %value_origin: offset, %map: buffer, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer)
+template.decl @llm.attention.row_f16_pv_small(%query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %logical_capacity: index, %pool_capacity: index, %map_origin: offset, %query_origin: offset, %output_origin: offset, %key_origin: offset, %value_origin: offset, %map: buffer, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer)
+template.decl @llm.attention.row_f16_pv_blas_boundary(%query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %logical_capacity: index, %pool_capacity: index, %map_origin: offset, %query_origin: offset, %output_origin: offset, %key_origin: offset, %value_origin: offset, %map: buffer, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer)
+template.decl @llm.residual_add_f32.row(%hidden_size0: index, %row_count0: index, %row0: index, %lhs: buffer, %rhs: buffer, %output: buffer)
+
+amdgpu.target<gfx11-generic> @llama32_attention_wave32 {subgroup_size = 32}
+
+// One head/token workgroup consumes exactly128 lanes. Publish all active K/V
+// first, then traverse only [0,absolute_position] for each query. Padded and
+// nonselected rows are zeroed in this transient attention matrix, ensuring
+// the following full-capacity packing/projection never reads stale scratch.
+kernel.def target(@llama32_attention_wave32) @llama32_attention_rows(%token_capacity0: index) {
+  %tokens = index.assume %token_capacity0 [range(%token_capacity0, 1, 512)] : index
+  %heads = config.get @llama.model.query_heads : index
+  %width = config.get @llama.model.head_size : index
+  %one = index.constant 1 : index
+  kernel.launch.config workgroups(%heads, %tokens, %one) workgroup_size(%width, %one, %one) : index
+} launch(%layer0: index, %cache_base: offset, %control_kind: index, %control_origin: offset, %token_begin: index, %map_origin: offset, %control: buffer, %map: buffer, %query: buffer, %cache: buffer, %output: buffer) {
+  %capacity = config.get @llama.attention.cache_capacity : index
+  %pool = config.get @llama.attention.pool_capacity : index
+  %q_heads = config.get @llama.model.query_heads : index
+  %kv_heads = config.get @llama.model.kv_heads : index
+  %head_size = config.get @llama.model.head_size : index
+  %q_width = config.get @llama.model.hidden_size : index
+  %kv_width = config.get @llama.model.kv_size : index
+  %layers = config.get @llama.model.layer_count : index
+  %layer = index.assume %layer0 [range(%layer0, 0, 27), lt(%layer0, %layers)] : index
+  %tokens = kernel.workgroup.count<y> : index
+  %row0 = kernel.workgroup.id<y> : index
+  %row = index.assume %row0 [lt(%row0, %tokens)] : index
+  %head = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %two = index.constant 2 : index
+  %four = index.constant 4 : offset
+  %row_bytes = index.scale %q_width, %four : index, offset -> offset
+  %row_origin = index.scale %row, %row_bytes : index, offset -> offset
+  %in_span = index.cmp uge, %row, %token_begin : index
+  %valid, %position, %query_count = scf.if %in_span -> (i1, index, i32) {
+    %relative = index.sub %row, %token_begin : index
+    %ok, %position, %active = func.call @llama32_rotary_position(%tokens, %relative, %capacity, %token_begin, %control_kind, %control_origin, %control) : (index, index, index, index, index, offset, buffer) -> (i1, index, i32)
+    %active_rows_fit0 = index.sub %tokens, %token_begin : index
+    %active_rows_fit = index.cast %active_rows_fit0 : index to i32
+    %fits = scalar.cmpi sle, %active, %active_rows_fit : i32
+    %valid = scalar.andi %ok, %fits : i1
+    scf.yield %valid, %position, %active : i1, index, i32
+  } else {
+    %no = scalar.constant false : i1
+    %none = scalar.constant 0 : i32
+    scf.yield %no, %zero, %none : i1, index, i32
+  }
+  scf.if %valid {
+    %pooled = index.cmp ne, %pool, %zero : index
+    %physical_capacity = scf.select %pooled, %pool, %capacity : index
+    %half_bytes = index.constant 2 : offset
+    %plane_token_bytes = index.scale %kv_width, %half_bytes : index, offset -> offset
+    %plane_stride = index.scale %physical_capacity, %plane_token_bytes : index, offset -> offset
+    %key_plane = index.mul %layer, %two : index
+    %value_plane = index.add %key_plane, %one : index
+    %key_add = index.scale %key_plane, %plane_stride : index, offset -> offset
+    %value_add = index.scale %value_plane, %plane_stride : index, offset -> offset
+    %key_origin = index.add %cache_base, %key_add : offset
+    %value_origin = index.add %cache_base, %value_add : offset
+    %position_i32 = index.cast %position : index to i32
+    %scale = scalar.constant 0.08838834764831845 : f32
+    %gate = scalar.constant false : i1
+    // MMVF small-query precision and one-product partials are separate bounds.
+    // Padded launch capacity is not the active query-column count.
+    %half_pv_limit = scalar.constant 256 : i32
+    %short_prefix = scalar.cmpi slt, %position_i32, %half_pv_limit : i32
+    %query_limit = scalar.constant 3 : i32
+    %small_queries = scalar.cmpi sle, %query_count, %query_limit : i32
+    %small_half_pv = scalar.andi %short_prefix, %small_queries : i1
+    scf.if %small_half_pv {
+      template.apply<@llm.attention.row_f16_pv_small>(%q_heads, %kv_heads, %head_size, %q_width, %kv_width, %capacity, %pool, %map_origin, %row_origin, %row_origin, %key_origin, %value_origin, %map, %scale, %position_i32, %head, %lane, %gate, %query, %query, %cache, %cache, %output) : (index, index, index, index, index, index, index, offset, offset, offset, offset, offset, buffer, f32, i32, index, index, i1, buffer, buffer, buffer, buffer, buffer)
+      scf.yield
+    } else {
+      // RDNA3 nonquantized F16 MMVF covers <=3 query columns and MMF
+      // covers <=16. Larger columns use BLAS with visible F16 P/output.
+      // The position bound is this materialized helper's supported extent.
+      %blas_limit = scalar.constant 16 : i32
+      %large_queries = scalar.cmpi sgt, %query_count, %blas_limit : i32
+      %blas_pv = scalar.andi %short_prefix, %large_queries : i1
+      scf.if %blas_pv {
+        template.apply<@llm.attention.row_f16_pv_blas_boundary>(%q_heads, %kv_heads, %head_size, %q_width, %kv_width, %capacity, %pool, %map_origin, %row_origin, %row_origin, %key_origin, %value_origin, %map, %scale, %position_i32, %head, %lane, %gate, %query, %query, %cache, %cache, %output) : (index, index, index, index, index, index, index, offset, offset, offset, offset, offset, buffer, f32, i32, index, index, i1, buffer, buffer, buffer, buffer, buffer)
+        scf.yield
+      } else {
+        template.apply<@llm.attention.row_f32>(%q_heads, %kv_heads, %head_size, %q_width, %kv_width, %capacity, %pool, %map_origin, %row_origin, %row_origin, %key_origin, %value_origin, %map, %scale, %position_i32, %head, %lane, %gate, %query, %query, %cache, %cache, %output) : (index, index, index, index, index, index, index, offset, offset, offset, offset, offset, buffer, f32, i32, index, index, i1, buffer, buffer, buffer, buffer, buffer)
+        scf.yield
+      }
+      scf.yield
+    }
+  } else {
+    %origin = index.constant 0 : offset
+    %head_base = index.mul %head, %head_size : index
+    %element = index.add %head_base, %lane : index
+    %out = buffer.view %output[%origin] : buffer -> view<[%tokens]x[%q_width]xf32>
+    %zero_value = scalar.constant 0.0 : f32
+    view.store %zero_value, %out[%row, %element] : f32, view<[%tokens]x[%q_width]xf32>
+  }
+  kernel.return
+}
+
+// The residual provider permits lhs/output aliasing. Guard each selected row;
+// caller-owned padded rows and rows of other packed spans remain untouched.
+kernel.def target(@llama32_attention_wave32) @llama32_attention_residual(%token_capacity0: index) {
+  %tokens = index.assume %token_capacity0 [range(%token_capacity0, 1, 512)] : index
+  %hidden = config.get @llama.model.hidden_size : index
+  %tile = index.constant 1024 : index
+  %groups = index.div %hidden, %tile : index
+  %threads = index.constant 256 : index
+  %one = index.constant 1 : index
+  kernel.launch.config workgroups(%groups, %tokens, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%control_kind: index, %control_origin: offset, %token_begin: index, %control: buffer, %projected: buffer, %residual: buffer) {
+  %tokens = kernel.workgroup.count<y> : index
+  %row0 = kernel.workgroup.id<y> : index
+  %row = index.assume %row0 [lt(%row0, %tokens)] : index
+  %capacity = config.get @llama.attention.cache_capacity : index
+  %hidden = config.get @llama.model.hidden_size : index
+  %in_span = index.cmp uge, %row, %token_begin : index
+  scf.if %in_span {
+    %relative = index.sub %row, %token_begin : index
+    %valid, %position, %active = func.call @llama32_rotary_position(%tokens, %relative, %capacity, %token_begin, %control_kind, %control_origin, %control) : (index, index, index, index, index, offset, buffer) -> (i1, index, i32)
+    %remaining0 = index.sub %tokens, %token_begin : index
+    %remaining = index.cast %remaining0 : index to i32
+    %fits = scalar.cmpi sle, %active, %remaining : i32
+    %apply = scalar.andi %valid, %fits : i1
+    scf.if %apply {
+      template.apply<@llm.residual_add_f32.row>(%hidden, %tokens, %row, %residual, %projected, %residual) : (index, index, index, buffer, buffer, buffer)
+    }
+  }
+  kernel.return
+}
+
+command.program.decl @llama32_quantize_q8_controlled(%capacity: index, %input_size: index, %row_origin: index, %count_origin: offset, %kind: index) launch(%input: buffer, %control: buffer, %output: buffer)
+command.program.decl @llama32_project_q_controlled(%layer: index, %token_count: index, %row_origin: index, %count_origin: offset, %kind: index) launch(%parameters: buffer, %packed_input: buffer, %control: buffer, %output: buffer)
+command.program.decl @llama32_project_k_controlled(%layer: index, %token_count: index, %row_origin: index, %count_origin: offset, %kind: index) launch(%parameters: buffer, %packed_input: buffer, %control: buffer, %output: buffer)
+command.program.decl @llama32_project_v_controlled(%layer: index, %token_count: index, %row_origin: index, %count_origin: offset, %kind: index) launch(%parameters: buffer, %packed_input: buffer, %control: buffer, %output: buffer)
+command.program.decl @llama32_project_attention_output_controlled(%layer: index, %token_count: index, %row_origin: index, %count_origin: offset, %kind: index) launch(%parameters: buffer, %packed_input: buffer, %control: buffer, %output: buffer)
+command.program.decl @llama32_prepare_attention(%layer0: index, %token_capacity: index, %control_origin: offset, %token_begin: index, %cache_base: offset, %map_origin: offset, %control_kind: index) launch(%parameters: buffer, %control: buffer, %map: buffer, %query_projection: buffer, %key_projection: buffer, %value_projection: buffer, %query: buffer, %cache: buffer)
+
+// All normalized/residual matrices cover token_capacity rows. Native owners
+// guarantee token_begin+active_count<=token_capacity and an initialized valid
+// cache prefix. Parameters and normalized rows remain immutable. Scratch is
+// local to this command; the cache arena/map follow accepted native ownership.
+template.decl @llama32.attention.sequence(%layer: index, %token_capacity: index, %control_origin: offset, %token_begin: index, %cache_base: offset, %map_origin: offset, %control_kind: index, %native: i1, %spans: index, %parameters: buffer, %normalized: buffer, %residual: buffer, %control: buffer, %map: buffer, %cache: buffer)
+template.def<@llama32.attention.sequence> @llama32_attention_sequence(%layer: index, %token_capacity: index, %control_origin: offset, %token_begin: index, %cache_base: offset, %map_origin: offset, %control_kind: index, %native: i1, %spans: index, %parameters: buffer, %normalized: buffer, %residual: buffer, %control: buffer, %map: buffer, %cache: buffer) {
+  %hidden = config.get @llama.model.hidden_size : index
+  %kv = config.get @llama.model.kv_size : index
+  %four = index.constant 4 : index
+  %qk_values = index.constant 128 : index
+  %q8_bytes = index.constant 144 : index
+  %groups = index.div %hidden, %qk_values : index
+  %packed_row_bytes = index.mul %groups, %q8_bytes : index
+  %packed_bytes0 = index.mul %token_capacity, %packed_row_bytes : index
+  %packed_bytes = index.cast %packed_bytes0 : index to offset
+  %hidden_row_bytes = index.mul %hidden, %four : index
+  %hidden_bytes0 = index.mul %token_capacity, %hidden_row_bytes : index
+  %hidden_bytes = index.cast %hidden_bytes0 : index to offset
+  %kv_row_bytes = index.mul %kv, %four : index
+  %kv_bytes0 = index.mul %token_capacity, %kv_row_bytes : index
+  %kv_bytes = index.cast %kv_bytes0 : index to offset
+  %input_q8 = buffer.alloca<global> align(256) %packed_bytes : buffer
+  %query_projection = buffer.alloca<global> align(256) %hidden_bytes : buffer
+  %key_projection = buffer.alloca<global> align(256) %kv_bytes : buffer
+  %value_projection = buffer.alloca<global> align(256) %kv_bytes : buffer
+  %query = buffer.alloca<global> align(256) %hidden_bytes : buffer
+  %attention = buffer.alloca<global> align(256) %hidden_bytes : buffer
+  %attention_q8 = buffer.alloca<global> align(256) %packed_bytes : buffer
+  %projected = buffer.alloca<global> align(256) %hidden_bytes : buffer
+  // Packed projection columns cover the TOTAL matrix, independently of each span's attention queries.
+  %projection_row_origin = scf.if %native -> (index) {
+    %zero_projection_row = index.constant 0 : index
+    scf.yield %zero_projection_row : index
+  } else {
+    scf.yield %token_begin : index
+  }
+  %projection_count_origin = scf.if %native -> (offset) {
+    %zero_projection_origin = index.constant 0 : offset
+    scf.yield %zero_projection_origin : offset
+  } else {
+    scf.yield %control_origin : offset
+  }
+  command.program.launch @llama32_quantize_q8_controlled[%token_capacity, %hidden, %projection_row_origin, %projection_count_origin, %control_kind](%normalized, %control, %input_q8) : [index, index, index, offset, index](buffer, buffer, buffer)
+  command.program.launch @llama32_project_q_controlled[%layer, %token_capacity, %projection_row_origin, %projection_count_origin, %control_kind](%parameters, %input_q8, %control, %query_projection) : [index, index, index, offset, index](buffer, buffer, buffer, buffer)
+  command.program.launch @llama32_project_k_controlled[%layer, %token_capacity, %projection_row_origin, %projection_count_origin, %control_kind](%parameters, %input_q8, %control, %key_projection) : [index, index, index, offset, index](buffer, buffer, buffer, buffer)
+  command.program.launch @llama32_project_v_controlled[%layer, %token_capacity, %projection_row_origin, %projection_count_origin, %control_kind](%parameters, %input_q8, %control, %value_projection) : [index, index, index, offset, index](buffer, buffer, buffer, buffer)
+  scf.if %native {
+    %factors = command.parameter %parameters, "rope_freqs.weight" : view<64xf32>
+    kernel.launch @llama32_native_prepare[%token_capacity, %spans](%spans, %layer, %control, %map, %factors, %query_projection, %key_projection, %value_projection, %query, %cache) : [index, index](index, index, buffer, buffer, view<64xf32>, buffer, buffer, buffer, buffer, buffer)
+    kernel.launch @llama32_native_attention_rows[%token_capacity, %spans](%spans, %layer, %control, %map, %query, %cache, %attention) : [index, index](index, index, buffer, buffer, buffer, buffer, buffer)
+  } else {
+    %remaining0 = index.sub %token_capacity, %token_begin : index
+    %remaining = index.assume %remaining0 [range(%remaining0, 1, 512)] : index
+    command.program.launch @llama32_prepare_attention[%layer, %remaining, %control_origin, %token_begin, %cache_base, %map_origin, %control_kind](%parameters, %control, %map, %query_projection, %key_projection, %value_projection, %query, %cache) : [index, index, offset, index, offset, offset, index](buffer, buffer, buffer, buffer, buffer, buffer, buffer, buffer)
+    kernel.launch @llama32_attention_rows[%token_capacity](%layer, %cache_base, %control_kind, %control_origin, %token_begin, %map_origin, %control, %map, %query, %cache, %attention) : [index](index, offset, index, offset, index, offset, buffer, buffer, buffer, buffer, buffer)
+  }
+  command.program.launch @llama32_quantize_q8_controlled[%token_capacity, %hidden, %projection_row_origin, %projection_count_origin, %control_kind](%attention, %control, %attention_q8) : [index, index, index, offset, index](buffer, buffer, buffer)
+  command.program.launch @llama32_project_attention_output_controlled[%layer, %token_capacity, %projection_row_origin, %projection_count_origin, %control_kind](%parameters, %attention_q8, %control, %projected) : [index, index, index, offset, index](buffer, buffer, buffer, buffer)
+  scf.if %native {
+    kernel.launch @llama32_native_attention_residual[%token_capacity](%control, %projected, %residual) : [index](buffer, buffer, buffer)
+  } else {
+    kernel.launch @llama32_attention_residual[%token_capacity](%control_kind, %control_origin, %token_begin, %control, %projected, %residual) : [index](index, offset, index, buffer, buffer, buffer)
+  }
+  template.return
+}
+
+command.program.def public @llama32_attention(%layer: index, %token_capacity: index, %control_origin: offset, %token_begin: index, %cache_base: offset, %map_origin: offset, %control_kind: index) launch(%parameters: buffer, %normalized: buffer, %residual: buffer, %control: buffer, %map: buffer, %cache: buffer) where [range(%layer, 0, 27), range(%token_capacity, 1, 512), range(%token_begin, 0, 511), lt(%token_begin, %token_capacity), range(%control_kind, 0, 1)] {
+  %native = scalar.constant false : i1
+  %spans = index.constant 1 : index
+  template.apply<@llama32.attention.sequence>(%layer, %token_capacity, %control_origin, %token_begin, %cache_base, %map_origin, %control_kind, %native, %spans, %parameters, %normalized, %residual, %control, %map, %cache) : (index, index, offset, index, offset, offset, index, i1, index, buffer, buffer, buffer, buffer, buffer, buffer)
+  command.return
+}
+
+command.program.def public @llama32_attention_prefill(%layer: index, %token_capacity: index, %control_origin: offset, %token_begin: index, %cache_base: offset, %map_origin: offset) launch(%parameters: buffer, %normalized: buffer, %residual: buffer, %control: buffer, %map: buffer, %cache: buffer) where [range(%layer, 0, 27), range(%token_capacity, 1, 512), range(%token_begin, 0, 511), lt(%token_begin, %token_capacity)] {
+  %kind = index.constant 0 : index
+  command.program.launch @llama32_attention[%layer, %token_capacity, %control_origin, %token_begin, %cache_base, %map_origin, %kind](%parameters, %normalized, %residual, %control, %map, %cache) : [index, index, offset, index, offset, offset, index](buffer, buffer, buffer, buffer, buffer, buffer)
+  command.return
+}
+
+command.program.def public @llama32_attention_decode(%layer: index, %cache_base: offset, %map_origin: offset) launch(%parameters: buffer, %normalized: buffer, %residual: buffer, %control: buffer, %map: buffer, %cache: buffer) where [range(%layer, 0, 27)] {
+  %tokens = index.constant 1 : index
+  %zero = index.constant 0 : index
+  %origin = index.constant 0 : offset
+  %kind = index.constant 1 : index
+  command.program.launch @llama32_attention[%layer, %tokens, %origin, %zero, %cache_base, %map_origin, %kind](%parameters, %normalized, %residual, %control, %map, %cache) : [index, index, offset, index, offset, offset, index](buffer, buffer, buffer, buffer, buffer, buffer)
+  command.return
+}
+
+// Runtime packed descriptors and row origins remain device inputs. The shared
+// sequence owns the projections, scratch, attention and output publication.
+command.program.def public @llama32_attention_native(%layer: index, %token_capacity: index, %spans: index) launch(%parameters: buffer, %normalized: buffer, %residual: buffer, %control: buffer, %map: buffer, %cache: buffer) where [range(%layer, 0, 27), range(%token_capacity, 1, 512), range(%spans, 1, 16)] {
+  %native = scalar.constant true : i1
+  %control_origin = index.constant 0 : offset
+  %token_begin = index.constant 0 : index
+  %cache_base = index.constant 0 : offset
+  %map_origin = index.constant 0 : offset
+  %control_kind = index.constant 0 : index
+  template.apply<@llama32.attention.sequence>(%layer, %token_capacity, %control_origin, %token_begin, %cache_base, %map_origin, %control_kind, %native, %spans, %parameters, %normalized, %residual, %control, %map, %cache) : (index, index, offset, index, offset, offset, index, i1, index, buffer, buffer, buffer, buffer, buffer, buffer)
+  command.return
+}
+
+func.decl @qwen38_span_binding(%epoch: buffer, %span: index) -> (offset, index, index)
+func.decl @qwen38_row_kv_origin(%rows: buffer, %row: index, %layer_origin: offset) -> (offset)
+func.decl @qwen38_row_kv_map_origin(%logical_capacity: index, %row: index) -> (offset)
+func.decl @qwen38_kv_position(%logical_capacity: index, %map: buffer, %map_origin: offset, %position: index, %pool_capacity: index) -> (index)
+func.decl @llm_rotary_span_position(%token_capacity: index, %token: index, %position_limit: index, %active_i32: i32, %base_i32: i32) -> (i1, index)
+func.decl @llama32_active_row(%capacity: index, %row: index, %kind: index, %control: buffer) -> (i1)
+template.decl @llm.rotary.query_row128(%row_count: index, %heads: index, %token: index, %head: index, %lane: index, %position: index, %theta_scale: f32, %projection_origin: offset, %query_origin: offset, %factors: buffer, %projection: buffer, %query: buffer)
+template.decl @llm.rotary.kv_row128(%row_count: index, %heads: index, %physical_capacity: index, %token: index, %head: index, %lane: index, %logical_position: index, %physical_position: index, %theta_scale: f32, %projection_origin: offset, %key_origin: offset, %value_origin: offset, %factors: buffer, %key: buffer, %value: buffer, %cache: buffer)
+
+// Locate one token in the immutable native descriptor partition. Only a valid
+// row reads its resident origins/map; logical positions own RoPE and masking.
+func.def inline @llama32_native_row(%tokens: index, %spans: index, %token: index, %layer: index, %metadata: buffer, %origins: buffer) -> (i1, index, offset, offset, offset, i32) {
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %origin = index.constant 0 : offset
+  %no = scalar.constant false : i1
+  %none = scalar.constant 0 : i32
+  %kind = index.constant 2 : index
+  %active = func.call @llama32_active_row(%tokens, %token, %kind, %metadata) : (index, index, index, buffer) -> (i1)
+  %valid, %position, %map_origin, %key_origin, %value_origin, %query_count = scf.if %active -> (i1, index, offset, offset, offset, i32) {
+    %header = buffer.view %metadata[%origin] : buffer -> view<3xi32>
+    %count32 = view.load %header[1] : view<3xi32> -> i32
+    %count0 = index.cast %count32 : i32 to index
+    %count = index.assume %count0 [range(%count0, 1, 16), le(%count0, %spans)] : index
+    %capacity = config.get @llama.attention.cache_capacity : index
+    %pool = config.get @llama.attention.pool_capacity : index
+    %pooled = index.cmp ne, %pool, %zero : index
+    %physical = scf.select %pooled, %pool, %capacity : index
+    %stride_bytes = index.constant 2048 : offset
+    %plane_stride = index.scale %physical, %stride_bytes : index, offset -> offset
+    %two = index.constant 2 : index
+    %key_plane = index.mul %layer, %two : index
+    %layer_origin = index.scale %key_plane, %plane_stride : index, offset -> offset
+    %found, %position, %map_origin, %key_origin, %value_origin, %query_count = scf.for %span = [%zero to %count step %one](%found = %no : i1, %pos = %zero : index, %mo = %origin : offset, %ko = %origin : offset, %vo = %origin : offset, %queries = %none : i32) -> (i1, index, offset, offset, offset, i32) {
+      %control_origin, %begin, %resident0 = func.call @qwen38_span_binding(%metadata, %span) : (buffer, index) -> (offset, index, index)
+      %after_begin = index.cmp uge, %token, %begin : index
+      %begin_fits = index.cmp ult, %begin, %tokens : index
+      %candidate = scalar.andi %after_begin, %begin_fits : i1
+      %ok, %p, %m, %k, %v, %nq = scf.if %candidate -> (i1, index, offset, offset, offset, i32) {
+        %relative = index.sub %token, %begin : index
+        %remaining = index.sub %tokens, %begin : index
+        %control = buffer.view %metadata[%control_origin] : buffer -> view<5xi32>
+        %n = view.load %control[0] : view<5xi32> -> i32
+        %base = view.load %control[1] : view<5xi32> -> i32
+        %ok, %p = func.call @llm_rotary_span_position(%remaining, %relative, %capacity, %n, %base) : (index, index, index, i32, i32) -> (i1, index)
+        %m, %k, %v = scf.if %ok -> (offset, offset, offset) {
+          %resident = index.assume %resident0 [range(%resident0, 0, 15)] : index
+          %m = func.call @qwen38_row_kv_map_origin(%capacity, %resident) : (index, index) -> (offset)
+          %k = func.call @qwen38_row_kv_origin(%origins, %resident, %layer_origin) : (buffer, index, offset) -> (offset)
+          %v = index.add %k, %plane_stride : offset
+          scf.yield %m, %k, %v : offset, offset, offset
+        } else { scf.yield %origin, %origin, %origin : offset, offset, offset }
+        scf.yield %ok, %p, %m, %k, %v, %n : i1, index, offset, offset, offset, i32
+      } else { scf.yield %no, %zero, %origin, %origin, %origin, %none : i1, index, offset, offset, offset, i32 }
+      %next = scalar.ori %found, %ok : i1
+      %np = scf.select %ok, %p, %pos : index
+      %nm = scf.select %ok, %m, %mo : offset
+      %nk = scf.select %ok, %k, %ko : offset
+      %nv = scf.select %ok, %v, %vo : offset
+      %nqueries = scf.select %ok, %nq, %queries : i32
+      scf.yield %next, %np, %nm, %nk, %nv, %nqueries : i1, index, offset, offset, offset, i32
+    }
+    scf.yield %found, %position, %map_origin, %key_origin, %value_origin, %query_count : i1, index, offset, offset, offset, i32
+  } else { scf.yield %no, %zero, %origin, %origin, %origin, %none : i1, index, offset, offset, offset, i32 }
+  func.return %valid, %position, %map_origin, %key_origin, %value_origin, %query_count : i1, index, offset, offset, offset, i32
+}
+
+kernel.def target(@llama32_attention_wave32) @llama32_native_prepare(%tokens0: index, %spans0: index) {
+  %tokens = index.assume %tokens0 [range(%tokens0, 1, 512)] : index
+  %heads = config.get @llama.model.query_heads : index
+  %width = config.get @llama.model.head_size : index
+  %one = index.constant 1 : index
+  kernel.launch.config workgroups(%heads, %tokens, %one) workgroup_size(%width, %one, %one) : index
+} launch(%spans0: index, %layer: index, %metadata: buffer, %origins: buffer, %factors: buffer, %q_projection: buffer, %k_projection: buffer, %v_projection: buffer, %query: buffer, %cache: buffer) {
+  %tokens = kernel.workgroup.count<y> : index
+  %token0 = kernel.workgroup.id<y> : index
+  %token = index.assume %token0 [lt(%token0, %tokens)] : index
+  %head = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %spans = index.assume %spans0 [range(%spans0, 1, 16)] : index
+  %valid, %position, %map_origin, %key_origin, %value_origin, %query_count = func.call @llama32_native_row(%tokens, %spans, %token, %layer, %metadata, %origins) : (index, index, index, index, buffer, buffer) -> (i1, index, offset, offset, offset, i32)
+  scf.if %valid {
+    %zero = index.constant 0 : index
+    %origin = index.constant 0 : offset
+    %qheads = config.get @llama.model.query_heads : index
+    %kvheads = config.get @llama.model.kv_heads : index
+    %theta = scalar.constant 0.8146172165870667 : f32
+    template.apply<@llm.rotary.query_row128>(%tokens, %qheads, %token, %head, %lane, %position, %theta, %origin, %origin, %factors, %q_projection, %query) : (index, index, index, index, index, index, f32, offset, offset, buffer, buffer, buffer)
+    %is_kv = index.cmp ult, %head, %kvheads : index
+    scf.if %is_kv {
+      %capacity = config.get @llama.attention.cache_capacity : index
+      %pool = config.get @llama.attention.pool_capacity : index
+      %pooled = index.cmp ne, %pool, %zero : index
+      %physical_capacity = scf.select %pooled, %pool, %capacity : index
+      %physical = func.call @qwen38_kv_position(%capacity, %origins, %map_origin, %position, %pool) : (index, buffer, offset, index, index) -> (index)
+      template.apply<@llm.rotary.kv_row128>(%tokens, %kvheads, %physical_capacity, %token, %head, %lane, %position, %physical, %theta, %origin, %key_origin, %value_origin, %factors, %k_projection, %v_projection, %cache) : (index, index, index, index, index, index, index, index, f32, offset, offset, offset, buffer, buffer, buffer, buffer)
+    }
+  }
+  kernel.return
+}
+
+kernel.def target(@llama32_attention_wave32) @llama32_native_attention_rows(%tokens0: index, %spans0: index) {
+  %tokens = index.assume %tokens0 [range(%tokens0, 1, 512)] : index
+  %heads = config.get @llama.model.query_heads : index
+  %width = config.get @llama.model.head_size : index
+  %one = index.constant 1 : index
+  kernel.launch.config workgroups(%heads, %tokens, %one) workgroup_size(%width, %one, %one) : index
+} launch(%spans0: index, %layer: index, %metadata: buffer, %origins: buffer, %query: buffer, %cache: buffer, %output: buffer) {
+  %tokens = kernel.workgroup.count<y> : index
+  %token0 = kernel.workgroup.id<y> : index
+  %token = index.assume %token0 [lt(%token0, %tokens)] : index
+  %head = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %spans = index.assume %spans0 [range(%spans0, 1, 16)] : index
+  %valid, %position, %map_origin, %key_origin, %value_origin, %query_count = func.call @llama32_native_row(%tokens, %spans, %token, %layer, %metadata, %origins) : (index, index, index, index, buffer, buffer) -> (i1, index, offset, offset, offset, i32)
+  %qheads = config.get @llama.model.query_heads : index
+  %kvheads = config.get @llama.model.kv_heads : index
+  %width = config.get @llama.model.head_size : index
+  %hidden = config.get @llama.model.hidden_size : index
+  %kv = config.get @llama.model.kv_size : index
+  %four = index.constant 4 : offset
+  %row_bytes = index.scale %hidden, %four : index, offset -> offset
+  %row_origin = index.scale %token, %row_bytes : index, offset -> offset
+  scf.if %valid {
+    %capacity = config.get @llama.attention.cache_capacity : index
+    %pool = config.get @llama.attention.pool_capacity : index
+    %scale = scalar.constant 0.08838834764831845 : f32
+    %position32 = index.cast %position : index to i32
+    %no_gate = scalar.constant false : i1
+    // MMVF small-query precision and one-product partials are separate bounds.
+    // Padded launch capacity is not the active query-column count.
+    %half_pv_limit = scalar.constant 256 : i32
+    %short_prefix = scalar.cmpi slt, %position32, %half_pv_limit : i32
+    %query_limit = scalar.constant 3 : i32
+    %small_queries = scalar.cmpi sle, %query_count, %query_limit : i32
+    %small_half_pv = scalar.andi %short_prefix, %small_queries : i1
+    scf.if %small_half_pv {
+      template.apply<@llm.attention.row_f16_pv_small>(%qheads, %kvheads, %width, %hidden, %kv, %capacity, %pool, %map_origin, %row_origin, %row_origin, %key_origin, %value_origin, %origins, %scale, %position32, %head, %lane, %no_gate, %query, %query, %cache, %cache, %output) : (index, index, index, index, index, index, index, offset, offset, offset, offset, offset, buffer, f32, i32, index, index, i1, buffer, buffer, buffer, buffer, buffer)
+      scf.yield
+    } else {
+      // RDNA3 nonquantized F16 MMVF covers <=3 query columns and MMF
+      // covers <=16. Larger columns use BLAS with visible F16 P/output.
+      // The position bound is this materialized helper's supported extent.
+      %blas_limit = scalar.constant 16 : i32
+      %large_queries = scalar.cmpi sgt, %query_count, %blas_limit : i32
+      %blas_pv = scalar.andi %short_prefix, %large_queries : i1
+      scf.if %blas_pv {
+        template.apply<@llm.attention.row_f16_pv_blas_boundary>(%qheads, %kvheads, %width, %hidden, %kv, %capacity, %pool, %map_origin, %row_origin, %row_origin, %key_origin, %value_origin, %origins, %scale, %position32, %head, %lane, %no_gate, %query, %query, %cache, %cache, %output) : (index, index, index, index, index, index, index, offset, offset, offset, offset, offset, buffer, f32, i32, index, index, i1, buffer, buffer, buffer, buffer, buffer)
+        scf.yield
+      } else {
+        template.apply<@llm.attention.row_f32>(%qheads, %kvheads, %width, %hidden, %kv, %capacity, %pool, %map_origin, %row_origin, %row_origin, %key_origin, %value_origin, %origins, %scale, %position32, %head, %lane, %no_gate, %query, %query, %cache, %cache, %output) : (index, index, index, index, index, index, index, offset, offset, offset, offset, offset, buffer, f32, i32, index, index, i1, buffer, buffer, buffer, buffer, buffer)
+        scf.yield
+      }
+      scf.yield
+    }
+  } else {
+    %origin = index.constant 0 : offset
+    %head_base = index.mul %head, %width : index
+    %element = index.add %head_base, %lane : index
+    %out = buffer.view %output[%origin] : buffer -> view<[%tokens]x[%hidden]xf32>
+    %zero = scalar.constant 0.0 : f32
+    view.store %zero, %out[%token, %element] : f32, view<[%tokens]x[%hidden]xf32>
+  }
+  kernel.return
+}
+
+kernel.def target(@llama32_attention_wave32) @llama32_native_attention_residual(%tokens0: index) {
+  %tokens = index.assume %tokens0 [range(%tokens0, 1, 512)] : index
+  %three = index.constant 3 : index
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  kernel.launch.config workgroups(%three, %tokens, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%metadata: buffer, %projected: buffer, %residual: buffer) {
+  %tokens = kernel.workgroup.count<y> : index
+  %row0 = kernel.workgroup.id<y> : index
+  %row = index.assume %row0 [lt(%row0, %tokens)] : index
+  %kind = index.constant 2 : index
+  %valid = func.call @llama32_active_row(%tokens, %row, %kind, %metadata) : (index, index, index, buffer) -> (i1)
+  scf.if %valid {
+    %hidden = config.get @llama.model.hidden_size : index
+    template.apply<@llm.residual_add_f32.row>(%hidden, %tokens, %row, %residual, %projected, %residual) : (index, index, index, buffer, buffer, buffer)
+  }
+  kernel.return
+}

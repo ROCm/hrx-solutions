@@ -1,0 +1,419 @@
+kernel.decl @ggml_quantize_q8_1_x4_qk_compat_f32(%capacity: index, %input_size: index) launch(%capacity: index, %input_size: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer, %input: buffer, %output: buffer)
+kernel.decl @ggml_linear_q4k_q8_1_x4_compat(%capacity: index, %input_size: index, %output_size: index) launch(%capacity: index, %input_size: index, %output_size: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_linear_q6k_q8_1_x4_compat(%capacity: index, %input_size: index, %output_size: index) launch(%capacity: index, %input_size: index, %output_size: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer, %input: buffer, %weight: buffer, %output: buffer)
+// Shared static FFN command sequences. Geometry, resident representation,
+// kernel schedule and borrowed weights are explicit preparation operands.
+// Canonical paths pack activations to Q8_1_x4; prepared paths preserve channel8,
+// concurrent gate/up, m4 verification and the tuned F16/F32 fusion boundaries.
+// This provider does not look up model configuration, layer bits or tensor keys.
+
+template.decl @llm.residual_add_f32.row(%hidden_size0: index, %row_count0: index, %row0: index, %lhs: buffer, %rhs: buffer, %output: buffer)
+template.decl @llm.swiglu_f32.row(%ffn_size0: index, %row_count0: index, %row0: index, %gate: buffer, %up: buffer, %output: buffer)
+template.decl @qwen38.ffn_gate_up_q5k.block_prefetch.body(%input_size: index, %output_size: index, %weight_channels: index, %token_count_data: buffer, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer)
+amdgpu.target<gfx11-generic> @llm_ffn_block_prefetch_gfx11_wave32 {subgroup_size = 32}
+
+kernel.def @llm_ffn_swiglu_f32_decode(%ffn_size: index) {
+  %c1 = index.constant 1 : index
+  %channels_per_group = index.constant 256 : index
+  %bounded_ffn_size = index.assume %ffn_size [range(%ffn_size, 256, 32768), multiple_of(%ffn_size, 256)] : index
+  %workgroup_count = index.div %bounded_ffn_size, %channels_per_group : index
+  %workgroup_size = index.constant 256 : index
+  kernel.launch.config workgroups(%workgroup_count, %c1, %c1) workgroup_size(%workgroup_size, %c1, %c1) : index
+} launch(%ffn_size: index, %gate: buffer, %up: buffer, %output: buffer) {
+  %row_count = index.constant 1 : index
+  %row = index.constant 0 : index
+  template.apply<@llm.swiglu_f32.row>(%ffn_size, %row_count, %row, %gate, %up, %output) : (index, index, index, buffer, buffer, buffer)
+  kernel.return
+}
+
+kernel.def @llm_ffn_swiglu_f32_prefill(%token_count: index, %ffn_size: index) {
+  %bounded_token_count = index.assume %token_count [range(%token_count, 0, 512)] : index
+  %unit = index.constant 1 : index
+  %channels_per_group = index.constant 256 : index
+  %bounded_ffn_size = index.assume %ffn_size [range(%ffn_size, 256, 32768), multiple_of(%ffn_size, 256)] : index
+  %workgroup_count = index.div %bounded_ffn_size, %channels_per_group : index
+  %workgroup_size = index.constant 256 : index
+  kernel.launch.config workgroups(%workgroup_count, %bounded_token_count, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%ffn_size: index, %token_count: index, %gate: buffer, %up: buffer, %output: buffer) {
+  %bounded_token_count = index.assume %token_count [range(%token_count, 1, 512)] : index
+  %token0 = kernel.workgroup.id<y> : index
+  %token = index.assume %token0 [lt(%token0, %bounded_token_count)] : index
+  template.apply<@llm.swiglu_f32.row>(%ffn_size, %bounded_token_count, %token, %gate, %up, %output) : (index, index, index, buffer, buffer, buffer)
+  kernel.return
+}
+
+// Complete 1024-channel tiles make device width equal grid_x*1024. Deriving
+// it from the grid preserves vector4 bounds through neutral launch composition.
+kernel.def @llm_ffn_residual_add_f32_decode(%hidden_size: index) {
+  %c1 = index.constant 1 : index
+  %channels_per_group = index.constant 1024 : index
+  %bounded_hidden_size = index.assume %hidden_size [range(%hidden_size, 1024, 32768), multiple_of(%hidden_size, 1024)] : index
+  %workgroup_count = index.div %bounded_hidden_size, %channels_per_group : index
+  %workgroup_size = index.constant 256 : index
+  kernel.launch.config workgroups(%workgroup_count, %c1, %c1) workgroup_size(%workgroup_size, %c1, %c1) : index
+} launch(%lhs: buffer, %rhs: buffer, %output: buffer) {
+  %width_groups = kernel.workgroup.count<x> : index
+  %width_per_group = index.constant 1024 : index
+  %hidden_size = index.mul %width_groups, %width_per_group : index
+  %row_count = index.constant 1 : index
+  %row = index.constant 0 : index
+  template.apply<@llm.residual_add_f32.row>(%hidden_size, %row_count, %row, %lhs, %rhs, %output) : (index, index, index, buffer, buffer, buffer)
+  kernel.return
+}
+
+kernel.def @llm_ffn_residual_add_f32_prefill(%token_count: index, %hidden_size: index) {
+  %bounded_token_count = index.assume %token_count [range(%token_count, 0, 512)] : index
+  %unit = index.constant 1 : index
+  %channels_per_group = index.constant 1024 : index
+  %bounded_hidden_size = index.assume %hidden_size [range(%hidden_size, 1024, 32768), multiple_of(%hidden_size, 1024)] : index
+  %workgroup_count = index.div %bounded_hidden_size, %channels_per_group : index
+  %workgroup_size = index.constant 256 : index
+  kernel.launch.config workgroups(%workgroup_count, %bounded_token_count, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%token_count: index, %lhs: buffer, %rhs: buffer, %output: buffer) {
+  %width_groups = kernel.workgroup.count<x> : index
+  %width_per_group = index.constant 1024 : index
+  %hidden_size = index.mul %width_groups, %width_per_group : index
+  %bounded_token_count = index.assume %token_count [range(%token_count, 1, 512)] : index
+  %token0 = kernel.workgroup.id<y> : index
+  %token = index.assume %token0 [lt(%token0, %bounded_token_count)] : index
+  template.apply<@llm.residual_add_f32.row>(%hidden_size, %bounded_token_count, %token, %lhs, %rhs, %output) : (index, index, index, buffer, buffer, buffer)
+  kernel.return
+}
+
+kernel.def target(@llm_ffn_block_prefetch_gfx11_wave32) @llm_ffn_gate_up_prefetch_channel8(%token_count0: index, %input_size: index, %output_size: index) {
+  %token_count = index.assume %token_count0 [range(%token_count0, 0, 512)] : index
+  %c1 = index.constant 1 : index
+  %c63 = index.constant 63 : index
+  %c64 = index.constant 64 : index
+  %c127 = index.constant 127 : index
+  %c128 = index.constant 128 : index
+  %c512 = index.constant 512 : index
+  %padded_output_size = index.add %output_size, %c63 : index
+  %output_tiles = index.div %padded_output_size, %c64 : index
+  %padded_token_count = index.add %token_count, %c127 : index
+  %token_tiles = index.div %padded_token_count, %c128 : index
+  kernel.launch.config workgroups(%output_tiles, %token_tiles, %c1) workgroup_size(%c512, %c1, %c1) : index
+} launch(%input_size: index, %output_size: index, %token_count_data: buffer, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer) {
+  %weight_channels = index.constant 8 : index
+  template.apply<@qwen38.ffn_gate_up_q5k.block_prefetch.body>(%input_size, %output_size, %weight_channels, %token_count_data, %input, %gate_weight, %up_weight, %output) : (index, index, index, buffer, buffer, buffer, buffer, buffer)
+  kernel.return
+}
+
+kernel.decl @ggml_linear_q4k_q8_1_x4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_quantize_q8_1_x4_f32(%token_count: index, %input_size: index) launch(%token_count: index, %input_size: index, %input: buffer, %output: buffer)
+kernel.decl @ggml_linear_q5k_q8_1_x4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_linear_q5k_q8_1_x4_channel8(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_linear_q6k_f32_decode(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_linear_q6k_q8_1_x4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count: index, %input_size: index, %output_size: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_linear_q5k_q8_1_x4_m4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count_data: index, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_linear_q5k_q8_1_x4_m4_channel8(%token_count: index, %input_size: index, %output_size: index) launch(%token_count_data: index, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @ggml_linear_q6k_f32_decode_m4(%token_count: index, %input_size: index, %output_size: index) launch(%token_count_data: index, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_linear_q5k_f16_wmma(%token_count: index, %input_size: index, %output_size: index) launch(%control: buffer, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_linear_q5k_f16_wmma_channel8(%token_count: index, %input_size: index, %output_size: index) launch(%control: buffer, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_linear_q5k_f16_wmma_c64t32_f32acc(%token_count: index, %input_size: index, %output_size: index) launch(%control: buffer, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_linear_q5k_f16_wmma_c64t32_f32acc_channel8(%token_count: index, %input_size: index, %output_size: index) launch(%control: buffer, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_ffn_gate_up_q5k_f16_wmma_block_prefetch(%token_count: index) launch(%control: buffer, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer)
+kernel.decl @qwen38_linear_q6k_f16_wmma_x64(%token_count: index, %input_size: index, %output_size: index) launch(%control: buffer, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_linear_q6k_f16_wmma_c64t32_f32acc(%token_count: index, %input_size: index, %output_size: index) launch(%control: buffer, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %output: buffer)
+kernel.decl @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_residual(%token_count: index, %input_size: index, %output_size: index) launch(%control: buffer, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %residual: buffer)
+kernel.decl @qwen38_linear_q6k_f16_wmma_metadata_residual_x128(%token_count: index, %input_size: index, %output_size: index) launch(%control: buffer, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %residual: buffer)
+kernel.decl @qwen38_linear_q6k_f16_wmma_metadata_residual_c128_t128(%token_count: index, %input_size: index, %output_size: index) launch(%control: buffer, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %residual: buffer)
+kernel.decl @qwen38_linear_q6k_f16_wmma_metadata_residual_x128_input_f16(%token_count: index, %input_size: index, %output_size: index) launch(%control: buffer, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %residual: buffer)
+kernel.decl @qwen38_linear_q6k_f16_wmma_metadata_residual_c128_t128_input_f16(%token_count: index, %input_size: index, %output_size: index) launch(%control: buffer, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %residual: buffer)
+kernel.decl @qwen38_linear_q6k_f16_wmma_metadata_residual_c128_t256_input_f16(%token_count: index, %input_size: index, %output_size: index) launch(%control: buffer, %input_size_data: index, %output_size_data: index, %input: buffer, %weight: buffer, %residual: buffer)
+
+template.decl @llm.ffn.gate_up_decode(%hidden_size: index, %ffn_size: index, %use_generic_quantized_projections: i1, %use_mmvq_compat: i1, %ffn_gate_is_q4: i1, %ffn_gate_is_q6: i1, %shape_ffn_gate_weight_bytes: index, %shape_ffn_row_bytes: index, %ffn_gate_weight: view<[%shape_ffn_gate_weight_bytes]xi8>, %ffn_up_weight: view<[%shape_ffn_gate_weight_bytes]xi8>, %post_normalized_q8: buffer, %swiglu: buffer)
+
+template.def<@llm.ffn.gate_up_decode> @llm_ffn_gate_up_decode(%hidden_size: index, %ffn_size: index, %use_generic_quantized_projections: i1, %use_mmvq_compat: i1, %ffn_gate_is_q4: i1, %ffn_gate_is_q6: i1, %shape_ffn_gate_weight_bytes: index, %shape_ffn_row_bytes: index, %ffn_gate_weight: view<[%shape_ffn_gate_weight_bytes]xi8>, %ffn_up_weight: view<[%shape_ffn_gate_weight_bytes]xi8>, %post_normalized_q8: buffer, %swiglu: buffer) {
+  %projection_row_origin = index.constant 0 : index
+  %projection_count_origin = index.constant 0 : offset
+  %projection_fixed_count = scalar.constant 1 : i32
+  %token_count = index.constant 1 : index
+  %ffn_bytes = index.cast %shape_ffn_row_bytes : index to offset
+  %ffn_gate = buffer.alloca<global> align(256) %ffn_bytes : buffer
+  %ffn_up = buffer.alloca<global> align(256) %ffn_bytes : buffer
+  scf.if %use_generic_quantized_projections {
+    scf.if %ffn_gate_is_q4 {
+      scf.if %use_mmvq_compat {
+        kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %post_normalized_q8, %post_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      } else {
+        kernel.launch @ggml_linear_q4k_q8_1_x4[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %post_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      }
+      scf.if %use_mmvq_compat {
+        kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %post_normalized_q8, %post_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      } else {
+        kernel.launch @ggml_linear_q4k_q8_1_x4[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %post_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      }
+    } else {
+      scf.if %ffn_gate_is_q6 {
+        scf.if %use_mmvq_compat {
+          kernel.launch @ggml_linear_q6k_q8_1_x4_compat[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %post_normalized_q8, %post_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+        } else {
+          kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %post_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+        }
+        scf.if %use_mmvq_compat {
+          kernel.launch @ggml_linear_q6k_q8_1_x4_compat[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %post_normalized_q8, %post_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+        } else {
+          kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %post_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+        }
+      } else {
+        kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %post_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+        kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %post_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      }
+    }
+  } else {
+    command.concurrent {
+      kernel.launch @ggml_linear_q5k_q8_1_x4_channel8[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %post_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      kernel.launch @ggml_linear_q5k_q8_1_x4_channel8[%token_count, %hidden_size, %ffn_size](%token_count, %hidden_size, %ffn_size, %post_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+    }
+  }
+  kernel.launch @llm_ffn_swiglu_f32_decode[%ffn_size](%ffn_size, %ffn_gate, %ffn_up, %swiglu) : [index](index, buffer, buffer, buffer)
+  template.return
+}
+
+template.decl @llm.ffn.down_decode(%hidden_size: index, %ffn_size: index, %use_generic_quantized_projections: i1, %use_mmvq_compat: i1, %ffn_down_is_q4: i1, %ffn_down_is_q6: i1, %shape_ffn_down_weight_bytes: index, %shape_ffn_row_bytes: index, %shape_hidden_row_bytes: index, %ffn_down_weight: view<[%shape_ffn_down_weight_bytes]xi8>, %swiglu: buffer, %residual: buffer)
+
+template.def<@llm.ffn.down_decode> @llm_ffn_down_decode(%hidden_size: index, %ffn_size: index, %use_generic_quantized_projections: i1, %use_mmvq_compat: i1, %ffn_down_is_q4: i1, %ffn_down_is_q6: i1, %shape_ffn_down_weight_bytes: index, %shape_ffn_row_bytes: index, %shape_hidden_row_bytes: index, %ffn_down_weight: view<[%shape_ffn_down_weight_bytes]xi8>, %swiglu: buffer, %residual: buffer) {
+  %projection_row_origin = index.constant 0 : index
+  %projection_count_origin = index.constant 0 : offset
+  %projection_fixed_count = scalar.constant 1 : i32
+  %token_count = index.constant 1 : index
+  %hidden_bytes = index.cast %shape_hidden_row_bytes : index to offset
+  %ffn_output = buffer.alloca<global> align(256) %hidden_bytes : buffer
+  scf.if %use_generic_quantized_projections {
+    %swiglu_q8_bytes = index.cast %shape_ffn_row_bytes : index to offset
+    %swiglu_q8 = buffer.alloca<global> align(256) %swiglu_q8_bytes : buffer
+    scf.if %use_mmvq_compat {
+      kernel.launch @ggml_quantize_q8_1_x4_qk_compat_f32[%token_count, %ffn_size](%token_count, %ffn_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %swiglu, %swiglu, %swiglu_q8) : [index, index](index, index, index, i32, offset, buffer, buffer, buffer)
+    } else {
+      kernel.launch @ggml_quantize_q8_1_x4_f32[%token_count, %ffn_size](%token_count, %ffn_size, %swiglu, %swiglu_q8) : [index, index](index, index, buffer, buffer)
+    }
+    scf.if %ffn_down_is_q4 {
+      scf.if %use_mmvq_compat {
+        kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %ffn_size, %hidden_size](%token_count, %ffn_size, %hidden_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %swiglu_q8, %swiglu_q8, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+      } else {
+        kernel.launch @ggml_linear_q4k_q8_1_x4[%token_count, %ffn_size, %hidden_size](%token_count, %ffn_size, %hidden_size, %swiglu_q8, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+      }
+    } else {
+      scf.if %ffn_down_is_q6 {
+        scf.if %use_mmvq_compat {
+          kernel.launch @ggml_linear_q6k_q8_1_x4_compat[%token_count, %ffn_size, %hidden_size](%token_count, %ffn_size, %hidden_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %swiglu_q8, %swiglu_q8, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+        } else {
+          kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %ffn_size, %hidden_size](%token_count, %ffn_size, %hidden_size, %swiglu_q8, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+        }
+      } else {
+        kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %ffn_size, %hidden_size](%token_count, %ffn_size, %hidden_size, %swiglu_q8, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+      }
+    }
+  } else {
+    kernel.launch @ggml_linear_q6k_f32_decode[%token_count, %ffn_size, %hidden_size](%token_count, %ffn_size, %hidden_size, %swiglu, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+  }
+  kernel.launch @llm_ffn_residual_add_f32_decode[%hidden_size](%residual, %ffn_output, %residual) : [index](buffer, buffer, buffer)
+  template.return
+}
+
+template.decl @llm.ffn.gate_up_prefill(%hidden_size: index, %ffn_size: index, %use_generic_quantized_projections: i1, %use_mmvq_compat: i1, %ffn_gate_is_q4: i1, %ffn_gate_is_q6: i1, %token_count: index, %token_capacity: index, %schedule_token_count: index, %projection_row_origin: index, %projection_count_origin: offset, %uses_m4: i1, %m4_token_count: index, %shape_ffn_capacity_bytes: index, %shape_ffn_gate_weight_bytes: index, %shape_hidden_q8_capacity_bytes: index, %shape_hidden_q8_depth4_bytes: index, %ffn_gate_weight: view<[%shape_ffn_gate_weight_bytes]xi8>, %ffn_up_weight: view<[%shape_ffn_gate_weight_bytes]xi8>, %post_normalized: buffer, %control: buffer, %swiglu: buffer)
+
+template.def<@llm.ffn.gate_up_prefill> @llm_ffn_gate_up_prefill(%hidden_size: index, %ffn_size: index, %use_generic_quantized_projections: i1, %use_mmvq_compat: i1, %ffn_gate_is_q4: i1, %ffn_gate_is_q6: i1, %token_count: index, %token_capacity: index, %schedule_token_count: index, %projection_row_origin: index, %projection_count_origin: offset, %uses_m4: i1, %m4_token_count: index, %shape_ffn_capacity_bytes: index, %shape_ffn_gate_weight_bytes: index, %shape_hidden_q8_capacity_bytes: index, %shape_hidden_q8_depth4_bytes: index, %ffn_gate_weight: view<[%shape_ffn_gate_weight_bytes]xi8>, %ffn_up_weight: view<[%shape_ffn_gate_weight_bytes]xi8>, %post_normalized: buffer, %control: buffer, %swiglu: buffer) {
+  %projection_fixed_count = scalar.constant -1 : i32
+  %c0 = index.constant 0 : index
+  %c32 = index.constant 32 : index
+  %c65 = index.constant 65 : index
+  %uses_x64 = index.cmp ult, %schedule_token_count, %c65 : index
+  %x64_token_count = scf.if %uses_x64 -> (index) {
+    scf.yield %token_count : index
+  } else {
+    scf.yield %c0 : index
+  }
+  %uses_c64t32 = index.cmp eq, %schedule_token_count, %c32 : index
+  %c64t32_token_count = scf.if %uses_c64t32 -> (index) {
+    scf.yield %token_count : index
+  } else {
+    scf.yield %c0 : index
+  }
+  %x128_token_count = scf.if %uses_x64 -> (index) {
+    scf.yield %c0 : index
+  } else {
+    scf.yield %token_count : index
+  }
+  %hidden_q8_bytes = index.cast %shape_hidden_q8_capacity_bytes : index to offset
+  %ffn_bytes = index.cast %shape_ffn_capacity_bytes : index to offset
+  %ffn_gate = buffer.alloca<global> align(256) %ffn_bytes : buffer
+  %ffn_up = buffer.alloca<global> align(256) %ffn_bytes : buffer
+  scf.if %use_generic_quantized_projections {
+    %generic_normalized_q8 = buffer.alloca<global> align(256) %hidden_q8_bytes : buffer
+    scf.if %use_mmvq_compat {
+      kernel.launch @ggml_quantize_q8_1_x4_qk_compat_f32[%token_count, %hidden_size](%token_capacity, %hidden_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %control, %post_normalized, %generic_normalized_q8) : [index, index](index, index, index, i32, offset, buffer, buffer, buffer)
+    } else {
+      kernel.launch @ggml_quantize_q8_1_x4_f32[%token_count, %hidden_size](%token_capacity, %hidden_size, %post_normalized, %generic_normalized_q8) : [index, index](index, index, buffer, buffer)
+    }
+    scf.if %ffn_gate_is_q4 {
+      scf.if %use_mmvq_compat {
+        kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %hidden_size, %ffn_size](%token_capacity, %hidden_size, %ffn_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %control, %generic_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      } else {
+        kernel.launch @ggml_linear_q4k_q8_1_x4[%token_count, %hidden_size, %ffn_size](%token_capacity, %hidden_size, %ffn_size, %generic_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      }
+      scf.if %use_mmvq_compat {
+        kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %hidden_size, %ffn_size](%token_capacity, %hidden_size, %ffn_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %control, %generic_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      } else {
+        kernel.launch @ggml_linear_q4k_q8_1_x4[%token_count, %hidden_size, %ffn_size](%token_capacity, %hidden_size, %ffn_size, %generic_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      }
+    } else {
+      scf.if %ffn_gate_is_q6 {
+        scf.if %use_mmvq_compat {
+          kernel.launch @ggml_linear_q6k_q8_1_x4_compat[%token_count, %hidden_size, %ffn_size](%token_capacity, %hidden_size, %ffn_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %control, %generic_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+        } else {
+          kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %hidden_size, %ffn_size](%token_capacity, %hidden_size, %ffn_size, %generic_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+        }
+        scf.if %use_mmvq_compat {
+          kernel.launch @ggml_linear_q6k_q8_1_x4_compat[%token_count, %hidden_size, %ffn_size](%token_capacity, %hidden_size, %ffn_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %control, %generic_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+        } else {
+          kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %hidden_size, %ffn_size](%token_capacity, %hidden_size, %ffn_size, %generic_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+        }
+      } else {
+        kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %hidden_size, %ffn_size](%token_capacity, %hidden_size, %ffn_size, %generic_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+        kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %hidden_size, %ffn_size](%token_capacity, %hidden_size, %ffn_size, %generic_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      }
+    }
+  } else {
+    scf.if %uses_m4 {
+      %post_normalized_q8_bytes = index.cast %shape_hidden_q8_depth4_bytes : index to offset
+      %post_normalized_q8 = buffer.alloca<global> align(256) %post_normalized_q8_bytes : buffer
+      kernel.launch @ggml_quantize_q8_1_x4_f32[%m4_token_count, %hidden_size](%m4_token_count, %hidden_size, %post_normalized, %post_normalized_q8) : [index, index](index, index, buffer, buffer)
+      command.concurrent {
+        kernel.launch @ggml_linear_q5k_q8_1_x4_m4_channel8[%m4_token_count, %hidden_size, %ffn_size](%m4_token_count, %hidden_size, %ffn_size, %post_normalized_q8, %ffn_gate_weight, %ffn_gate) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+        kernel.launch @ggml_linear_q5k_q8_1_x4_m4_channel8[%m4_token_count, %hidden_size, %ffn_size](%m4_token_count, %hidden_size, %ffn_size, %post_normalized_q8, %ffn_up_weight, %ffn_up) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      }
+    } else {
+      scf.if %uses_x64 {
+        scf.if %uses_c64t32 {
+          command.concurrent {
+            kernel.launch @qwen38_linear_q5k_f16_wmma_c64t32_f32acc_channel8[%c64t32_token_count, %hidden_size, %ffn_size](%control, %hidden_size, %ffn_size, %post_normalized, %ffn_gate_weight, %ffn_gate) : [index, index, index](buffer, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+            kernel.launch @qwen38_linear_q5k_f16_wmma_c64t32_f32acc_channel8[%c64t32_token_count, %hidden_size, %ffn_size](%control, %hidden_size, %ffn_size, %post_normalized, %ffn_up_weight, %ffn_up) : [index, index, index](buffer, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+          }
+        } else {
+          command.concurrent {
+            kernel.launch @qwen38_linear_q5k_f16_wmma_channel8[%x64_token_count, %hidden_size, %ffn_size](%control, %hidden_size, %ffn_size, %post_normalized, %ffn_gate_weight, %ffn_gate) : [index, index, index](buffer, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+            kernel.launch @qwen38_linear_q5k_f16_wmma_channel8[%x64_token_count, %hidden_size, %ffn_size](%control, %hidden_size, %ffn_size, %post_normalized, %ffn_up_weight, %ffn_up) : [index, index, index](buffer, index, index, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+          }
+        }
+      } else {
+        kernel.launch @llm_ffn_gate_up_prefetch_channel8[%x128_token_count, %hidden_size, %ffn_size](%hidden_size, %ffn_size, %control, %post_normalized, %ffn_gate_weight, %ffn_up_weight, %swiglu) : [index, index, index](index, index, buffer, buffer, view<[%shape_ffn_gate_weight_bytes]xi8>, view<[%shape_ffn_gate_weight_bytes]xi8>, buffer)
+      }
+    }
+  }
+  scf.if %use_generic_quantized_projections {
+    kernel.launch @llm_ffn_swiglu_f32_prefill[%token_count, %ffn_size](%ffn_size, %token_capacity, %ffn_gate, %ffn_up, %swiglu) : [index, index](index, index, buffer, buffer, buffer)
+  } else {
+    scf.if %uses_x64 {
+      scf.if %uses_c64t32 {
+        kernel.launch @llm_ffn_swiglu_f32_prefill[%c64t32_token_count, %ffn_size](%ffn_size, %token_capacity, %ffn_gate, %ffn_up, %swiglu) : [index, index](index, index, buffer, buffer, buffer)
+      } else {
+        kernel.launch @llm_ffn_swiglu_f32_prefill[%x64_token_count, %ffn_size](%ffn_size, %token_capacity, %ffn_gate, %ffn_up, %swiglu) : [index, index](index, index, buffer, buffer, buffer)
+      }
+    }
+  }
+  template.return
+}
+
+template.decl @llm.ffn.down_prefill(%hidden_size: index, %ffn_size: index, %use_generic_quantized_projections: i1, %use_mmvq_compat: i1, %ffn_down_is_q4: i1, %ffn_down_is_q6: i1, %token_count: index, %token_capacity: index, %schedule_token_count: index, %projection_row_origin: index, %projection_count_origin: offset, %uses_m4: i1, %m4_token_count: index, %shape_ffn_capacity_bytes: index, %shape_ffn_down_weight_bytes: index, %shape_hidden_capacity_bytes: index, %ffn_down_weight: view<[%shape_ffn_down_weight_bytes]xi8>, %control: buffer, %swiglu: buffer, %residual: buffer)
+
+template.def<@llm.ffn.down_prefill> @llm_ffn_down_prefill(%hidden_size: index, %ffn_size: index, %use_generic_quantized_projections: i1, %use_mmvq_compat: i1, %ffn_down_is_q4: i1, %ffn_down_is_q6: i1, %token_count: index, %token_capacity: index, %schedule_token_count: index, %projection_row_origin: index, %projection_count_origin: offset, %uses_m4: i1, %m4_token_count: index, %shape_ffn_capacity_bytes: index, %shape_ffn_down_weight_bytes: index, %shape_hidden_capacity_bytes: index, %ffn_down_weight: view<[%shape_ffn_down_weight_bytes]xi8>, %control: buffer, %swiglu: buffer, %residual: buffer) {
+  %projection_fixed_count = scalar.constant -1 : i32
+  %c0 = index.constant 0 : index
+  %c32 = index.constant 32 : index
+  %c65 = index.constant 65 : index
+  %c481 = index.constant 481 : index
+  %c256 = index.constant 256 : index
+  %c512 = index.constant 512 : index
+  %uses_x64 = index.cmp ult, %schedule_token_count, %c65 : index
+  %x64_token_count = scf.if %uses_x64 -> (index) {
+    scf.yield %token_count : index
+  } else {
+    scf.yield %c0 : index
+  }
+  %uses_c64t32 = index.cmp eq, %schedule_token_count, %c32 : index
+  %c64t32_token_count = scf.if %uses_c64t32 -> (index) {
+    scf.yield %token_count : index
+  } else {
+    scf.yield %c0 : index
+  }
+  %uses_ffn_down_c128 = index.cmp uge, %schedule_token_count, %c481 : index
+  %schedule_is_256 = index.cmp eq, %schedule_token_count, %c256 : index
+  %schedule_is_512 = index.cmp eq, %schedule_token_count, %c512 : index
+  %uses_ffn_down_t256 = scalar.ori %schedule_is_256, %schedule_is_512 : i1
+  %ffn_down_t256_token_count = scf.if %uses_ffn_down_t256 -> (index) {
+    scf.yield %token_count : index
+  } else {
+    scf.yield %c0 : index
+  }
+  %ffn_down_x128_token_count = scf.if %uses_x64 -> (index) {
+    scf.yield %c0 : index
+  } else {
+    %selected_token_count = scf.if %uses_ffn_down_c128 -> (index) {
+      scf.yield %c0 : index
+    } else {
+      scf.yield %token_count : index
+    }
+    scf.yield %selected_token_count : index
+  }
+  %ffn_down_c128_token_count = scf.if %uses_ffn_down_c128 -> (index) {
+    scf.yield %token_count : index
+  } else {
+    scf.yield %c0 : index
+  }
+  %hidden_bytes = index.cast %shape_hidden_capacity_bytes : index to offset
+  %ffn_bytes = index.cast %shape_ffn_capacity_bytes : index to offset
+  %ffn_output = buffer.alloca<global> align(256) %hidden_bytes : buffer
+  scf.if %use_generic_quantized_projections {
+    %generic_swiglu_q8 = buffer.alloca<global> align(256) %ffn_bytes : buffer
+    scf.if %use_mmvq_compat {
+      kernel.launch @ggml_quantize_q8_1_x4_qk_compat_f32[%token_count, %ffn_size](%token_capacity, %ffn_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %control, %swiglu, %generic_swiglu_q8) : [index, index](index, index, index, i32, offset, buffer, buffer, buffer)
+    } else {
+      kernel.launch @ggml_quantize_q8_1_x4_f32[%token_count, %ffn_size](%token_capacity, %ffn_size, %swiglu, %generic_swiglu_q8) : [index, index](index, index, buffer, buffer)
+    }
+    scf.if %ffn_down_is_q4 {
+      scf.if %use_mmvq_compat {
+        kernel.launch @ggml_linear_q4k_q8_1_x4_compat[%token_count, %ffn_size, %hidden_size](%token_capacity, %ffn_size, %hidden_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %control, %generic_swiglu_q8, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+      } else {
+        kernel.launch @ggml_linear_q4k_q8_1_x4[%token_count, %ffn_size, %hidden_size](%token_capacity, %ffn_size, %hidden_size, %generic_swiglu_q8, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+      }
+    } else {
+      scf.if %ffn_down_is_q6 {
+        scf.if %use_mmvq_compat {
+          kernel.launch @ggml_linear_q6k_q8_1_x4_compat[%token_count, %ffn_size, %hidden_size](%token_capacity, %ffn_size, %hidden_size, %projection_row_origin, %projection_fixed_count, %projection_count_origin, %control, %generic_swiglu_q8, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, index, i32, offset, buffer, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+        } else {
+          kernel.launch @ggml_linear_q6k_q8_1_x4[%token_count, %ffn_size, %hidden_size](%token_capacity, %ffn_size, %hidden_size, %generic_swiglu_q8, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+        }
+      } else {
+        kernel.launch @ggml_linear_q5k_q8_1_x4[%token_count, %ffn_size, %hidden_size](%token_capacity, %ffn_size, %hidden_size, %generic_swiglu_q8, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+      }
+    }
+    kernel.launch @llm_ffn_residual_add_f32_prefill[%token_count, %hidden_size](%token_capacity, %residual, %ffn_output, %residual) : [index, index](index, buffer, buffer, buffer)
+  } else {
+    scf.if %uses_m4 {
+      kernel.launch @ggml_linear_q6k_f32_decode_m4[%m4_token_count, %ffn_size, %hidden_size](%m4_token_count, %ffn_size, %hidden_size, %swiglu, %ffn_down_weight, %ffn_output) : [index, index, index](index, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+      kernel.launch @llm_ffn_residual_add_f32_prefill[%token_count, %hidden_size](%token_capacity, %residual, %ffn_output, %residual) : [index, index](index, buffer, buffer, buffer)
+    } else {
+      scf.if %uses_x64 {
+        scf.if %uses_c64t32 {
+          kernel.launch @qwen38_linear_q6k_f16_wmma_c64t32_f32acc_residual[%c64t32_token_count, %ffn_size, %hidden_size](%control, %ffn_size, %hidden_size, %swiglu, %ffn_down_weight, %residual) : [index, index, index](buffer, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+        } else {
+          kernel.launch @qwen38_linear_q6k_f16_wmma_x64[%x64_token_count, %ffn_size, %hidden_size](%control, %ffn_size, %hidden_size, %swiglu, %ffn_down_weight, %ffn_output) : [index, index, index](buffer, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+          kernel.launch @llm_ffn_residual_add_f32_prefill[%x64_token_count, %hidden_size](%token_capacity, %residual, %ffn_output, %residual) : [index, index](index, buffer, buffer, buffer)
+        }
+      } else {
+        scf.if %uses_ffn_down_t256 {
+          kernel.launch @qwen38_linear_q6k_f16_wmma_metadata_residual_c128_t256_input_f16[%ffn_down_t256_token_count, %ffn_size, %hidden_size](%control, %ffn_size, %hidden_size, %swiglu, %ffn_down_weight, %residual) : [index, index, index](buffer, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+        } else {
+          scf.if %uses_ffn_down_c128 {
+            kernel.launch @qwen38_linear_q6k_f16_wmma_metadata_residual_c128_t128_input_f16[%ffn_down_c128_token_count, %ffn_size, %hidden_size](%control, %ffn_size, %hidden_size, %swiglu, %ffn_down_weight, %residual) : [index, index, index](buffer, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+          } else {
+            kernel.launch @qwen38_linear_q6k_f16_wmma_metadata_residual_x128_input_f16[%ffn_down_x128_token_count, %ffn_size, %hidden_size](%control, %ffn_size, %hidden_size, %swiglu, %ffn_down_weight, %residual) : [index, index, index](buffer, index, index, buffer, view<[%shape_ffn_down_weight_bytes]xi8>, buffer)
+          }
+        }
+      }
+    }
+  }
+  template.return
+}

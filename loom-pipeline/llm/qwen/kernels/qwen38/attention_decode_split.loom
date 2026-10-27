@@ -26,24 +26,23 @@ config.decl @qwen38.attention.decode_split_count : %value: index where [range(%v
 kernel.decl @qwen38_attention_decode() launch(%control: buffer, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer)
 kernel.decl @qwen38_attention_prefill_reference(%token_count: index) launch(%control: buffer, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer)
 
+// Shared split bodies retain the H256 schedule: 256 workitems, four or six
+// queries per KV head, F16 K/V and F32 partials. Partial rows contain 258 F32
+// values (256 accumulator, max, sum). No H128/three-query schedule is implied.
+// Control position is word 0 for scalar; tiled m1/m4 select word 0 or 1 and
+// add token ordinal. Cache positions are contiguous, inclusive and capacity-bounded.
+// Gated reduction consumes already-sigmoid gate values.
+
 // Computes one partial online-softmax state for the query group sharing one
 // key/value head. Partial storage is [workgroup][query-in-group][accumulator,
 // max, sum], with 256 accumulator elements followed by the two scalar state
 // values.
-kernel.def export("qwen38_attention_decode_split_partial") @qwen38_attention_decode_split_partial() {
-  %unit = index.constant 1 : index
-  %key_head_count = config.get @qwen.model.kv_heads : index
-  %split_count = config.get @qwen38.attention.decode_split_count : index
-  %workgroup_count = index.mul %key_head_count, %split_count : index
-  %workgroup_size = index.constant 256 : index
-  kernel.launch.config workgroups(%workgroup_count, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
-} launch(%control: buffer, %query: buffer, %key_cache: buffer, %value_cache: buffer, %partials: buffer) {
-  %shape_attention_scale = config.get @qwen.model.attention_scale : f32
-  %shape_attention_width = config.get @qwen.model.attention_width : index
-  %cache_capacity = config.get @qwen38.attention.cache_capacity : index
-  %split_count = config.get @qwen38.attention.decode_split_count : index
+template.decl @llm.attention.split_partial_h256(%attention_scale: f32, %query_width: index, %cache_capacity: index, %split_count: index, %query_heads: index, %key_heads: index, %head_size: index, %cache_width: index, %control: buffer, %query: buffer, %key_cache: buffer, %value_cache: buffer, %partials: buffer)
+
+template.def<@llm.attention.split_partial_h256> device @llm_attention_split_partial_h256(%attention_scale: f32, %query_width: index, %cache_capacity: index, %split_count: index, %query_heads: index, %key_heads: index, %head_size: index, %cache_width: index, %control: buffer, %query: buffer, %key_cache: buffer, %value_cache: buffer, %partials: buffer) where [eq(%head_size, 256)] {
   %workgroup0 = kernel.workgroup.id<x> : index
-  %workgroup = index.assume %workgroup0 [range(%workgroup0, 0, 255)] : index
+  %workgroup_count = index.mul %key_heads, %split_count : index
+  %workgroup = index.assume %workgroup0 [lt(%workgroup0, %workgroup_count)] : index
   %lane0 = kernel.workitem.id<x> : index
   %lane = index.assume %lane0 [range(%lane0, 0, 255)] : index
   %c0 = index.constant 0 : index
@@ -52,23 +51,19 @@ kernel.def export("qwen38_attention_decode_split_partial") @qwen38_attention_dec
   %c3 = index.constant 3 : index
   %c4 = index.constant 4 : index
   %c5 = index.constant 5 : index
-  %query_heads = config.get @qwen.model.attention_heads : index
-  %key_heads = config.get @qwen.model.kv_heads : index
   %queries_per_kv = index.div %query_heads, %key_heads : index
-  %c256 = config.get @qwen.model.head_size : index
   %c257 = index.constant 257 : index
   %c258 = index.constant 258 : index
-  %c1024 = config.get @qwen.model.kv_size : index
   %group_partial_elements = index.mul %queries_per_kv, %c258 : index
   %c0_offset = index.constant 0 : offset
   %zero6 = vector.constant 0.0 : vector<6xf32>
   %negative_large6 = vector.constant -3.4028234663852886e+38 : vector<6xf32>
-  %attention_scale6 = vector.splat %shape_attention_scale : vector<6xf32>
+  %attention_scale6 = vector.splat %attention_scale : vector<6xf32>
 
   %control_noalias, %query_noalias, %key_cache_noalias, %value_cache_noalias, %partials_noalias = buffer.assume.noalias %control, %query, %key_cache, %value_cache, %partials : buffer, buffer, buffer, buffer, buffer
   %control_view = buffer.view %control_noalias[%c0_offset] : buffer -> view<1xi32>
-  %query_view = buffer.view %query_noalias[%c0_offset] : buffer -> view<[%shape_attention_width]xf32>
-  %cache_element_count = index.mul %cache_capacity, %c1024 : index
+  %query_view = buffer.view %query_noalias[%c0_offset] : buffer -> view<[%query_width]xf32>
+  %cache_element_count = index.mul %cache_capacity, %cache_width : index
   %key_cache_view = buffer.view %key_cache_noalias[%c0_offset] : buffer -> view<[%cache_element_count]xf16>
   %value_cache_view = buffer.view %value_cache_noalias[%c0_offset] : buffer -> view<[%cache_element_count]xf16>
   %partial_element_count = index.mul %split_count, %group_partial_elements : index
@@ -76,7 +71,7 @@ kernel.def export("qwen38_attention_decode_split_partial") @qwen38_attention_dec
   %partial_view = buffer.view %partials_noalias[%c0_offset] : buffer -> view<[%all_partial_element_count]xf32>
 
   %key_head0 = index.div %workgroup, %split_count : index
-  %key_head = index.assume %key_head0 [range(%key_head0, 0, 3)] : index
+  %key_head = index.assume %key_head0 [lt(%key_head0, %key_heads)] : index
   %split = index.rem %workgroup, %split_count : index
   %position_i32 = view.load %control_view[0] : view<1xi32> -> i32
   %position0 = index.cast %position_i32 : i32 to index
@@ -97,26 +92,26 @@ kernel.def export("qwen38_attention_decode_split_partial") @qwen38_attention_dec
   %query_head3 = index.add %query_head0, %c3 : index
   %query_head4 = index.add %query_head0, %c4 : index
   %query_head5 = index.add %query_head0, %c5 : index
-  %query_base0 = index.mul %query_head0, %c256 : index
-  %query_base1 = index.mul %query_head1, %c256 : index
-  %query_base2 = index.mul %query_head2, %c256 : index
-  %query_base3 = index.mul %query_head3, %c256 : index
-  %query_base4 = index.mul %query_head4, %c256 : index
-  %query_base5 = index.mul %query_head5, %c256 : index
+  %query_base0 = index.mul %query_head0, %head_size : index
+  %query_base1 = index.mul %query_head1, %head_size : index
+  %query_base2 = index.mul %query_head2, %head_size : index
+  %query_base3 = index.mul %query_head3, %head_size : index
+  %query_base4 = index.mul %query_head4, %head_size : index
+  %query_base5 = index.mul %query_head5, %head_size : index
   %query_index0 = index.add %query_base0, %lane : index
   %query_index1 = index.add %query_base1, %lane : index
   %query_index2 = index.add %query_base2, %lane : index
   %query_index3 = index.add %query_base3, %lane : index
   %query_index4 = index.add %query_base4, %lane : index
   %query_index5 = index.add %query_base5, %lane : index
-  %query0 = view.load %query_view[%query_index0] : view<[%shape_attention_width]xf32> -> f32
-  %query1 = view.load %query_view[%query_index1] : view<[%shape_attention_width]xf32> -> f32
-  %query2 = view.load %query_view[%query_index2] : view<[%shape_attention_width]xf32> -> f32
-  %query3 = view.load %query_view[%query_index3] : view<[%shape_attention_width]xf32> -> f32
+  %query0 = view.load %query_view[%query_index0] : view<[%query_width]xf32> -> f32
+  %query1 = view.load %query_view[%query_index1] : view<[%query_width]xf32> -> f32
+  %query2 = view.load %query_view[%query_index2] : view<[%query_width]xf32> -> f32
+  %query3 = view.load %query_view[%query_index3] : view<[%query_width]xf32> -> f32
   // Keep the six-wide arithmetic schedule; mask slots 4/5 for four-query groups.
   %query_valid4 = index.cmp ult, %c4, %queries_per_kv : index
   %query4 = scf.if %query_valid4 -> (f32) {
-    %loaded4 = view.load %query_view[%query_index4] : view<[%shape_attention_width]xf32> -> f32
+    %loaded4 = view.load %query_view[%query_index4] : view<[%query_width]xf32> -> f32
     scf.yield %loaded4 : f32
   } else {
     %zero4 = scalar.constant 0.0 : f32
@@ -124,17 +119,17 @@ kernel.def export("qwen38_attention_decode_split_partial") @qwen38_attention_dec
   }
   %query_valid5 = index.cmp ult, %c5, %queries_per_kv : index
   %query5 = scf.if %query_valid5 -> (f32) {
-    %loaded5 = view.load %query_view[%query_index5] : view<[%shape_attention_width]xf32> -> f32
+    %loaded5 = view.load %query_view[%query_index5] : view<[%query_width]xf32> -> f32
     scf.yield %loaded5 : f32
   } else {
     %zero5 = scalar.constant 0.0 : f32
     scf.yield %zero5 : f32
   }
   %query_values = vector.from_elements %query0, %query1, %query2, %query3, %query4, %query5 : vector<6xf32>
-  %key_head_base = index.mul %key_head, %c256 : index
+  %key_head_base = index.mul %key_head, %head_size : index
 
   %final_max, %final_sum, %final_acc = scf.for %token = [%split_begin to %split_end step %c1](%old_max = %negative_large6, %old_sum = %zero6, %old_acc = %zero6 : vector<6xf32>, vector<6xf32>, vector<6xf32>) -> (vector<6xf32>, vector<6xf32>, vector<6xf32>) {
-    %token_cache_base = index.mul %token, %c1024 : index
+    %token_cache_base = index.mul %token, %cache_width : index
     %cache_head_base = index.add %token_cache_base, %key_head_base : index
     %cache_index = index.add %cache_head_base, %lane : index
     %key_f16 = view.load %key_cache_view[%cache_index] : view<[%cache_element_count]xf16> -> f16
@@ -195,12 +190,12 @@ kernel.def export("qwen38_attention_decode_split_partial") @qwen38_attention_dec
 
   %is_leader = index.cmp eq, %lane, %c0 : index
   scf.if %is_leader {
-    %partial_max_index0 = index.add %partial_head_base0, %c256 : index
-    %partial_max_index1 = index.add %partial_head_base1, %c256 : index
-    %partial_max_index2 = index.add %partial_head_base2, %c256 : index
-    %partial_max_index3 = index.add %partial_head_base3, %c256 : index
-    %partial_max_index4 = index.add %partial_head_base4, %c256 : index
-    %partial_max_index5 = index.add %partial_head_base5, %c256 : index
+    %partial_max_index0 = index.add %partial_head_base0, %head_size : index
+    %partial_max_index1 = index.add %partial_head_base1, %head_size : index
+    %partial_max_index2 = index.add %partial_head_base2, %head_size : index
+    %partial_max_index3 = index.add %partial_head_base3, %head_size : index
+    %partial_max_index4 = index.add %partial_head_base4, %head_size : index
+    %partial_max_index5 = index.add %partial_head_base5, %head_size : index
     %partial_sum_index0 = index.add %partial_head_base0, %c257 : index
     %partial_sum_index1 = index.add %partial_head_base1, %c257 : index
     %partial_sum_index2 = index.add %partial_head_base2, %c257 : index
@@ -240,6 +235,26 @@ kernel.def export("qwen38_attention_decode_split_partial") @qwen38_attention_dec
       view.store %partial_sum5, %partial_view[%partial_sum_index5] : f32, view<[%all_partial_element_count]xf32>
     }
   }
+  template.return
+}
+
+kernel.def export("qwen38_attention_decode_split_partial") @qwen38_attention_decode_split_partial() {
+  %unit = index.constant 1 : index
+  %key_head_count = config.get @qwen.model.kv_heads : index
+  %split_count = config.get @qwen38.attention.decode_split_count : index
+  %workgroup_count = index.mul %key_head_count, %split_count : index
+  %workgroup_size = index.constant 256 : index
+  kernel.launch.config workgroups(%workgroup_count, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%control: buffer, %query: buffer, %key_cache: buffer, %value_cache: buffer, %partials: buffer) {
+  %attention_scale = config.get @qwen.model.attention_scale : f32
+  %query_width = config.get @qwen.model.attention_width : index
+  %cache_capacity = config.get @qwen38.attention.cache_capacity : index
+  %split_count = config.get @qwen38.attention.decode_split_count : index
+  %query_heads = config.get @qwen.model.attention_heads : index
+  %key_heads = config.get @qwen.model.kv_heads : index
+  %head_size = config.get @qwen.model.head_size : index
+  %cache_width = config.get @qwen.model.kv_size : index
+  template.apply<@llm.attention.split_partial_h256>(%attention_scale, %query_width, %cache_capacity, %split_count, %query_heads, %key_heads, %head_size, %cache_width, %control, %query, %key_cache, %value_cache, %partials) : (f32, index, index, index, index, index, index, index, buffer, buffer, buffer, buffer, buffer)
   kernel.return
 }
 
@@ -248,21 +263,12 @@ kernel.def export("qwen38_attention_decode_split_partial") @qwen38_attention_dec
 // WMMA tile; the remaining rows are masked. K and V are staged with coalesced
 // 128-bit transfers so the final partial tile follows the same path without
 // an out-of-bounds global fragment load.
-kernel.def target(@qwen38_attention_decode_split_gfx11_wave64) export("qwen38_attention_decode_split_wmma_partial") @qwen38_attention_decode_split_wmma_partial() {
-  %unit = index.constant 1 : index
-  %key_head_count = config.get @qwen.model.kv_heads : index
-  %split_count = config.get @qwen38.attention.decode_split_count : index
-  %workgroup_count = index.mul %key_head_count, %split_count : index
-  %workgroup_size = index.constant 256 : index
-  kernel.launch.config workgroups(%workgroup_count, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
-} launch(%token_count_data: index, %token_ordinal_data: index, %control_position_index_data: index, %control: buffer, %query: buffer, %key_cache: buffer, %value_cache: buffer, %partials: buffer) {
-  %shape_kv_size = config.get @qwen.model.kv_size : index
-  %shape_attention_scale = config.get @qwen.model.attention_scale : f32
-  %shape_attention_width = config.get @qwen.model.attention_width : index
-  %cache_capacity = config.get @qwen38.attention.cache_capacity : index
-  %split_count = config.get @qwen38.attention.decode_split_count : index
+template.decl @llm.attention.split_wmma_partial_h256(%cache_width: index, %attention_scale: f32, %query_width: index, %cache_capacity: index, %split_count: index, %query_heads: index, %key_heads: index, %head_size: index, %token_count_data: index, %token_ordinal_data: index, %control_position_index_data: index, %control: buffer, %query: buffer, %key_cache: buffer, %value_cache: buffer, %partials: buffer)
+
+template.def<@llm.attention.split_wmma_partial_h256> device @llm_attention_split_wmma_partial_h256(%cache_width: index, %attention_scale: f32, %query_width: index, %cache_capacity: index, %split_count: index, %query_heads: index, %key_heads: index, %head_size: index, %token_count_data: index, %token_ordinal_data: index, %control_position_index_data: index, %control: buffer, %query: buffer, %key_cache: buffer, %value_cache: buffer, %partials: buffer) where [eq(%head_size, 256)] {
   %workgroup0 = kernel.workgroup.id<x> : index
-  %workgroup = index.assume %workgroup0 [range(%workgroup0, 0, 255)] : index
+  %workgroup_count = index.mul %key_heads, %split_count : index
+  %workgroup = index.assume %workgroup0 [lt(%workgroup0, %workgroup_count)] : index
   %workitem = kernel.workitem.id<x> : index
   %subgroup0 = kernel.subgroup.id : index
   %subgroup = index.assume %subgroup0 [range(%subgroup0, 0, 3)] : index
@@ -275,16 +281,12 @@ kernel.def target(@qwen38_attention_decode_split_gfx11_wave64) export("qwen38_at
   %c2 = index.constant 2 : index
   %c3 = index.constant 3 : index
   %c4 = index.constant 4 : index
-  %query_heads = config.get @qwen.model.attention_heads : index
-  %key_heads = config.get @qwen.model.kv_heads : index
   %queries_per_kv = index.div %query_heads, %key_heads : index
   %c8 = index.constant 8 : index
   %c16 = index.constant 16 : index
   %c63 = index.constant 63 : index
   %c64 = index.constant 64 : index
-  %c256 = config.get @qwen.model.head_size : index
   %c257 = index.constant 257 : index
-  %c1024 = config.get @qwen.model.kv_size : index
   %c2048 = index.constant 2048 : index
   %c0_offset = index.constant 0 : offset
   %query_stage_bytes = index.constant 8448 : offset
@@ -299,7 +301,7 @@ kernel.def target(@qwen38_attention_decode_split_gfx11_wave64) export("qwen38_at
   %c0_f16x8 = vector.constant 0.0 : vector<8xf16>
   %c0_f32x4 = vector.constant 0.0 : vector<4xf32>
   %negative_f32x4 = vector.constant -1e+30 : vector<4xf32>
-  %attention_scale8 = vector.splat %shape_attention_scale : vector<8xf32>
+  %attention_scale8 = vector.splat %attention_scale : vector<8xf32>
   %m = index.constant 16 : index
   %n = index.constant 16 : index
   %k = index.constant 16 : index
@@ -307,12 +309,12 @@ kernel.def target(@qwen38_attention_decode_split_gfx11_wave64) export("qwen38_at
   %control_noalias, %query_noalias, %key_noalias, %value_noalias, %partials_noalias = buffer.assume.noalias %control, %query, %key_cache, %value_cache, %partials : buffer, buffer, buffer, buffer, buffer
   %control_view = buffer.view %control_noalias[%c0_offset] : buffer -> view<2xi32>
   %query_view = buffer.view %query_noalias[%c0_offset] : buffer -> view<[%token_count]x[%query_heads]x256xf32>
-  %key_view = buffer.view %key_noalias[%c0_offset] : buffer -> view<[%cache_capacity]x[%shape_kv_size]xf16>
-  %value_view = buffer.view %value_noalias[%c0_offset] : buffer -> view<[%cache_capacity]x[%shape_kv_size]xf16>
+  %key_view = buffer.view %key_noalias[%c0_offset] : buffer -> view<[%cache_capacity]x[%cache_width]xf16>
+  %value_view = buffer.view %value_noalias[%c0_offset] : buffer -> view<[%cache_capacity]x[%cache_width]xf16>
   %partial_view = buffer.view %partials_noalias[%c0_offset] : buffer -> view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
 
   %key_head0 = index.div %workgroup, %split_count : index
-  %key_head = index.assume %key_head0 [range(%key_head0, 0, 3)] : index
+  %key_head = index.assume %key_head0 [lt(%key_head0, %key_heads)] : index
   %split = index.rem %workgroup, %split_count : index
   %position_base_i32 = view.load %control_view[%control_position_index] : view<2xi32> -> i32
   %position_base = index.cast %position_base_i32 : i32 to index
@@ -370,8 +372,8 @@ kernel.def target(@qwen38_attention_decode_split_gfx11_wave64) export("qwen38_at
   // Scale and truncate the active query rows once before the cache traversal.
   scf.for %load_iteration = [%c0 to %c2 step %c1] unroll {
     %linear = index.madd %load_iteration, %c2048, %workitem_vector : index
-    %local_query_row = index.div %linear, %c256 : index
-    %query_channel0 = index.rem %linear, %c256 : index
+    %local_query_row = index.div %linear, %head_size : index
+    %query_channel0 = index.rem %linear, %head_size : index
     %query_channel = index.assume %query_channel0 [range(%query_channel0, 0, 248), multiple_of(%query_channel0, 8)] : index
     %query_valid = index.cmp ult, %local_query_row, %queries_per_kv : index
     %query_value = scf.if %query_valid -> (vector<8xf16>) {
@@ -394,15 +396,15 @@ kernel.def target(@qwen38_attention_decode_split_gfx11_wave64) export("qwen38_at
     %tile_token_count = index.min %remaining, %c64 : index
     scf.for %load_iteration = [%c0 to %c8 step %c1] unroll {
       %linear = index.madd %load_iteration, %c2048, %workitem_vector : index
-      %tile_row = index.div %linear, %c256 : index
-      %channel0 = index.rem %linear, %c256 : index
+      %tile_row = index.div %linear, %head_size : index
+      %channel0 = index.rem %linear, %head_size : index
       %channel = index.assume %channel0 [range(%channel0, 0, 248), multiple_of(%channel0, 8)] : index
       %row_valid = index.cmp ult, %tile_row, %tile_token_count : index
       %key_value = scf.if %row_valid -> (vector<8xf16>) {
         %token0 = index.add %key_origin, %tile_row : index
         %token = index.assume %token0 [lt(%token0, %context_count)] : index
-        %key_head_channel = index.madd %key_head, %c256, %channel : index
-        %loaded = vector.load %key_view[%token, %key_head_channel] : view<[%cache_capacity]x[%shape_kv_size]xf16> -> vector<8xf16>
+        %key_head_channel = index.madd %key_head, %head_size, %channel : index
+        %loaded = vector.load %key_view[%token, %key_head_channel] : view<[%cache_capacity]x[%cache_width]xf16> -> vector<8xf16>
         scf.yield %loaded : vector<8xf16>
       } else {
         scf.yield %c0_f16x8 : vector<8xf16>
@@ -413,7 +415,7 @@ kernel.def target(@qwen38_attention_decode_split_gfx11_wave64) export("qwen38_at
 
     %score_init_values = vector.constant 0.0 : vector<4xf32>
     %score_init = vector.fragment<init> %score_init_values shape [%m, %n] : vector<4xf32>
-    %score_fragment = scf.for %head_tile = [%c0 to %c256 step %c16](%score_accumulator = %score_init : vector<4xf32>) -> (vector<4xf32>) unroll schedule(recurrence) {
+    %score_fragment = scf.for %head_tile = [%c0 to %head_size step %c16](%score_accumulator = %score_init : vector<4xf32>) -> (vector<4xf32>) unroll schedule(recurrence) {
       %key_fragment = vector.fragment.load<lhs> %key_value_stage_view[%subgroup_score_row, %head_tile] shape [%m, %k] : view<64x256xf16> -> vector<16xf16>
       %query_fragment = vector.fragment.load<rhs> %query_transposed_view[%head_tile, %c0] shape [%k, %n] : view<256x16xf16, %query_transposed_layout> -> vector<16xf16>
       %next_score_accumulator = vector.mma %key_fragment, %query_fragment, %score_accumulator : vector<16xf16>, vector<16xf16>, vector<4xf32>
@@ -459,15 +461,15 @@ kernel.def target(@qwen38_attention_decode_split_gfx11_wave64) export("qwen38_at
     // completed. This keeps the total workgroup allocation below 64 KiB.
     scf.for %load_iteration = [%c0 to %c8 step %c1] unroll {
       %linear = index.madd %load_iteration, %c2048, %workitem_vector : index
-      %tile_row = index.div %linear, %c256 : index
-      %channel0 = index.rem %linear, %c256 : index
+      %tile_row = index.div %linear, %head_size : index
+      %channel0 = index.rem %linear, %head_size : index
       %channel = index.assume %channel0 [range(%channel0, 0, 248), multiple_of(%channel0, 8)] : index
       %row_valid = index.cmp ult, %tile_row, %tile_token_count : index
       %value = scf.if %row_valid -> (vector<8xf16>) {
         %token0 = index.add %key_origin, %tile_row : index
         %token = index.assume %token0 [lt(%token0, %context_count)] : index
-        %key_head_channel = index.madd %key_head, %c256, %channel : index
-        %loaded = vector.load %value_view[%token, %key_head_channel] : view<[%cache_capacity]x[%shape_kv_size]xf16> -> vector<8xf16>
+        %key_head_channel = index.madd %key_head, %head_size, %channel : index
+        %loaded = vector.load %value_view[%token, %key_head_channel] : view<[%cache_capacity]x[%cache_width]xf16> -> vector<8xf16>
         scf.yield %loaded : vector<8xf16>
       } else {
         scf.yield %c0_f16x8 : vector<8xf16>
@@ -549,67 +551,79 @@ kernel.def target(@qwen38_attention_decode_split_gfx11_wave64) export("qwen38_at
     %sum2 = vector.extract %final_sum[2] : vector<4xf32> -> f32
     %sum3 = vector.extract %final_sum[3] : vector<4xf32> -> f32
     scf.if %query_valid0 {
-      view.store %max0, %partial_view[%token_ordinal, %key_head, %split, %query_row0, %c256] : f32, view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
+      view.store %max0, %partial_view[%token_ordinal, %key_head, %split, %query_row0, %head_size] : f32, view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
       view.store %sum0, %partial_view[%token_ordinal, %key_head, %split, %query_row0, %c257] : f32, view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
     }
     scf.if %query_valid1 {
-      view.store %max1, %partial_view[%token_ordinal, %key_head, %split, %query_row1, %c256] : f32, view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
+      view.store %max1, %partial_view[%token_ordinal, %key_head, %split, %query_row1, %head_size] : f32, view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
       view.store %sum1, %partial_view[%token_ordinal, %key_head, %split, %query_row1, %c257] : f32, view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
     }
     scf.if %query_valid2 {
-      view.store %max2, %partial_view[%token_ordinal, %key_head, %split, %query_row2, %c256] : f32, view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
+      view.store %max2, %partial_view[%token_ordinal, %key_head, %split, %query_row2, %head_size] : f32, view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
       view.store %sum2, %partial_view[%token_ordinal, %key_head, %split, %query_row2, %c257] : f32, view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
     }
     scf.if %query_valid3 {
-      view.store %max3, %partial_view[%token_ordinal, %key_head, %split, %query_row3, %c256] : f32, view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
+      view.store %max3, %partial_view[%token_ordinal, %key_head, %split, %query_row3, %head_size] : f32, view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
       view.store %sum3, %partial_view[%token_ordinal, %key_head, %split, %query_row3, %c257] : f32, view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
     }
   }
+  template.return
+}
+
+kernel.def target(@qwen38_attention_decode_split_gfx11_wave64) export("qwen38_attention_decode_split_wmma_partial") @qwen38_attention_decode_split_wmma_partial() {
+  %unit = index.constant 1 : index
+  %key_head_count = config.get @qwen.model.kv_heads : index
+  %split_count = config.get @qwen38.attention.decode_split_count : index
+  %workgroup_count = index.mul %key_head_count, %split_count : index
+  %workgroup_size = index.constant 256 : index
+  kernel.launch.config workgroups(%workgroup_count, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%token_count_data: index, %token_ordinal_data: index, %control_position_index_data: index, %control: buffer, %query: buffer, %key_cache: buffer, %value_cache: buffer, %partials: buffer) {
+  %cache_width = config.get @qwen.model.kv_size : index
+  %attention_scale = config.get @qwen.model.attention_scale : f32
+  %query_width = config.get @qwen.model.attention_width : index
+  %cache_capacity = config.get @qwen38.attention.cache_capacity : index
+  %split_count = config.get @qwen38.attention.decode_split_count : index
+  %query_heads = config.get @qwen.model.attention_heads : index
+  %key_heads = config.get @qwen.model.kv_heads : index
+  %head_size = config.get @qwen.model.head_size : index
+  template.apply<@llm.attention.split_wmma_partial_h256>(%cache_width, %attention_scale, %query_width, %cache_capacity, %split_count, %query_heads, %key_heads, %head_size, %token_count_data, %token_ordinal_data, %control_position_index_data, %control, %query, %key_cache, %value_cache, %partials) : (index, f32, index, index, index, index, index, index, index, index, index, buffer, buffer, buffer, buffer, buffer)
   kernel.return
 }
 
 // Combines split online-softmax states and applies the per-query sigmoid gate.
-kernel.def export("qwen38_attention_decode_split_reduce") @qwen38_attention_decode_split_reduce() {
-  %unit = index.constant 1 : index
-  %head_count = config.get @qwen.model.attention_heads : index
-  %workgroup_size = index.constant 256 : index
-  kernel.launch.config workgroups(%head_count, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
-} launch(%token_count_data: index, %token_ordinal_data: index, %gate: buffer, %partials: buffer, %output: buffer) {
-  %shape_attention_width = config.get @qwen.model.attention_width : index
-  %split_count = config.get @qwen38.attention.decode_split_count : index
+template.decl @llm.attention.split_reduce_h256(%query_width: index, %split_count: index, %query_heads: index, %key_heads: index, %head_size: index, %token_count_data: index, %token_ordinal_data: index, %gate: buffer, %partials: buffer, %output: buffer)
+
+template.def<@llm.attention.split_reduce_h256> device @llm_attention_split_reduce_h256(%query_width: index, %split_count: index, %query_heads: index, %key_heads: index, %head_size: index, %token_count_data: index, %token_ordinal_data: index, %gate: buffer, %partials: buffer, %output: buffer) where [eq(%head_size, 256)] {
   %head0 = kernel.workgroup.id<x> : index
-  %head = index.assume %head0 [range(%head0, 0, 23)] : index
+  %head = index.assume %head0 [lt(%head0, %query_heads)] : index
   %lane0 = kernel.workitem.id<x> : index
   %lane = index.assume %lane0 [range(%lane0, 0, 255)] : index
   %token_count = index.assume %token_count_data [range(%token_count_data, 1, 4)] : index
   %token_ordinal = index.assume %token_ordinal_data [range(%token_ordinal_data, 0, 3), lt(%token_ordinal_data, %token_count)] : index
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
-  %query_heads = config.get @qwen.model.attention_heads : index
-  %key_heads = config.get @qwen.model.kv_heads : index
   %queries_per_kv = index.div %query_heads, %key_heads : index
-  %c256 = config.get @qwen.model.head_size : index
   %c257 = index.constant 257 : index
   %c0_offset = index.constant 0 : offset
   %zero = scalar.constant 0.0 : f32
   %negative_large = scalar.constant -3.4028234663852886e+38 : f32
 
   %gate_noalias, %partials_noalias, %output_noalias = buffer.assume.noalias %gate, %partials, %output : buffer, buffer, buffer
-  %gate_view = buffer.view %gate_noalias[%c0_offset] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
-  %output_view = buffer.view %output_noalias[%c0_offset] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
+  %gate_view = buffer.view %gate_noalias[%c0_offset] : buffer -> view<[%token_count]x[%query_width]xf32>
+  %output_view = buffer.view %output_noalias[%c0_offset] : buffer -> view<[%token_count]x[%query_width]xf32>
   %partial_view = buffer.view %partials_noalias[%c0_offset] : buffer -> view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32>
   %key_head = index.div %head, %queries_per_kv : index
   %query_in_group = index.rem %head, %queries_per_kv : index
 
   %global_max = scf.for %split = [%c0 to %split_count step %c1](%old_max = %negative_large : f32) -> (f32) {
-    %partial_max = view.load %partial_view[%token_ordinal, %key_head, %split, %query_in_group, %c256] : view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32> -> f32
+    %partial_max = view.load %partial_view[%token_ordinal, %key_head, %split, %query_in_group, %head_size] : view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32> -> f32
     %new_max = scalar.maxnumf %old_max, %partial_max : f32
     scf.yield %new_max : f32
   }
 
   %final_sum, %final_acc = scf.for %split = [%c0 to %split_count step %c1](%old_sum = %zero, %old_acc = %zero : f32, f32) -> (f32, f32) {
     %partial_acc = view.load %partial_view[%token_ordinal, %key_head, %split, %query_in_group, %lane] : view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32> -> f32
-    %partial_max = view.load %partial_view[%token_ordinal, %key_head, %split, %query_in_group, %c256] : view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32> -> f32
+    %partial_max = view.load %partial_view[%token_ordinal, %key_head, %split, %query_in_group, %head_size] : view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32> -> f32
     %partial_sum = view.load %partial_view[%token_ordinal, %key_head, %split, %query_in_group, %c257] : view<[%token_count]x[%key_heads]x[%split_count]x[%queries_per_kv]x258xf32> -> f32
     %max_delta = scalar.subf %partial_max, %global_max : f32
     %scale = scalar.expf<afn> %max_delta : f32
@@ -620,12 +634,27 @@ kernel.def export("qwen38_attention_decode_split_reduce") @qwen38_attention_deco
     scf.yield %new_sum, %new_acc : f32, f32
   }
 
-  %element0 = index.mul %head, %c256 : index
+  %element0 = index.mul %head, %head_size : index
   %element = index.add %element0, %lane : index
   %attention_value = scalar.divf<nnan|ninf|nsz|arcp> %final_acc, %final_sum : f32
-  %gate_value = view.load %gate_view[%token_ordinal, %element] : view<[%token_count]x[%shape_attention_width]xf32> -> f32
+  %gate_value = view.load %gate_view[%token_ordinal, %element] : view<[%token_count]x[%query_width]xf32> -> f32
   %gated = scalar.mulf<nnan|ninf|nsz> %attention_value, %gate_value : f32
-  view.store %gated, %output_view[%token_ordinal, %element] : f32, view<[%token_count]x[%shape_attention_width]xf32>
+  view.store %gated, %output_view[%token_ordinal, %element] : f32, view<[%token_count]x[%query_width]xf32>
+  template.return
+}
+
+kernel.def export("qwen38_attention_decode_split_reduce") @qwen38_attention_decode_split_reduce() {
+  %unit = index.constant 1 : index
+  %head_count = config.get @qwen.model.attention_heads : index
+  %workgroup_size = index.constant 256 : index
+  kernel.launch.config workgroups(%head_count, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%token_count_data: index, %token_ordinal_data: index, %gate: buffer, %partials: buffer, %output: buffer) {
+  %query_width = config.get @qwen.model.attention_width : index
+  %split_count = config.get @qwen38.attention.decode_split_count : index
+  %query_heads = config.get @qwen.model.attention_heads : index
+  %key_heads = config.get @qwen.model.kv_heads : index
+  %head_size = config.get @qwen.model.head_size : index
+  template.apply<@llm.attention.split_reduce_h256>(%query_width, %split_count, %query_heads, %key_heads, %head_size, %token_count_data, %token_ordinal_data, %gate, %partials, %output) : (index, index, index, index, index, index, index, buffer, buffer, buffer)
   kernel.return
 }
 

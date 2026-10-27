@@ -12,6 +12,16 @@ func.decl import("prepare") @stage(%root: buffer, %tag: i64) -> (i32)
 func.decl import("prepare") @config_i64(%stage: i32, %key: buffer, %value: i64)
 func.decl import("prepare") @parameter(%stage: i32, %binding: i32, %source: i32, %directory: buffer, %path: buffer, %policy: buffer)
 
+// Fixed geometry comes from the selected variant config, as in the command programs.
+config.decl @qwen.model.ffn_size : index
+config.decl @qwen.model.gdn_state_bytes : index
+config.decl @qwen.model.hidden_capacity_bytes : index
+config.decl @qwen.model.hidden_size : index
+config.decl @qwen.model.kv_plane_token_bytes : index
+config.decl @qwen.model.kv_size : index
+config.decl @qwen.model.target_kv_planes : index
+config.decl @qwen.model.target_kv_token_bytes : index
+
 // qwen38_prefill
 global.rodata.def @prefill_root = bytes("7177656e33385f70726566696c6c")
 // qwen38_text_decode_greedy
@@ -49,10 +59,15 @@ func.def @declare_stage(%root: buffer, %tokens: i64, %spans: i64, %capacity: i64
   %stage = func.call @stage(%root, %tokens) : (buffer, i64) -> (i32)
   %one64 = scalar.constant 1 : i64
   %narrow = scalar.cmpi eq, %q8_capacity, %one64 : i64
-  %small_outputs = scalar.constant 512 : i64
-  %large_outputs = scalar.constant 1024 : i64
+  %kv_size = config.get @qwen.model.kv_size : index
+  %hidden_size = config.get @qwen.model.hidden_size : index
+  %small_outputs = index.cast %kv_size : index to i64
+  %large_outputs = index.cast %hidden_size : index to i64
   %outputs = scf.select %narrow, %small_outputs, %large_outputs : i64
-  %groups_per_token = scalar.constant 28 : i64
+  %ffn_size = config.get @qwen.model.ffn_size : index
+  %q8_group_values = index.constant 128 : index
+  %ffn_groups = index.div %ffn_size, %q8_group_values : index
+  %groups_per_token = index.cast %ffn_groups : index to i64
   %groups = scalar.muli %groups_per_token, %capacity : i64
   %prefill_key = global.load @prefill_key : buffer
   func.call @config_i64(%stage, %prefill_key, %tokens) : (i32, buffer, i64) -> ()
@@ -134,11 +149,14 @@ func.def @storage(%context: i64, %pool: i64, %rows: i64, %pins: i64, %packed: i1
   %block_tokens = scalar.constant 64 : i64
   %map_origin = scalar.constant 2048 : i64
   %origin_bytes = scalar.constant 512 : i64
-  %target_token_bytes = scalar.constant 12288 : i64
+  %target_token_bytes_index = config.get @qwen.model.target_kv_token_bytes : index
+  %target_token_bytes = index.cast %target_token_bytes_index : index to i64
   %carry_stride = scalar.constant 0 : i64
-  %residual_bytes = scalar.constant 2097152 : i64
+  %residual_bytes_index = config.get @qwen.model.hidden_capacity_bytes : index
+  %residual_bytes = index.cast %residual_bytes_index : index to i64
   %control_bytes = scalar.constant 12 : i64
-  %gdn_bytes = scalar.constant 20201472 : i64
+  %gdn_bytes_index = config.get @qwen.model.gdn_state_bytes : index
+  %gdn_bytes = index.cast %gdn_bytes_index : index to i64
   %gdn_offset = scalar.constant 256 : i64
   %attention_offset = scalar.addi %gdn_offset, %gdn_bytes : i64
   %token_bytes = scalar.constant 2048 : i64
@@ -224,7 +242,7 @@ func.def @storage(%context: i64, %pool: i64, %rows: i64, %pins: i64, %packed: i1
     scf.yield
   }
   // Cache regions are {allocation, origin, plane_count, plane_stride,
-  // block_bytes}. Model geometry stays here; physical slabs may cut across
+  // block_bytes}. Variant config supplies model geometry; physical slabs may cut across
   // logical block boundaries and are chosen by the live allocator.
   %header_bytes = index.constant 64 : offset
   %target_geometry_bytes = index.constant 104 : offset
@@ -243,10 +261,12 @@ func.def @storage(%context: i64, %pool: i64, %rows: i64, %pins: i64, %packed: i1
   scf.if %pooled {
     %regions = buffer.view %geometry[%header_bytes] : buffer -> view<5xi64>
     %one64 = scalar.constant 1 : i64
-    %target_planes = scalar.constant 12 : i64
-    %plane_token_bytes = scalar.constant 1024 : i64
+    %target_planes_index = config.get @qwen.model.target_kv_planes : index
+    %target_planes = index.cast %target_planes_index : index to i64
+    %plane_token_bytes_index = config.get @qwen.model.kv_plane_token_bytes : index
+    %plane_token_bytes = index.cast %plane_token_bytes_index : index to i64
     %plane_stride = scalar.muli %pool, %plane_token_bytes : i64
-    %block_bytes = scalar.constant 65536 : i64
+    %block_bytes = scalar.muli %block_tokens, %plane_token_bytes : i64
     view.store %one64, %regions[0] : i64, view<5xi64>
     view.store %row_bytes, %regions[1] : i64, view<5xi64>
     view.store %target_planes, %regions[2] : i64, view<5xi64>

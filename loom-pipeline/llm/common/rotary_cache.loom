@@ -1,0 +1,179 @@
+// Guarded adjacent-pair RoPE over explicit scalar positions and F32 rows.
+// The finite schedule has 128 workitems per head, 64 F32 frequency
+// divisors >=1, theta_scale in (0,1], positions<=131071, and F16 token-major
+// K/V planes. It owns no native packet fields.
+
+// A caller supplies one scalar absolute position per token. Invalid counts,
+// padded tokens and signed positions outside [0,position_limit) are no-ops.
+func.def public inline @llm_rotary_token_position(%token_capacity0: index, %token0: index, %position_limit0: index, %active_i32: i32, %position_i32: i32) -> (i1, index) {
+  %token_capacity = index.assume %token_capacity0 [range(%token_capacity0, 1, 512)] : index
+  %token = index.assume %token0 [range(%token0, 0, 511), lt(%token0, %token_capacity)] : index
+  %position_limit = index.assume %position_limit0 [range(%position_limit0, 1, 131072)] : index
+  %zero = index.constant 0 : index
+  %zero_i32 = scalar.constant 0 : i32
+  %capacity_i32 = index.cast %token_capacity : index to i32
+  %limit_i32 = index.cast %position_limit : index to i32
+  %count_nonnegative = scalar.cmpi sge, %active_i32, %zero_i32 : i32
+  %count_in_capacity = scalar.cmpi sle, %active_i32, %capacity_i32 : i32
+  %count_valid = scalar.andi %count_nonnegative, %count_in_capacity : i1
+  %valid, %position = scf.if %count_valid -> (i1, index) {
+    %active = index.cast %active_i32 : i32 to index
+    %token_active = index.cmp ult, %token, %active : index
+    %nonnegative = scalar.cmpi sge, %position_i32, %zero_i32 : i32
+    %in_limit = scalar.cmpi slt, %position_i32, %limit_i32 : i32
+    %position_valid = scalar.andi %nonnegative, %in_limit : i1
+    %valid_token = scalar.andi %token_active, %position_valid : i1
+    %safe_position = scf.if %valid_token -> (index) {
+      %position0 = index.cast %position_i32 : i32 to index
+      %bounded_position = index.assume %position0 [range(%position0, 0, 131071), lt(%position0, %position_limit)] : index
+      scf.yield %bounded_position : index
+    } else {
+      scf.yield %zero : index
+    }
+    scf.yield %valid_token, %safe_position : i1, index
+  } else {
+    %no = scalar.constant false : i1
+    scf.yield %no, %zero : i1, index
+  }
+  func.return %valid, %position : i1, index
+}
+
+// Contiguous logical spans share the same signed-position guard. Check the
+// base before adding the bounded token ordinal, avoiding signed overflow.
+func.def public inline @llm_rotary_span_position(%token_capacity: index, %token: index, %position_limit: index, %active_i32: i32, %base_i32: i32) -> (i1, index) {
+  %zero_i32 = scalar.constant 0 : i32
+  %zero = index.constant 0 : index
+  %limit_i32 = index.cast %position_limit : index to i32
+  %nonnegative = scalar.cmpi sge, %base_i32, %zero_i32 : i32
+  %in_limit = scalar.cmpi slt, %base_i32, %limit_i32 : i32
+  %base_valid = scalar.andi %nonnegative, %in_limit : i1
+  %valid, %position = scf.if %base_valid -> (i1, index) {
+    %token_i32 = index.cast %token : index to i32
+    %absolute = scalar.addi %base_i32, %token_i32 : i32
+    %ok, %position = func.call @llm_rotary_token_position(%token_capacity, %token, %position_limit, %active_i32, %absolute) : (index, index, index, i32, i32) -> (i1, index)
+    scf.yield %ok, %position : i1, index
+  } else {
+    %no = scalar.constant false : i1
+    scf.yield %no, %zero : i1, index
+  }
+  func.return %valid, %position : i1, index
+}
+
+template.decl @llm.rotary.adjacent128_value(%pair0: index, %position: index, %theta_scale: f32, %even: f32, %odd: f32, %is_odd: i1, %factors: buffer) -> (f32)
+
+// F32 recurrence matches GGML normal RoPE: theta starts at the position,
+// multiplies theta_scale once per prior pair, and divides by factor[pair].
+// Factors must be finite and >=1; theta_scale is in (0,1]. No reassociation or FMA contraction is
+// permitted across this phase/rotation sequence. Callers rotate Q/K only.
+template.def<@llm.rotary.adjacent128_value> device @llm_rotary_adjacent128_value(%pair0: index, %position: index, %theta_scale: f32, %even: f32, %odd: f32, %is_odd: i1, %factors: buffer) -> (f32) {
+  %pair = index.assume %pair0 [range(%pair0, 0, 63)] : index
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %origin = index.constant 0 : offset
+  %position_i32 = index.cast %position : index to i32
+  %initial_theta = scalar.sitofp %position_i32 : i32 to f32
+  %theta = scf.for %prior = [%zero to %pair step %one](%angle = %initial_theta : f32) -> (f32) {
+    %next = scalar.mulf %angle, %theta_scale : f32
+    scf.yield %next : f32
+  }
+  %factor_view = buffer.view %factors[%origin] : buffer -> view<64xf32>
+  %factor = view.load %factor_view[%pair] : view<64xf32> -> f32
+  %phase = scalar.divf %theta, %factor : f32
+  // Reduce before approximate native trig. For this schedule position<=131071,
+  // 0<theta_scale<=1 and factor>=1. The first two 2*pi pieces have nine
+  // significant bits, making their products exact for the bounded turn count.
+  %inv_two_pi = scalar.constant 0.15915494309189535 : f32
+  %two_pi_high = scalar.constant 6.28125 : f32
+  %two_pi_mid = scalar.constant 0.001934051513671875 : f32
+  %two_pi_low = scalar.constant 0.0000012556659144769253 : f32
+  %turns0 = scalar.mulf %phase, %inv_two_pi : f32
+  %turns = scalar.roundf %turns0 : f32
+  %high_product = scalar.mulf %turns, %two_pi_high : f32
+  %after_high = scalar.subf %phase, %high_product : f32
+  %mid_product = scalar.mulf %turns, %two_pi_mid : f32
+  %after_mid = scalar.subf %after_high, %mid_product : f32
+  %low_product = scalar.mulf %turns, %two_pi_low : f32
+  %reduced_phase = scalar.subf %after_mid, %low_product : f32
+  %sine = scalar.sinf<afn> %reduced_phase : f32
+  %cosine = scalar.cosf<afn> %reduced_phase : f32
+  %result = scf.if %is_odd -> (f32) {
+    %a = scalar.mulf %even, %sine : f32
+    %b = scalar.mulf %odd, %cosine : f32
+    %high = scalar.addf %a, %b : f32
+    scf.yield %high : f32
+  } else {
+    %a = scalar.mulf %even, %cosine : f32
+    %b = scalar.mulf %odd, %sine : f32
+    %low = scalar.subf %a, %b : f32
+    scf.yield %low : f32
+  }
+  template.return %result : f32
+}
+
+// Call only after position/active validation. Projection and query rows must
+// be disjoint: both lanes of each adjacent pair read before independent stores.
+// Origins are bytes; row_count is the validated active extent, not padded grid.
+// Each view owns row_count*heads*128 F32 values after its byte origin.
+template.decl @llm.rotary.query_row128(%row_count: index, %heads: index, %token: index, %head: index, %lane: index, %position: index, %theta_scale: f32, %projection_origin: offset, %query_origin: offset, %factors: buffer, %projection: buffer, %query: buffer)
+
+template.def<@llm.rotary.query_row128> device @llm_rotary_query_row128(%row_count: index, %heads: index, %token: index, %head: index, %lane: index, %position: index, %theta_scale: f32, %projection_origin: offset, %query_origin: offset, %factors: buffer, %projection: buffer, %query: buffer) {
+  %c2 = index.constant 2 : index
+  %c128 = index.constant 128 : index
+  %one = index.constant 1 : index
+  %zero = index.constant 0 : index
+  %width = index.mul %heads, %c128 : index
+  %pair = index.div %lane, %c2 : index
+  %parity = index.rem %lane, %c2 : index
+  %is_odd = index.cmp ne, %parity, %zero : index
+  %even_lane = index.mul %pair, %c2 : index
+  %odd_lane = index.add %even_lane, %one : index
+  %head_base = index.mul %head, %c128 : index
+  %even_index = index.add %head_base, %even_lane : index
+  %odd_index = index.add %head_base, %odd_lane : index
+  %output_index = index.add %head_base, %lane : index
+  %input_view = buffer.view %projection[%projection_origin] : buffer -> view<[%row_count]x[%width]xf32>
+  %output_view = buffer.view %query[%query_origin] : buffer -> view<[%row_count]x[%width]xf32>
+  %even = view.load %input_view[%token, %even_index] : view<[%row_count]x[%width]xf32> -> f32
+  %odd = view.load %input_view[%token, %odd_index] : view<[%row_count]x[%width]xf32> -> f32
+  %rotated = template.apply<@llm.rotary.adjacent128_value>(%pair, %position, %theta_scale, %even, %odd, %is_odd, %factors) : (index, index, f32, f32, f32, i1, buffer) -> (f32)
+  view.store %rotated, %output_view[%token, %output_index] : f32, view<[%row_count]x[%width]xf32>
+  template.return
+}
+
+// Call after logical-position validation and native-owned page-map resolution.
+// Logical positions own RoPE; physical positions select storage only. Distinct
+// K/V plane origins may share the same arena. Active physical slots are unique;
+// all projection rows are disjoint from addressed cache writes. Values convert
+// once to F16 at publication; V is never rotated or normalized.
+template.decl @llm.rotary.kv_row128(%row_count: index, %heads: index, %physical_capacity: index, %token: index, %head: index, %lane: index, %logical_position: index, %physical_position: index, %theta_scale: f32, %projection_origin: offset, %key_origin: offset, %value_origin: offset, %factors: buffer, %key: buffer, %value: buffer, %cache: buffer)
+
+template.def<@llm.rotary.kv_row128> device @llm_rotary_kv_row128(%row_count: index, %heads: index, %physical_capacity: index, %token: index, %head: index, %lane: index, %logical_position: index, %physical_position: index, %theta_scale: f32, %projection_origin: offset, %key_origin: offset, %value_origin: offset, %factors: buffer, %key: buffer, %value: buffer, %cache: buffer) {
+  %physical = index.assume %physical_position [lt(%physical_position, %physical_capacity)] : index
+  %c2 = index.constant 2 : index
+  %c128 = index.constant 128 : index
+  %one = index.constant 1 : index
+  %zero = index.constant 0 : index
+  %width = index.mul %heads, %c128 : index
+  %pair = index.div %lane, %c2 : index
+  %parity = index.rem %lane, %c2 : index
+  %is_odd = index.cmp ne, %parity, %zero : index
+  %even_lane = index.mul %pair, %c2 : index
+  %odd_lane = index.add %even_lane, %one : index
+  %head_base = index.mul %head, %c128 : index
+  %even_index = index.add %head_base, %even_lane : index
+  %odd_index = index.add %head_base, %odd_lane : index
+  %output_index = index.add %head_base, %lane : index
+  %key_view = buffer.view %key[%projection_origin] : buffer -> view<[%row_count]x[%width]xf32>
+  %value_view = buffer.view %value[%projection_origin] : buffer -> view<[%row_count]x[%width]xf32>
+  %key_cache_view = buffer.view %cache[%key_origin] : buffer -> view<[%physical_capacity]x[%width]xf16>
+  %value_cache_view = buffer.view %cache[%value_origin] : buffer -> view<[%physical_capacity]x[%width]xf16>
+  %even = view.load %key_view[%token, %even_index] : view<[%row_count]x[%width]xf32> -> f32
+  %odd = view.load %key_view[%token, %odd_index] : view<[%row_count]x[%width]xf32> -> f32
+  %raw_value = view.load %value_view[%token, %output_index] : view<[%row_count]x[%width]xf32> -> f32
+  %rotated = template.apply<@llm.rotary.adjacent128_value>(%pair, %logical_position, %theta_scale, %even, %odd, %is_odd, %factors) : (index, index, f32, f32, f32, i1, buffer) -> (f32)
+  %key_f16 = scalar.fptrunc %rotated : f32 to f16
+  %value_f16 = scalar.fptrunc %raw_value : f32 to f16
+  view.store %key_f16, %key_cache_view[%physical, %output_index] : f16, view<[%physical_capacity]x[%width]xf16>
+  view.store %value_f16, %value_cache_view[%physical, %output_index] : f16, view<[%physical_capacity]x[%width]xf16>
+  template.return
+}

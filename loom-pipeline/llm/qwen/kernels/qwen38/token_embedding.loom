@@ -18,20 +18,21 @@ template.decl @qwen38.token_embedding_q5k_f32.row(%token_id_i32: i32, %output_by
 
 // Expands one selected embedding row at an explicit output byte offset. The
 // prefill and decode wrappers differ only in how they select that row.
-template.def<@qwen38.token_embedding_q5k_f32.row> device @qwen38_token_embedding_q5k_f32_row(%token_id_i32: i32, %output_byte_offset: offset, %weight: buffer, %output: buffer) {
-  %shape_embedding_row_bytes = config.get @qwen.model.embedding_row_bytes : index
-  %shape_hidden_size = config.get @qwen.model.hidden_size : index
+template.decl @llm.token_embedding_q5k_f32.row(%hidden_size: index, %embedding_row_bytes: index, %token_id_i32: i32, %output_byte_offset: offset, %weight: buffer, %output: buffer)
+
+// Caller supplies a valid token ID, full K256 row width and encoded row stride.
+// All gather row templates cooperate across exactly 256 workitems.
+template.def<@llm.token_embedding_q5k_f32.row> device @llm_token_embedding_q5k_f32_row(%hidden_size: index, %embedding_row_bytes: index, %token_id_i32: i32, %output_byte_offset: offset, %weight: buffer, %output: buffer) {
   %workitem0 = kernel.workitem.id<x> : index
   %workitem = index.assume %workitem0 [range(%workitem0, 0, 255)] : index
   %c2 = index.constant 2 : index
   %c16 = index.constant 16 : index
   %c256 = index.constant 256 : index
-  %chunk_count = config.get @qwen.model.embedding_chunks : index
-  %row_bytes = index.cast %shape_embedding_row_bytes : index to offset
+  %chunk_count = index.div %hidden_size, %c16 : index
+  %row_bytes = index.cast %embedding_row_bytes : index to offset
   %weight_noalias, %output_noalias = buffer.assume.noalias %weight, %output : buffer, buffer
-  %output_view = buffer.view %output_noalias[%output_byte_offset] : buffer -> view<[%shape_hidden_size]xf32>
-  %token_id0 = index.cast %token_id_i32 : i32 to index
-  %token_id = index.assume %token_id0 [range(%token_id0, 0, 248319)] : index
+  %output_view = buffer.view %output_noalias[%output_byte_offset] : buffer -> view<[%hidden_size]xf32>
+  %token_id = index.cast %token_id_i32 : i32 to index
   %row_byte_base = index.scale %token_id, %row_bytes : index, offset -> offset
   scf.for %chunk = [%workitem to %chunk_count step %c256] {
     %q5_block = index.div %chunk, %c16 : index
@@ -47,8 +48,15 @@ template.def<@qwen38.token_embedding_q5k_f32.row> device @qwen38_token_embedding
     %scaled = vector.mulf %codes, %d_scale_vector : vector<16xf32>
     %values = vector.subf %scaled, %dmin_scale_vector : vector<16xf32>
     %element_base = index.mul %chunk, %c16 : index
-    vector.store %values, %output_view[%element_base] : vector<16xf32>, view<[%shape_hidden_size]xf32>
+    vector.store %values, %output_view[%element_base] : vector<16xf32>, view<[%hidden_size]xf32>
   }
+  template.return
+}
+
+template.def<@qwen38.token_embedding_q5k_f32.row> device @qwen38_token_embedding_q5k_f32_row(%token_id_i32: i32, %output_byte_offset: offset, %weight: buffer, %output: buffer) {
+  %hidden_size = config.get @qwen.model.hidden_size : index
+  %row_bytes = config.get @qwen.model.embedding_row_bytes : index
+  template.apply<@llm.token_embedding_q5k_f32.row>(%hidden_size, %row_bytes, %token_id_i32, %output_byte_offset, %weight, %output) : (index, index, i32, offset, buffer, buffer)
   template.return
 }
 
@@ -88,9 +96,12 @@ kernel.def export("qwen38_token_embedding_q5k_f32_decode") @qwen38_token_embeddi
 template.decl @ggml.q6k.f16_vector4(%weight: buffer, %weight_row_byte_base: offset, %q6_block: index, %q6_group: index, %packet: index) -> (vector<4xf16>)
 template.decl @qwen38.token_embedding_q6k_f16.row(%token_id_i32: i32, %output_byte_offset: offset, %weight: buffer, %output: buffer)
 
-template.def<@qwen38.token_embedding_q6k_f16.row> device @qwen38_token_embedding_q6k_f16_row(%token_id_i32: i32, %output_byte_offset: offset, %weight: buffer, %output: buffer) {
-  %hidden_size = config.get @qwen.model.hidden_size : index
-  %embedding_row_bytes = config.get @qwen.model.embedding_row_bytes : index
+template.decl @llm.token_embedding_q6k_f16.row(%hidden_size: index, %embedding_row_bytes: index, %token_id_i32: i32, %output_byte_offset: offset, %weight: buffer, %output: buffer)
+template.decl @llm.token_embedding_q6k_f32.row(%hidden_size: index, %embedding_row_bytes: index, %token_id_i32: i32, %output_byte_offset: offset, %weight: buffer, %output: buffer)
+template.decl @ggml.q6k.f32_vector4(%weight: buffer, %weight_row_byte_base: offset, %q6_block: index, %q6_group: index, %packet: index) -> (vector<4xf32>)
+
+// F16 staging and true F32 lookup are distinct numerical contracts.
+template.def<@llm.token_embedding_q6k_f16.row> device @llm_token_embedding_q6k_f16_row(%hidden_size: index, %embedding_row_bytes: index, %token_id_i32: i32, %output_byte_offset: offset, %weight: buffer, %output: buffer) {
   %workitem = kernel.workitem.id<x> : index
   %c4 = index.constant 4 : index
   %c8 = index.constant 8 : index
@@ -112,6 +123,37 @@ template.def<@qwen38.token_embedding_q6k_f16.row> device @qwen38_token_embedding
     %element_base = index.mul %chunk, %c4 : index
     vector.store %values, %output_view[%element_base] : vector<4xf32>, view<[%hidden_size]xf32>
   }
+  template.return
+}
+
+template.def<@llm.token_embedding_q6k_f32.row> device @llm_token_embedding_q6k_f32_row(%hidden_size: index, %embedding_row_bytes: index, %token_id_i32: i32, %output_byte_offset: offset, %weight: buffer, %output: buffer) {
+  %workitem = kernel.workitem.id<x> : index
+  %c4 = index.constant 4 : index
+  %c8 = index.constant 8 : index
+  %c64 = index.constant 64 : index
+  %c256 = index.constant 256 : index
+  %packets = index.div %hidden_size, %c4 : index
+  %row_bytes = index.cast %embedding_row_bytes : index to offset
+  %token_id = index.cast %token_id_i32 : i32 to index
+  %row_byte_base = index.scale %token_id, %row_bytes : index, offset -> offset
+  %weight_noalias, %output_noalias = buffer.assume.noalias %weight, %output : buffer, buffer
+  %output_view = buffer.view %output_noalias[%output_byte_offset] : buffer -> view<[%hidden_size]xf32>
+  scf.for %chunk = [%workitem to %packets step %c256] {
+    %block = index.div %chunk, %c64 : index
+    %block_packet = index.rem %chunk, %c64 : index
+    %group = index.div %block_packet, %c8 : index
+    %packet = index.rem %block_packet, %c8 : index
+    %values = template.apply<@ggml.q6k.f32_vector4>(%weight_noalias, %row_byte_base, %block, %group, %packet) : (buffer, offset, index, index, index) -> (vector<4xf32>)
+    %element_base = index.mul %chunk, %c4 : index
+    vector.store %values, %output_view[%element_base] : vector<4xf32>, view<[%hidden_size]xf32>
+  }
+  template.return
+}
+
+template.def<@qwen38.token_embedding_q6k_f16.row> device @qwen38_token_embedding_q6k_f16_row(%token_id_i32: i32, %output_byte_offset: offset, %weight: buffer, %output: buffer) {
+  %hidden_size = config.get @qwen.model.hidden_size : index
+  %row_bytes = config.get @qwen.model.embedding_row_bytes : index
+  template.apply<@llm.token_embedding_q6k_f16.row>(%hidden_size, %row_bytes, %token_id_i32, %output_byte_offset, %weight, %output) : (index, index, i32, offset, buffer, buffer)
   template.return
 }
 
@@ -306,8 +348,10 @@ kernel.def @qwen38_token_embedding_fix_differential_headers() {
 }
 
 check.case public @qwen38_token_embedding_q5k_f32_differential_case {
-  %shape_hidden_qk_blocks = config.get @qwen.model.hidden_qk_blocks : index
-  %shape_hidden_size = config.get @qwen.model.hidden_size : index
+  // This Q5 fixture uses the 27B config. Case dimensions must be executable
+  // check literals for the pinned testbench, as with the primitive fixtures.
+  %shape_hidden_qk_blocks = check.literal value(20) : index
+  %shape_hidden_size = check.literal value(5120) : index
   %token_count = check.literal value(2) : index
   %token_ids = check.generate.iota offset(2) step(-2) : tensor<2xi32>
   %weight = check.generate.iota offset(-127) step(17) period(15) : tensor<4x[%shape_hidden_qk_blocks]x176xi8>
@@ -317,6 +361,116 @@ check.case public @qwen38_token_embedding_q5k_f32_differential_case {
   kernel.launch @qwen38_token_embedding_q5k_f32_reference[%token_count](%token_count, %token_ids, %weight, %expected) : [index](index, tensor<2xi32>, tensor<4x[%shape_hidden_qk_blocks]x176xi8>, tensor<2x[%shape_hidden_size]xf32>)
   kernel.launch @qwen38_token_embedding_q5k_f32_prefill[%token_count](%token_ids, %weight, %actual) : [index](tensor<2xi32>, tensor<4x[%shape_hidden_qk_blocks]x176xi8>, tensor<2x[%shape_hidden_size]xf32>)
   check.expect.close actual(%actual) expected(%expected) atol(0.0) rtol(0.0) nan(same) : tensor<2x[%shape_hidden_size]xf32>
+  check.return
+}
+
+check.case public @qwen38_token_embedding_q5k_f32_decode_differential_case {
+  %token_count = check.literal value(1) : index
+  %token_id = check.generate.fill value(2) : tensor<1xi32>
+  %weight = check.generate.iota offset(-127) step(17) period(15) : tensor<4x20x176xi8>
+  %expected = check.generate.fill value(0.0) : tensor<1x5120xf32>
+  %actual = check.generate.fill value(0.0) : tensor<5120xf32>
+  kernel.launch @qwen38_token_embedding_fix_differential_headers(%weight) : (tensor<4x20x176xi8>)
+  kernel.launch @qwen38_token_embedding_q5k_f32_reference[%token_count](%token_count, %token_id, %weight, %expected) : [index](index, tensor<1xi32>, tensor<4x20x176xi8>, tensor<1x5120xf32>)
+  kernel.launch @qwen38_token_embedding_q5k_f32_decode(%token_id, %weight, %actual) : (tensor<1xi32>, tensor<4x20x176xi8>, tensor<5120xf32>)
+  %expected_row = check.tensor.view %expected offset(0) : tensor<1x5120xf32> -> tensor<5120xf32>
+  check.expect.equal actual(%actual) expected(%expected_row) : tensor<5120xf32>
+  check.return
+}
+
+// Zero six-bit codes decode to -32. Row r has scale 3*(r+1) and the F16
+// delta 0.333251953125, making F32 values just above -32*(r+1). The current
+// Q6 lookup rounds them through F16 before widening: rows 0 and 2 are -32/-96.
+kernel.def @qwen38_token_embedding_q6k_known_weights() {
+  %one = index.constant 1 : index
+  %rows = index.constant 4 : index
+  %threads = index.constant 4 : index
+  kernel.launch.config workgroups(%rows, %one, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%weight: buffer) {
+  %row = kernel.workgroup.id<x> : index
+  %block = kernel.workitem.id<x> : index
+  %row_bytes = index.constant 840 : offset
+  %block_bytes = index.constant 210 : offset
+  %scale_add = index.constant 192 : offset
+  %delta_add = index.constant 208 : offset
+  %row_origin = index.scale %row, %row_bytes : index, offset -> offset
+  %block_add = index.scale %block, %block_bytes : index, offset -> offset
+  %origin = index.add %row_origin, %block_add : offset
+  %scale_origin = index.add %origin, %scale_add : offset
+  %delta_origin = index.add %origin, %delta_add : offset
+  %one32 = scalar.constant 1 : i32
+  %three32 = scalar.constant 3 : i32
+  %row32 = index.cast %row : index to i32
+  %ordinal = scalar.addi %row32, %one32 : i32
+  %scale32 = scalar.muli %ordinal, %three32 : i32
+  %scale = scalar.trunci %scale32 : i32 to i8
+  %scales = buffer.view %weight[%scale_origin] : buffer -> view<16xi8>
+  %zero = index.constant 0 : index
+  %sixteen = index.constant 16 : index
+  %one = index.constant 1 : index
+  scf.for %i = [%zero to %sixteen step %one] {
+    view.store %scale, %scales[%i] : i8, view<16xi8>
+  }
+  %delta = scalar.constant 0.333251953125 : f16
+  %delta_view = buffer.view %weight[%delta_origin] : buffer -> view<1xf16>
+  view.store %delta, %delta_view[0] : f16, view<1xf16>
+  kernel.return
+}
+
+check.case public @qwen38_token_embedding_q6k_f16_known_08b_case {
+  %tokens = check.literal value(2) : index
+  %token_ids = check.generate.iota offset(2) step(-2) : tensor<2xi32>
+  %token_id = check.generate.fill value(2) : tensor<1xi32>
+  %weight = check.generate.fill value(0) : tensor<4x4x210xi8>
+  %actual = check.generate.fill value(0.0) : tensor<2x1024xf32>
+  %decoded = check.generate.fill value(0.0) : tensor<1024xf32>
+  %expected_first = check.generate.fill value(-96.0) : tensor<1024xf32>
+  %expected_second = check.generate.fill value(-32.0) : tensor<1024xf32>
+  kernel.launch @qwen38_token_embedding_q6k_known_weights(%weight) : (tensor<4x4x210xi8>)
+  kernel.launch @qwen38_token_embedding_q6k_f16_prefill[%tokens](%token_ids, %weight, %actual) : [index](tensor<2xi32>, tensor<4x4x210xi8>, tensor<2x1024xf32>)
+  kernel.launch @qwen38_token_embedding_q6k_f16_decode(%token_id, %weight, %decoded) : (tensor<1xi32>, tensor<4x4x210xi8>, tensor<1024xf32>)
+  %first = check.tensor.view %actual offset(0) : tensor<2x1024xf32> -> tensor<1024xf32>
+  %second = check.tensor.view %actual offset(4096) : tensor<2x1024xf32> -> tensor<1024xf32>
+  check.expect.equal actual(%first) expected(%expected_first) : tensor<1024xf32>
+  check.expect.equal actual(%second) expected(%expected_second) : tensor<1024xf32>
+  check.expect.equal actual(%decoded) expected(%expected_first) : tensor<1024xf32>
+  check.return
+}
+
+// Explicit-width harness for true F32 Q6 gather, independent of model config.
+// Primary dequantize_row_q6_K writes d * signed_scale * (code - 32) to float.
+// For these zero codes and d=1365/4096, scale 3/9 yields the exact F32
+// -31.9921875/-95.9765625, distinct from Qwen's -32/-96 half-rounded path.
+kernel.def @llm_token_embedding_q6k_f32_known_rows() {
+  %two = index.constant 2 : index
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  kernel.launch.config workgroups(%two, %one, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%token_ids: buffer, %weight: buffer, %output: buffer) {
+  %row = kernel.workgroup.id<x> : index
+  %zero = index.constant 0 : offset
+  %row_bytes = index.constant 4096 : offset
+  %hidden_size = index.constant 1024 : index
+  %embedding_row_bytes = index.constant 840 : index
+  %ids = buffer.view %token_ids[%zero] : buffer -> view<2xi32>
+  %id = view.load %ids[%row] : view<2xi32> -> i32
+  %origin = index.scale %row, %row_bytes : index, offset -> offset
+  template.apply<@llm.token_embedding_q6k_f32.row>(%hidden_size, %embedding_row_bytes, %id, %origin, %weight, %output) : (index, index, i32, offset, buffer, buffer)
+  kernel.return
+}
+
+check.case public @llm_token_embedding_q6k_f32_known_case {
+  %token_ids = check.generate.iota offset(2) step(-2) : tensor<2xi32>
+  %weight = check.generate.fill value(0) : tensor<4x4x210xi8>
+  %actual = check.generate.fill value(0.0) : tensor<2x1024xf32>
+  %expected_first = check.generate.fill value(-95.9765625) : tensor<1024xf32>
+  %expected_second = check.generate.fill value(-31.9921875) : tensor<1024xf32>
+  kernel.launch @qwen38_token_embedding_q6k_known_weights(%weight) : (tensor<4x4x210xi8>)
+  kernel.launch @llm_token_embedding_q6k_f32_known_rows(%token_ids, %weight, %actual) : (tensor<2xi32>, tensor<4x4x210xi8>, tensor<2x1024xf32>)
+  %first = check.tensor.view %actual offset(0) : tensor<2x1024xf32> -> tensor<1024xf32>
+  %second = check.tensor.view %actual offset(4096) : tensor<2x1024xf32> -> tensor<1024xf32>
+  check.expect.equal actual(%first) expected(%expected_first) : tensor<1024xf32>
+  check.expect.equal actual(%second) expected(%expected_second) : tensor<1024xf32>
   check.return
 }
 

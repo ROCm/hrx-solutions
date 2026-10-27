@@ -157,6 +157,9 @@ class GenericModalityOnboardingTest(unittest.TestCase):
         wheel = os.environ.get('GENERIC_MODALITY_FIXTURE_WHEEL')
         self.assertTrue(wheel, 'Set GENERIC_MODALITY_FIXTURE_WHEEL to an accepted real wheel; no synthetic compiler fallback')
         self.wheel = Path(wheel).resolve(strict=True)
+        source_root = os.environ.get('GENERIC_MODALITY_FIXTURE_SOURCE_ROOT')
+        self.assertTrue(source_root, 'Set GENERIC_MODALITY_FIXTURE_SOURCE_ROOT to the immutable loom-pipeline source matching the fixture wheel')
+        self.source_root = Path(source_root).resolve(strict=True)
         self.code_before = _python_identity(ROOT)
         for relative in self.code_before:
             content = (ROOT / relative).read_bytes()
@@ -185,7 +188,7 @@ class GenericModalityOnboardingTest(unittest.TestCase):
             if mode == 'source':
                 for name in case['source_files']:
                     target = root / name; target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(ROOT / 'loom-pipeline' / case['source_root'] / name, target)
+                    shutil.copyfile(self.source_root / case['source_root'] / name, target)
             else:
                 with zipfile.ZipFile(self.wheel) as archive:
                     for name, member in case['compiled_members'].items():

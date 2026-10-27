@@ -1,5 +1,4 @@
-// Model geometry is supplied by the selected architecture catalog.
-config.decl @qwen.model.vocabulary_size : index
+// Numerical bounds and benchmark extent use the compiled caller capacity.
 
 template.decl @qwen38.greedy_argmax_f32.row(%row_count0: index, %row0: index, %output_size0: index, %workitem0: index, %logits: buffer, %token_ids: buffer)
 
@@ -253,7 +252,7 @@ check.case public @qwen38_greedy_argmax_cross_tile_tie_case {
 }
 
 check.case public @qwen38_greedy_argmax_vocabulary_baseline_benchmark_case {
-  %shape_vocabulary_size = config.get @qwen.model.vocabulary_size : index
+  %shape_vocabulary_size = config.get @qwen38.greedy_argmax.output_capacity : index
   %output_size = check.literal value(248320) : index
   %logits = check.generate.iota offset(0.0) step(1.0) period(248320) : tensor<[%shape_vocabulary_size]xf32>
   %token_id = check.generate.fill value(-1) : tensor<1xi32>
@@ -262,7 +261,7 @@ check.case public @qwen38_greedy_argmax_vocabulary_baseline_benchmark_case {
 }
 
 check.case public @qwen38_greedy_argmax_vocabulary_parallel_benchmark_case {
-  %shape_vocabulary_size = config.get @qwen.model.vocabulary_size : index
+  %shape_vocabulary_size = config.get @qwen38.greedy_argmax.output_capacity : index
   %token_count = check.literal value(1) : index
   %output_size = check.literal value(248320) : index
   %logits = check.generate.iota offset(0.0) step(1.0) period(248320) : tensor<[%shape_vocabulary_size]xf32>
@@ -275,7 +274,7 @@ check.case public @qwen38_greedy_argmax_vocabulary_parallel_benchmark_case {
 }
 
 check.case public @qwen38_greedy_argmax_vocabulary_rows_baseline_benchmark_case {
-  %shape_vocabulary_size = config.get @qwen.model.vocabulary_size : index
+  %shape_vocabulary_size = config.get @qwen38.greedy_argmax.output_capacity : index
   %token_count = check.literal value(4) : index
   %output_size = check.literal value(248320) : index
   %logits = check.generate.iota offset(0.0) step(1.0) period(248320) : tensor<4x[%shape_vocabulary_size]xf32>
@@ -285,7 +284,7 @@ check.case public @qwen38_greedy_argmax_vocabulary_rows_baseline_benchmark_case 
 }
 
 check.case public @qwen38_greedy_argmax_vocabulary_rows_parallel_benchmark_case {
-  %shape_vocabulary_size = config.get @qwen.model.vocabulary_size : index
+  %shape_vocabulary_size = config.get @qwen38.greedy_argmax.output_capacity : index
   %token_count = check.literal value(4) : index
   %output_size = check.literal value(248320) : index
   %logits = check.generate.iota offset(0.0) step(1.0) period(248320) : tensor<4x[%shape_vocabulary_size]xf32>

@@ -1,0 +1,150 @@
+// Llama layer composition over model bindings and qualified shared programs.
+// kind0 is isolated prefill, kind1 decode, kind2 native packed epoch.
+// All full-capacity source rows are finite; only active residual rows publish.
+config.decl @llama.model.hidden_size : index
+config.decl @llama.model.ffn_size : index
+func.decl @llama32_active_row(%capacity: index, %row: index, %kind: index, %control: buffer) -> (i1)
+
+// Copies active rows only. This is publication policy, not residual arithmetic.
+kernel.def @llama32_publish_rows(%token_capacity0: index) {
+  %tokens = index.assume %token_capacity0 [range(%token_capacity0, 1, 512)] : index
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  kernel.launch.config workgroups(%one, %tokens, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%all_rows: i1, %kind: index, %control: buffer, %source: buffer, %output: buffer) {
+  %tokens = kernel.workgroup.count<y> : index
+  %row0 = kernel.workgroup.id<y> : index
+  %row = index.assume %row0 [lt(%row0, %tokens)] : index
+  %valid = func.call @llama32_active_row(%tokens, %row, %kind, %control) : (index, index, index, buffer) -> (i1)
+  %yes = scalar.constant true : i1
+  %publish = scf.select %all_rows, %yes, %valid : i1
+  scf.if %publish {
+    %hidden = config.get @llama.model.hidden_size : index
+    %origin = index.constant 0 : offset
+    %src = buffer.view %source[%origin] : buffer -> view<[%tokens]x[%hidden]xf32>
+    %dst = buffer.view %output[%origin] : buffer -> view<[%tokens]x[%hidden]xf32>
+    %lane = kernel.workitem.id<x> : index
+    %step = index.constant 256 : index
+    scf.for %element = [%lane to %hidden step %step] {
+      %v = view.load %src[%row, %element] : view<[%tokens]x[%hidden]xf32> -> f32
+      view.store %v, %dst[%row, %element] : f32, view<[%tokens]x[%hidden]xf32>
+      scf.yield
+    }
+  }
+  kernel.return
+}
+command.program.decl @llama32_attention_norm(%layer: index, %token_count: index) launch(%parameters: buffer, %input: buffer, %output: buffer)
+command.program.decl @llama32_ffn_norm(%layer: index, %token_count: index) launch(%parameters: buffer, %input: buffer, %output: buffer)
+command.program.decl @llama32_attention(%layer: index, %token_capacity: index, %control_origin: offset, %token_begin: index, %cache_base: offset, %map_origin: offset, %control_kind: index) launch(%parameters: buffer, %normalized: buffer, %residual: buffer, %control: buffer, %map: buffer, %cache: buffer)
+command.program.decl @llama32_attention_native(%layer: index, %token_capacity: index, %span_capacity: index) launch(%parameters: buffer, %normalized: buffer, %residual: buffer, %metadata: buffer, %origins: buffer, %arena: buffer)
+command.program.decl @llama32_ffn_gate_up_decode(%layer: index) launch(%parameters: buffer, %post_normalized_q8: buffer, %swiglu: buffer)
+command.program.decl @llama32_ffn_down_decode(%layer: index) launch(%parameters: buffer, %swiglu: buffer, %residual: buffer)
+command.program.decl @llama32_ffn_gate_up_prefill(%layer: index, %token_count: index) launch(%parameters: buffer, %control: buffer, %post_normalized: buffer, %swiglu: buffer)
+command.program.decl @llama32_ffn_down_prefill(%layer: index, %token_count: index) launch(%parameters: buffer, %control: buffer, %swiglu: buffer, %residual: buffer)
+command.program.decl @llama32_quantize_q8_controlled(%capacity: index, %input_size: index, %row_origin: index, %count_origin: offset, %kind: index) launch(%input: buffer, %control: buffer, %output: buffer)
+
+command.program.def public @llama32_layer(%layer: index, %tokens: index, %spans: index, %kind: index) launch(%parameters: buffer, %residual: buffer, %control: buffer, %origins: buffer, %arena: buffer) where [range(%layer, 0, 27), range(%tokens, 1, 512), range(%spans, 1, 16), range(%kind, 0, 2)] {
+  %hidden = config.get @llama.model.hidden_size : index
+  %ffn = config.get @llama.model.ffn_size : index
+  %four = index.constant 4 : offset
+  %zero = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %one = index.constant 1 : index
+  %two = index.constant 2 : index
+  %row_bytes = index.scale %hidden, %four : index, offset -> offset
+  %hidden_bytes = index.scale %tokens, %row_bytes : index, offset -> offset
+  %ffn_row_bytes = index.scale %ffn, %four : index, offset -> offset
+  %ffn_bytes = index.scale %tokens, %ffn_row_bytes : index, offset -> offset
+  %normalized = buffer.alloca<global> align(256) %hidden_bytes : buffer
+  %candidate = buffer.alloca<global> align(256) %hidden_bytes : buffer
+  %swiglu = buffer.alloca<global> align(256) %ffn_bytes : buffer
+  command.program.launch @llama32_attention_norm[%layer, %tokens](%parameters, %residual, %normalized) : [index, index](buffer, buffer, buffer)
+  %packed = index.cmp eq, %kind, %two : index
+  scf.if %packed {
+    command.program.launch @llama32_attention_native[%layer, %tokens, %spans](%parameters, %normalized, %residual, %control, %origins, %arena) : [index, index, index](buffer, buffer, buffer, buffer, buffer, buffer)
+  } else {
+    command.program.launch @llama32_attention[%layer, %tokens, %zero, %begin, %zero, %zero, %kind](%parameters, %normalized, %residual, %control, %origins, %arena) : [index, index, offset, index, offset, offset, index](buffer, buffer, buffer, buffer, buffer, buffer)
+  }
+  command.program.launch @llama32_ffn_norm[%layer, %tokens](%parameters, %residual, %normalized) : [index, index](buffer, buffer, buffer)
+  %all = scalar.constant true : i1
+  %active_only = scalar.constant false : i1
+  kernel.launch @llama32_publish_rows[%tokens](%all, %kind, %control, %residual, %candidate) : [index](i1, index, buffer, buffer, buffer)
+  %decode = index.cmp eq, %kind, %one : index
+  scf.if %decode {
+    %values = index.constant 128 : index
+    %bytes = index.constant 144 : offset
+    %groups = index.div %hidden, %values : index
+    %q8_bytes = index.scale %groups, %bytes : index, offset -> offset
+    %q8 = buffer.alloca<global> align(256) %q8_bytes : buffer
+    command.program.launch @llama32_quantize_q8_controlled[%one, %hidden, %begin, %zero, %kind](%normalized, %control, %q8) : [index, index, index, offset, index](buffer, buffer, buffer)
+    command.program.launch @llama32_ffn_gate_up_decode[%layer](%parameters, %q8, %swiglu) : [index](buffer, buffer, buffer)
+    command.program.launch @llama32_ffn_down_decode[%layer](%parameters, %swiglu, %candidate) : [index](buffer, buffer, buffer)
+  } else {
+    command.program.launch @llama32_ffn_gate_up_prefill[%layer, %tokens](%parameters, %control, %normalized, %swiglu) : [index, index](buffer, buffer, buffer, buffer)
+    command.program.launch @llama32_ffn_down_prefill[%layer, %tokens](%parameters, %control, %swiglu, %candidate) : [index, index](buffer, buffer, buffer, buffer)
+  }
+  kernel.launch @llama32_publish_rows[%tokens](%active_only, %kind, %control, %candidate, %residual) : [index](i1, index, buffer, buffer, buffer)
+  command.return
+}
+
+// A finite static layer sequence. Preparation flattens these nested commands;
+// this loop is never a runtime model-assembly or dispatch table.
+command.program.def public @llama32_layers(%tokens: index, %spans: index, %kind: index) launch(%parameters: buffer, %residual: buffer, %control: buffer, %origins: buffer, %arena: buffer) where [range(%tokens, 1, 512), range(%spans, 1, 16), range(%kind, 0, 2)] {
+  %layer0 = index.constant 0 : index
+  command.program.launch @llama32_layer[%layer0, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer1 = index.constant 1 : index
+  command.program.launch @llama32_layer[%layer1, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer2 = index.constant 2 : index
+  command.program.launch @llama32_layer[%layer2, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer3 = index.constant 3 : index
+  command.program.launch @llama32_layer[%layer3, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer4 = index.constant 4 : index
+  command.program.launch @llama32_layer[%layer4, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer5 = index.constant 5 : index
+  command.program.launch @llama32_layer[%layer5, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer6 = index.constant 6 : index
+  command.program.launch @llama32_layer[%layer6, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer7 = index.constant 7 : index
+  command.program.launch @llama32_layer[%layer7, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer8 = index.constant 8 : index
+  command.program.launch @llama32_layer[%layer8, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer9 = index.constant 9 : index
+  command.program.launch @llama32_layer[%layer9, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer10 = index.constant 10 : index
+  command.program.launch @llama32_layer[%layer10, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer11 = index.constant 11 : index
+  command.program.launch @llama32_layer[%layer11, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer12 = index.constant 12 : index
+  command.program.launch @llama32_layer[%layer12, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer13 = index.constant 13 : index
+  command.program.launch @llama32_layer[%layer13, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer14 = index.constant 14 : index
+  command.program.launch @llama32_layer[%layer14, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer15 = index.constant 15 : index
+  command.program.launch @llama32_layer[%layer15, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer16 = index.constant 16 : index
+  command.program.launch @llama32_layer[%layer16, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer17 = index.constant 17 : index
+  command.program.launch @llama32_layer[%layer17, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer18 = index.constant 18 : index
+  command.program.launch @llama32_layer[%layer18, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer19 = index.constant 19 : index
+  command.program.launch @llama32_layer[%layer19, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer20 = index.constant 20 : index
+  command.program.launch @llama32_layer[%layer20, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer21 = index.constant 21 : index
+  command.program.launch @llama32_layer[%layer21, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer22 = index.constant 22 : index
+  command.program.launch @llama32_layer[%layer22, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer23 = index.constant 23 : index
+  command.program.launch @llama32_layer[%layer23, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer24 = index.constant 24 : index
+  command.program.launch @llama32_layer[%layer24, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer25 = index.constant 25 : index
+  command.program.launch @llama32_layer[%layer25, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer26 = index.constant 26 : index
+  command.program.launch @llama32_layer[%layer26, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  %layer27 = index.constant 27 : index
+  command.program.launch @llama32_layer[%layer27, %tokens, %spans, %kind](%parameters, %residual, %control, %origins, %arena) : [index, index, index, index](buffer, buffer, buffer, buffer, buffer)
+  command.return
+}

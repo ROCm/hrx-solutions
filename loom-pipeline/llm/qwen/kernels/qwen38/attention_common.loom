@@ -12,29 +12,31 @@ template.decl @qwen38.attention.rope_text_value(%position: i32, %lane0: index, %
 // identical temporal, height, and width coordinates, reducing the model's
 // interleaved MRoPE to a 64-wide NEOX rotation. The first 64 values use pairs
 // separated by 32; the remaining 192 values pass through.
-template.def<@qwen38.attention.rope_text_value> device @qwen38_attention_rope_text_value(%position: i32, %lane0: index, %normalized_head: buffer) -> (f32) {
-  %shape_head_size = config.get @qwen.model.head_size : index
-  %lane = index.assume %lane0 [range(%lane0, 0, 255)] : index
+// Prefix NEOX rotation over contiguous F32 head values. The caller supplies
+// a complete head (128 or 256 lanes), 2*rope_half=rope_size<=head_size, and
+// the F32 logarithmic frequency step. Values after rope_size pass through.
+// This helper does not normalize Q/K or impose a model position convention.
+template.decl @llm.attention.rope_neox_value(%head_size: index, %rope_half: index, %rope_size: index, %log_frequency_step: f32, %position: i32, %lane0: index, %head_data: buffer) -> (f32)
+
+template.def<@llm.attention.rope_neox_value> device @llm_attention_rope_neox_value(%head_size: index, %rope_half: index, %rope_size: index, %log_frequency_step: f32, %position: i32, %lane0: index, %head_data: buffer) -> (f32) {
+  %lane = index.assume %lane0 [range(%lane0, 0, 255), lt(%lane0, %head_size)] : index
   %c0_offset = index.constant 0 : offset
-  %head_view = buffer.view %normalized_head[%c0_offset] : buffer -> view<[%shape_head_size]xf32>
-  %value = view.load %head_view[%lane] : view<[%shape_head_size]xf32> -> f32
-  %c32 = config.get @qwen.model.rope_half : index
-  %c64 = config.get @qwen.model.rope_size : index
-  %rotates = index.cmp ult, %lane, %c64 : index
+  %head_view = buffer.view %head_data[%c0_offset] : buffer -> view<[%head_size]xf32>
+  %value = view.load %head_view[%lane] : view<[%head_size]xf32> -> f32
+  %rotates = index.cmp ult, %lane, %rope_size : index
   %result = scf.if %rotates -> (f32) {
-    %is_low_half = index.cmp ult, %lane, %c32 : index
+    %is_low_half = index.cmp ult, %lane, %rope_half : index
     %pair, %partner = scf.if %is_low_half -> (index, index) {
-      %high_lane = index.add %lane, %c32 : index
+      %high_lane = index.add %lane, %rope_half : index
       scf.yield %lane, %high_lane : index, index
     } else {
-      %low_lane = index.sub %lane, %c32 : index
+      %low_lane = index.sub %lane, %rope_half : index
       scf.yield %low_lane, %low_lane : index, index
     }
-    %partner_value = view.load %head_view[%partner] : view<[%shape_head_size]xf32> -> f32
+    %partner_value = view.load %head_view[%partner] : view<[%head_size]xf32> -> f32
     %pair_i32 = index.cast %pair : index to i32
     %pair_f32 = scalar.uitofp %pair_i32 : i32 to f32
     %position_f32 = scalar.sitofp %position : i32 to f32
-    %log_frequency_step = config.get @qwen.model.rope_log_step : f32
     %log_frequency = scalar.mulf %pair_f32, %log_frequency_step : f32
     %frequency = scalar.expf<afn> %log_frequency : f32
     %angle = scalar.mulf %position_f32, %frequency : f32
@@ -54,4 +56,131 @@ template.def<@qwen38.attention.rope_text_value> device @qwen38_attention_rope_te
     scf.yield %value : f32
   }
   template.return %result : f32
+}
+
+template.def<@qwen38.attention.rope_text_value> device @qwen38_attention_rope_text_value(%position: i32, %lane0: index, %normalized_head: buffer) -> (f32) {
+  %head_size = config.get @qwen.model.head_size : index
+  %rope_half = config.get @qwen.model.rope_half : index
+  %rope_size = config.get @qwen.model.rope_size : index
+  %log_step = config.get @qwen.model.rope_log_step : f32
+  %result = template.apply<@llm.attention.rope_neox_value>(%head_size, %rope_half, %rope_size, %log_step, %position, %lane0, %normalized_head) : (index, index, index, f32, i32, index, buffer) -> (f32)
+  template.return %result : f32
+}
+
+// Exact scalar online-softmax state update. The caller owns the QK reduction
+// and causal/cache traversal; accumulation order and F32 flags stay unchanged.
+func.def public inline @llm_attention_online_softmax_update(%old_max: f32, %old_sum: f32, %old_acc: f32, %score: f32, %value: f32) -> (f32, f32, f32) {
+  %new_max = scalar.maxnumf %old_max, %score : f32
+  %old_delta = scalar.subf %old_max, %new_max : f32
+  %score_delta = scalar.subf %score, %new_max : f32
+  %old_scale = scalar.expf<afn> %old_delta : f32
+  %new_scale = scalar.expf<afn> %score_delta : f32
+  %rescaled_sum = scalar.mulf<reassoc|nnan|ninf|nsz> %old_sum, %old_scale : f32
+  %new_sum = scalar.addf<reassoc|nnan|ninf|nsz> %rescaled_sum, %new_scale : f32
+  %rescaled_acc = scalar.mulf<reassoc|nnan|ninf|nsz> %old_acc, %old_scale : f32
+  %weighted_value = scalar.mulf<reassoc|nnan|ninf|nsz> %value, %new_scale : f32
+  %new_acc = scalar.addf<reassoc|nnan|ninf|nsz> %rescaled_acc, %weighted_value : f32
+  func.return %new_max, %new_sum, %new_acc : f32, f32, f32
+}
+
+// Scalar F32 attention over prepared Q and contiguous token-major F16 K/V.
+// query_width=query_heads*head_size, cache_width=key_heads*head_size;
+// query_heads is a positive multiple of key_heads (including 8 KV heads).
+// Each workgroup owns one complete 128- or 256-wide head. Its size equals
+// head_size so the existing workgroup QK reduction has exactly one value/lane.
+// Cache capacity is in tokens; 0<=position<capacity, and all tokens through
+// position are valid. Q/K normalization and RoPE happen before this operation.
+// has_gate=false reads no gate storage and publishes plain attention in F32.
+template.decl @llm.attention.decode_f32(%query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %cache_capacity: index, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer)
+
+// Explicit-row scalar attention. Physical storage may be dense or native
+// 64-token pages; logical positions always define the causal prefix and RoPE.
+// One workgroup owns one head, with head_size workitems. Origins are bytes;
+// caller supplies disjoint Q/output rows and native-owned valid page maps.
+// No gate buffer is read when has_gate=false. F16 K/V widen once to F32.
+func.decl @qwen38_kv_position(%logical_capacity: index, %map: buffer, %map_origin: offset, %position: index, %pool_capacity: index) -> (index)
+template.decl @llm.attention.row_f32(%query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %logical_capacity: index, %pool_capacity: index, %map_origin: offset, %query_origin: offset, %output_origin: offset, %key_origin: offset, %value_origin: offset, %map: buffer, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer)
+
+template.def<@llm.attention.row_f32> device @llm_attention_row_f32(%query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %logical_capacity: index, %pool_capacity: index, %map_origin: offset, %query_origin: offset, %output_origin: offset, %key_origin: offset, %value_origin: offset, %map: buffer, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer) {
+  %head = index.assume %head0 [range(%head0, 0, 127), lt(%head0, %query_heads)] : index
+  %lane = index.assume %lane0 [range(%lane0, 0, 255), lt(%lane0, %head_size)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %queries_per_kv = index.div %query_heads, %key_heads : index
+  %c0_offset = index.constant 0 : offset
+  %c0_f32 = scalar.constant 0.0 : f32
+  %negative_large = scalar.constant -3.4028234663852886e+38 : f32
+  %zero = index.constant 0 : index
+  %pooled = index.cmp ne, %pool_capacity, %zero : index
+  %physical_capacity = scf.select %pooled, %pool_capacity, %logical_capacity : index
+  %query_view = buffer.view %query[%query_origin] : buffer -> view<[%query_width]xf32>
+  %output_view = buffer.view %output[%output_origin] : buffer -> view<[%query_width]xf32>
+  %key_cache_view = buffer.view %key_cache[%key_origin] : buffer -> view<[%physical_capacity]x[%cache_width]xf16>
+  %value_cache_view = buffer.view %value_cache[%value_origin] : buffer -> view<[%physical_capacity]x[%cache_width]xf16>
+  %position0 = index.cast %position_i32 : i32 to index
+  %position = index.assume %position0 [range(%position0, 0, 262143), lt(%position0, %logical_capacity)] : index
+  %context_count0 = index.add %position, %c1 : index
+  %context_count = index.assume %context_count0 [range(%context_count0, 1, 262144), le(%context_count0, %logical_capacity)] : index
+  %head_base = index.mul %head, %head_size : index
+  %element = index.add %head_base, %lane : index
+  %key_head = index.div %head, %queries_per_kv : index
+  %key_head_base = index.mul %key_head, %head_size : index
+  %query_value = view.load %query_view[%element] : view<[%query_width]xf32> -> f32
+  %final_max, %final_sum, %final_acc = scf.for %token = [%c0 to %context_count step %c1](%old_max = %negative_large, %old_sum = %c0_f32, %old_acc = %c0_f32 : f32, f32, f32) -> (f32, f32, f32) {
+    %logical_token = index.assume %token [lt(%token, %logical_capacity)] : index
+    %physical0 = scf.if %pooled -> (index) {
+      %physical = func.call @qwen38_kv_position(%logical_capacity, %map, %map_origin, %logical_token, %pool_capacity) : (index, buffer, offset, index, index) -> (index)
+      scf.yield %physical : index
+    } else {
+      scf.yield %token : index
+    }
+    %physical = index.assume %physical0 [lt(%physical0, %physical_capacity)] : index
+    %cache_column = index.add %key_head_base, %lane : index
+    %key_f16 = view.load %key_cache_view[%physical, %cache_column] : view<[%physical_capacity]x[%cache_width]xf16> -> f16
+    %value_f16 = view.load %value_cache_view[%physical, %cache_column] : view<[%physical_capacity]x[%cache_width]xf16> -> f16
+    %key = scalar.extf %key_f16 : f16 to f32
+    %value = scalar.extf %value_f16 : f16 to f32
+    %dot_part0 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %query_value, %key : f32
+    %dot_part = scalar.mulf<reassoc|nnan|ninf|nsz> %dot_part0, %attention_scale : f32
+    %score = kernel.workgroup.reduce<addf> %dot_part : f32
+    %new_max, %new_sum, %new_acc = func.call @llm_attention_online_softmax_update(%old_max, %old_sum, %old_acc, %score, %value) : (f32, f32, f32, f32, f32) -> (f32, f32, f32)
+    scf.yield %new_max, %new_sum, %new_acc : f32, f32, f32
+  }
+  %attention_value = scalar.divf<nnan|ninf|nsz|arcp> %final_acc, %final_sum : f32
+  %gated = scf.if %has_gate -> (f32) {
+    %gate_view = buffer.view %gate[%query_origin] : buffer -> view<[%query_width]xf32>
+    %gate_value = view.load %gate_view[%element] : view<[%query_width]xf32> -> f32
+    %value = scalar.mulf<nnan|ninf|nsz> %attention_value, %gate_value : f32
+    scf.yield %value : f32
+  } else {
+    scf.yield %attention_value : f32
+  }
+  view.store %gated, %output_view[%element] : f32, view<[%query_width]xf32>
+  template.return
+}
+
+template.def<@llm.attention.decode_f32> device @llm_attention_decode_f32(%query_heads: index, %key_heads: index, %head_size: index, %query_width: index, %cache_width: index, %cache_capacity: index, %attention_scale: f32, %position_i32: i32, %head0: index, %lane0: index, %has_gate: i1, %query: buffer, %gate: buffer, %key_cache: buffer, %value_cache: buffer, %output: buffer) {
+  %pool_capacity = index.constant 0 : index
+  %zero_origin = index.constant 0 : offset
+  template.apply<@llm.attention.row_f32>(%query_heads, %key_heads, %head_size, %query_width, %cache_width, %cache_capacity, %pool_capacity, %zero_origin, %zero_origin, %zero_origin, %zero_origin, %zero_origin, %query, %attention_scale, %position_i32, %head0, %lane0, %has_gate, %query, %gate, %key_cache, %value_cache, %output) : (index, index, index, index, index, index, index, offset, offset, offset, offset, offset, buffer, f32, i32, index, index, i1, buffer, buffer, buffer, buffer, buffer)
+  template.return
+}
+
+// One workitem supplies one head component; the whole workgroup owns exactly
+// one complete head. Q/K normalization policy belongs to the caller: callers
+// without Q/K normalization use their raw projection and omit this operation.
+template.decl @llm.attention.head_rms_value(%raw: f32, %head_divisor: f32, %epsilon: f32, %lane: index, %head_size: index, %norm_weight: buffer) -> (f32)
+
+template.def<@llm.attention.head_rms_value> device @llm_attention_head_rms_value(%raw: f32, %head_divisor: f32, %epsilon: f32, %lane: index, %head_size: index, %norm_weight: buffer) -> (f32) {
+  %square = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %raw, %raw : f32
+  %sum = kernel.workgroup.reduce<addf> %square : f32
+  %mean = scalar.divf<nnan|ninf|nsz|arcp> %sum, %head_divisor : f32
+  %biased_mean = scalar.addf<nnan|ninf|nsz> %mean, %epsilon : f32
+  %inverse_rms = scalar.rsqrtf<nnan|ninf|nsz|afn> %biased_mean : f32
+  %origin = index.constant 0 : offset
+  %weight_view = buffer.view %norm_weight[%origin] : buffer -> view<[%head_size]xf32>
+  %weight = view.load %weight_view[%lane] : view<[%head_size]xf32> -> f32
+  %normalized0 = scalar.mulf<nnan|ninf|nsz> %raw, %inverse_rms : f32
+  %normalized = scalar.mulf<nnan|ninf|nsz> %normalized0, %weight : f32
+  template.return %normalized : f32
 }

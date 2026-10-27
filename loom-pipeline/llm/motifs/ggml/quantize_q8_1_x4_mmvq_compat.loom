@@ -1,0 +1,71 @@
+func.decl @ggml_qk_mmq_compat_select(%capacity: index, %token: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer) -> (i1)
+// Explicit MMVQ Q8 producer precision. Finite normal activation groups use
+// F32 amax*F32(1/127), native unrefined reciprocal, F32 multiply, round-away.
+// Counts 1/3 select this policy in their valid active row extent. Other rows
+// and counts use canonical exact divisions in the SAME shared group body.
+// One group per workgroup and a stable count view make policy uniform.
+// Physical x4 layout and F16(d, quantized_sum*d) metadata are unchanged;
+// Q4/Q6 MMVQ consume d/codes, not this preserved s convention.
+config.decl @ggml.quantize_q8_1_x4.group_capacity : %value: index where [range(%value, 1, 524288)]
+template.decl @ggml.quantize_q8_1_x4.group_body_policy(%native_estimate: i1, %mmq_estimate: i1, %publish_output: i1, %group_count0: index, %group0: index, %input: buffer, %output: buffer)
+func.decl @ggml_qk_mmvq_compat_select(%capacity: index, %token: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer) -> (i1, i1, i1)
+
+kernel.def export("ggml_quantize_q8_1_x4_mmvq_compat_f32") @ggml_quantize_q8_1_x4_mmvq_compat_f32(%token_count: index, %input_size: index) {
+  %bounded_token_count = index.assume %token_count [range(%token_count, 1, 2048)] : index
+  %bounded_input_size = index.assume %input_size [range(%input_size, 128, 32768), multiple_of(%input_size, 128)] : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 32 : index
+  %elements_per_group = index.constant 128 : index
+  %element_count = index.mul %bounded_token_count, %bounded_input_size : index
+  %group_count = index.div %element_count, %elements_per_group : index
+  kernel.launch.config workgroups(%group_count, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%token_count: index, %input_size: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer, %input: buffer, %output: buffer) {
+  %group_capacity = config.get @ggml.quantize_q8_1_x4.group_capacity : index
+  %bounded_token_count = index.assume %token_count [range(%token_count, 1, 2048)] : index
+  %bounded_input_size = index.assume %input_size [range(%input_size, 128, 32768), multiple_of(%input_size, 128)] : index
+  %elements_per_group = index.constant 128 : index
+  %element_count = index.mul %bounded_token_count, %bounded_input_size : index
+  %group_count0 = index.div %element_count, %elements_per_group : index
+  %group_count = index.assume %group_count0 [range(%group_count0, 1, 524288), le(%group_count0, %group_capacity)] : index
+  %group0 = kernel.workgroup.id<x> : index
+  %group = index.assume %group0 [lt(%group0, %group_capacity)] : index
+  %groups_per_row = index.div %bounded_input_size, %elements_per_group : index
+  %token = index.div %group, %groups_per_row : index
+  %specialized, %one_row, %reverse_minima = func.call @ggml_qk_mmvq_compat_select(%bounded_token_count, %token, %row_origin, %fixed_count, %count_origin, %count_view) : (index, index, index, i32, offset, buffer) -> (i1, i1, i1)
+  %publish_output = scalar.constant true : i1
+  %mmq_estimate = scalar.constant false : i1
+  template.apply<@ggml.quantize_q8_1_x4.group_body_policy>(%specialized, %mmq_estimate, %publish_output, %group_count, %group, %input, %output) : (i1, i1, i1, index, index, buffer, buffer)
+  kernel.return
+}
+
+// Source-compatible DS4 MMQ policy: the pinned backend switches beyond its
+// eight-column MMVQ limit. Extent checks keep invalid and inactive rows canonical.
+// Explicit QK producer policy, opting into DS4 MMQ while preserving the
+// existing MMVQ1/3 and canonical fallback contracts of the older entry.
+kernel.def export("ggml_quantize_q8_1_x4_qk_compat_f32") @ggml_quantize_q8_1_x4_qk_compat_f32(%token_count: index, %input_size: index) {
+  %bounded_token_count = index.assume %token_count [range(%token_count, 1, 2048)] : index
+  %bounded_input_size = index.assume %input_size [range(%input_size, 128, 32768), multiple_of(%input_size, 128)] : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 32 : index
+  %elements_per_group = index.constant 128 : index
+  %element_count = index.mul %bounded_token_count, %bounded_input_size : index
+  %group_count = index.div %element_count, %elements_per_group : index
+  kernel.launch.config workgroups(%group_count, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%token_count: index, %input_size: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer, %input: buffer, %output: buffer) {
+  %group_capacity = config.get @ggml.quantize_q8_1_x4.group_capacity : index
+  %bounded_token_count = index.assume %token_count [range(%token_count, 1, 2048)] : index
+  %bounded_input_size = index.assume %input_size [range(%input_size, 128, 32768), multiple_of(%input_size, 128)] : index
+  %elements_per_group = index.constant 128 : index
+  %element_count = index.mul %bounded_token_count, %bounded_input_size : index
+  %group_count0 = index.div %element_count, %elements_per_group : index
+  %group_count = index.assume %group_count0 [range(%group_count0, 1, 524288), le(%group_count0, %group_capacity)] : index
+  %group0 = kernel.workgroup.id<x> : index
+  %group = index.assume %group0 [lt(%group0, %group_capacity)] : index
+  %groups_per_row = index.div %bounded_input_size, %elements_per_group : index
+  %token = index.div %group, %groups_per_row : index
+  %specialized, %one_row, %reverse_minima = func.call @ggml_qk_mmvq_compat_select(%bounded_token_count, %token, %row_origin, %fixed_count, %count_origin, %count_view) : (index, index, index, i32, offset, buffer) -> (i1, i1, i1)
+  %publish_output = scalar.constant true : i1
+  %mmq_estimate = func.call @ggml_qk_mmq_compat_select(%bounded_token_count, %token, %row_origin, %fixed_count, %count_origin, %count_view) : (index, index, index, i32, offset, buffer) -> (i1)
+  template.apply<@ggml.quantize_q8_1_x4.group_body_policy>(%specialized, %mmq_estimate, %publish_output, %group_count, %group, %input, %output) : (i1, i1, i1, index, index, buffer, buffer)
+  kernel.return
+}

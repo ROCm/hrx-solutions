@@ -1,0 +1,333 @@
+// Copyright 2026 The IREE Authors
+//
+// Licensed under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+func.decl import("prepare") @stage(%root: buffer, %tag: i64) -> (i32)
+func.decl import("prepare") @config_i64(%stage: i32, %key: buffer, %value: i64)
+func.decl import("prepare") @parameter(%stage: i32, %binding: i32, %source: i32, %directory: buffer, %path: buffer, %policy: buffer)
+func.decl import("input") @require(%condition: i32, %diagnostic: buffer)
+func.decl import("json") @members(%json: buffer) -> (buffer, i32, i64)
+
+config.decl @llama.model.hidden_size : index
+config.decl @llama.model.ffn_size : index
+config.decl @llama.model.kv_size : index
+config.decl @llama.model.layer_count : index
+
+// llama32_prefill
+global.rodata.def @prefill_root = bytes("6c6c616d6133325f70726566696c6c")
+// llama32_text_decode_greedy
+global.rodata.def @decode_root = bytes("6c6c616d6133325f746578745f6465636f64655f677265656479")
+// llama32_epoch
+global.rodata.def @epoch_root = bytes("6c6c616d6133325f65706f6368")
+// weights.loom
+global.rodata.def @policy = bytes("776569676874732e6c6f6f6d")
+// <|eot_id|>
+global.rodata.def @terminal = bytes("3c7c656f745f69647c3e")
+// Empty path component.
+global.rodata.def @empty = bytes("")
+// Llama 3B requires target-only greedy stages, empty model options and valid bounded capacities
+global.rodata.def @unsupported = bytes("4c6c616d61203342207265717569726573207461726765742d6f6e6c7920677265656479207374616765732c20656d707479206d6f64656c206f7074696f6e7320616e642076616c696420626f756e6465642063617061636974696573")
+// runner.llama32.prefill_token_count
+global.rodata.def @prefill_key = bytes("72756e6e65722e6c6c616d6133322e70726566696c6c5f746f6b656e5f636f756e74")
+// runner.llama32.span_capacity
+global.rodata.def @span_key = bytes("72756e6e65722e6c6c616d6133322e7370616e5f6361706163697479")
+// llama.attention.cache_capacity
+global.rodata.def @context_key = bytes("6c6c616d612e617474656e74696f6e2e63616368655f6361706163697479")
+// llama.attention.pool_capacity
+global.rodata.def @pool_key = bytes("6c6c616d612e617474656e74696f6e2e706f6f6c5f6361706163697479")
+// ggml.linear_q4k_q8_1_x4.token_capacity
+global.rodata.def @q4_key = bytes("67676d6c2e6c696e6561725f71346b5f71385f315f78342e746f6b656e5f6361706163697479")
+// ggml.linear_q6k_q8_1_x4.token_capacity
+global.rodata.def @q6_key = bytes("67676d6c2e6c696e6561725f71366b5f71385f315f78342e746f6b656e5f6361706163697479")
+// ggml.quantize_q8_1_x4.group_capacity
+global.rodata.def @groups_key = bytes("67676d6c2e7175616e74697a655f71385f315f78342e67726f75705f6361706163697479")
+
+// Root order is isolated prefill/decode followed by native packed shapes.
+// Each complete command has one immutable weight root followed by six native
+// issue bindings. No proposal, catch-up, verifier or continuation is declared.
+func.def @llama32_declare_stage(%root: buffer, %tokens: i64, %spans: i64, %capacity: i64, %context: i64, %pool: i64, %weights: buffer) -> (i32) {
+  %stage = func.call @stage(%root, %tokens) : (buffer, i64) -> (i32)
+  %ffn_size = config.get @llama.model.ffn_size : index
+  %group_values = index.constant 128 : index
+  %ffn_groups = index.div %ffn_size, %group_values : index
+  %groups_per_token = index.cast %ffn_groups : index to i64
+  %groups = scalar.muli %groups_per_token, %capacity : i64
+  %prefill_key = global.load @prefill_key : buffer
+  func.call @config_i64(%stage, %prefill_key, %tokens) : (i32, buffer, i64) -> ()
+  %span_key = global.load @span_key : buffer
+  func.call @config_i64(%stage, %span_key, %spans) : (i32, buffer, i64) -> ()
+  %context_key = global.load @context_key : buffer
+  func.call @config_i64(%stage, %context_key, %context) : (i32, buffer, i64) -> ()
+  %pool_key = global.load @pool_key : buffer
+  func.call @config_i64(%stage, %pool_key, %pool) : (i32, buffer, i64) -> ()
+  %q4_key = global.load @q4_key : buffer
+  func.call @config_i64(%stage, %q4_key, %capacity) : (i32, buffer, i64) -> ()
+  %q6_key = global.load @q6_key : buffer
+  func.call @config_i64(%stage, %q6_key, %capacity) : (i32, buffer, i64) -> ()
+  %groups_key = global.load @groups_key : buffer
+  func.call @config_i64(%stage, %groups_key, %groups) : (i32, buffer, i64) -> ()
+  %empty = global.load @empty : buffer
+  %policy = global.load @policy : buffer
+  %zero = scalar.constant 0 : i32
+  func.call @parameter(%stage, %zero, %zero, %empty, %weights, %policy) : (i32, i32, i32, buffer, buffer, buffer) -> ()
+  func.return %stage : i32
+}
+
+// These are the existing native cold records: {bytes, alignment, clear_bytes}
+// and {byte_origin, byte_length}. Completion/retirement remains native-owned.
+func.def @llama32_allocation(%records: buffer, %slot_value: index, %bytes: i64, %clear: i64) {
+  %origin = index.constant 0 : offset
+  %slot = index.assume %slot_value [range(%slot_value, 0, 10)] : index
+  %view = buffer.view %records[%origin] : buffer -> view<11x3xi64>
+  %alignment = scalar.constant 256 : i64
+  view.store %bytes, %view[%slot, 0] : i64, view<11x3xi64>
+  view.store %alignment, %view[%slot, 1] : i64, view<11x3xi64>
+  view.store %clear, %view[%slot, 2] : i64, view<11x3xi64>
+  func.return
+}
+
+func.def @llama32_row_view(%records: buffer, %row_count: index, %row_value: index, %slot_value: index, %offset: i64, %length: i64) {
+  %origin = index.constant 0 : offset
+  %row = index.assume %row_value [range(%row_value, 0, 15), lt(%row_value, %row_count)] : index
+  %slot = index.assume %slot_value [range(%slot_value, 0, 3)] : index
+  %view = buffer.view %records[%origin] : buffer -> view<[%row_count]x4x2xi64>
+  view.store %offset, %view[%row, %slot, 0] : i64, view<[%row_count]x4x2xi64>
+  view.store %length, %view[%row, %slot, 1] : i64, view<[%row_count]x4x2xi64>
+  func.return
+}
+
+func.def @llama32_storage(%context: i64, %pool: i64, %rows: i64, %pins: i64, %packed: i1) -> (buffer, buffer, buffer, buffer, buffer) {
+  %origin = index.constant 0 : offset
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %two = index.constant 2 : index
+  %three = index.constant 3 : index
+  %four = index.constant 4 : index
+  %five = index.constant 5 : index
+  %eleven = index.constant 11 : index
+  %zero64 = scalar.constant 0 : i64
+  %one64 = scalar.constant 1 : i64
+  %two64 = scalar.constant 2 : i64
+  %word_bytes = scalar.constant 4 : i64
+  %token_capacity = scalar.constant 512 : i64
+  %hidden_size_index = config.get @llama.model.hidden_size : index
+  %hidden_size = index.cast %hidden_size_index : index to i64
+  %hidden_row_bytes = scalar.muli %hidden_size, %word_bytes : i64
+  %residual_bytes = scalar.muli %token_capacity, %hidden_row_bytes : i64
+  %kv_size_index = config.get @llama.model.kv_size : index
+  %kv_size = index.cast %kv_size_index : index to i64
+  %plane_token_bytes = scalar.muli %kv_size, %two64 : i64
+  %layer_count_index = config.get @llama.model.layer_count : index
+  %layer_count = index.cast %layer_count_index : index to i64
+  %planes = scalar.muli %layer_count, %two64 : i64
+  %target_token_bytes = scalar.muli %planes, %plane_token_bytes : i64
+  %block_tokens = scalar.constant 64 : i64
+  %sixty_three = scalar.constant 63 : i64
+  %map_origin = scalar.constant 2048 : i64
+  %origin_bytes = scalar.constant 512 : i64
+  %control_bytes = scalar.constant 12 : i64
+  // The pinned storage owner requires a positive independently owned slot even
+  // for a KV-only model. Request initialization clears it with a four-byte
+  // pattern. This word is ABI bookkeeping, never numerical state.
+  // Keep it disjoint from every row view; no Llama command reads or writes it.
+  %slot_origin = scalar.constant 256 : i64
+  %slot_length = scalar.constant 4 : i64
+  %attention_origin = scalar.constant 512 : i64
+  %pooled = scalar.cmpi ne, %pool, %zero64 : i64
+  %dense_attention_bytes = scalar.muli %context, %target_token_bytes : i64
+  %attention_bytes = scf.select %pooled, %zero64, %dense_attention_bytes : i64
+  %tokens_offset = scalar.addi %attention_origin, %attention_bytes : i64
+  %token_bytes = scalar.muli %token_capacity, %word_bytes : i64
+  %progress_offset = scalar.addi %tokens_offset, %token_bytes : i64
+  %progress_bytes = scalar.constant 32 : i64
+  %progress_extent = scalar.constant 256 : i64
+  %row_stride = scalar.addi %progress_offset, %progress_extent : i64
+  %pinned = scalar.cmpi ne, %pins, %zero64 : i64
+  %owners = scalar.addi %rows, %pins : i64
+  %fork_slots = scalar.addi %owners, %rows : i64
+  %slot_count = scf.select %pinned, %fork_slots, %rows : i64
+  %private_bytes = scalar.muli %row_stride, %slot_count : i64
+  %pool_bytes = scalar.muli %pool, %target_token_bytes : i64
+  %arena_bytes = scalar.addi %private_bytes, %pool_bytes : i64
+  %padded_context = scalar.addi %context, %sixty_three : i64
+  %blocks_per_row = scalar.divui %padded_context, %block_tokens : i64
+  %map_entries = scalar.muli %blocks_per_row, %rows : i64
+  %map_bytes = scalar.muli %map_entries, %word_bytes : i64
+  %pooled_table_bytes = scalar.addi %map_origin, %map_bytes : i64
+  %table_bytes = scf.select %pooled, %pooled_table_bytes, %origin_bytes : i64
+  // One ordinary epoch: existing span/selection/options packet and EOS word.
+  %metadata_bytes = scalar.constant 2064 : i64
+  %output_bytes = scalar.constant 64 : i64
+  %packed_metadata = scf.select %packed, %metadata_bytes, %zero64 : i64
+  %packed_table = scf.select %packed, %table_bytes, %zero64 : i64
+  %packed_tokens = scf.select %packed, %token_bytes, %zero64 : i64
+  %packed_outputs = scf.select %packed, %output_bytes, %zero64 : i64
+  %allocation_bytes = index.constant 264 : offset
+  %allocations = buffer.alloca<private> align(8) %allocation_bytes : buffer
+  scf.for %slot = [%zero to %eleven step %one] {
+    func.call @llama32_allocation(%allocations, %slot, %zero64, %zero64) : (buffer, index, i64, i64) -> ()
+    scf.yield
+  }
+  func.call @llama32_allocation(%allocations, %zero, %residual_bytes, %residual_bytes) : (buffer, index, i64, i64) -> ()
+  func.call @llama32_allocation(%allocations, %one, %arena_bytes, %private_bytes) : (buffer, index, i64, i64) -> ()
+  func.call @llama32_allocation(%allocations, %two, %packed_metadata, %zero64) : (buffer, index, i64, i64) -> ()
+  func.call @llama32_allocation(%allocations, %three, %packed_table, %zero64) : (buffer, index, i64, i64) -> ()
+  func.call @llama32_allocation(%allocations, %four, %packed_tokens, %zero64) : (buffer, index, i64, i64) -> ()
+  func.call @llama32_allocation(%allocations, %five, %packed_outputs, %zero64) : (buffer, index, i64, i64) -> ()
+  // All five draft allocations remain zero. There is no GDN, MTP or draft cache.
+  %bounded_rows = scalar.assume %rows [range(%rows, 1, 16)] : i64
+  %row_count = index.cast %bounded_rows : i64 to index
+  %view_stride = index.constant 64 : offset
+  %view_bytes = index.scale %row_count, %view_stride : index, offset -> offset
+  %views = buffer.alloca<private> align(8) %view_bytes : buffer
+  %payload_bytes = index.constant 512 : offset
+  %origins = buffer.alloca<private> align(8) %payload_bytes : buffer
+  buffer.fill %zero64, %origins[%origin], %payload_bytes : i64
+  %draft_origins = buffer.alloca<private> align(8) %origin : buffer
+  %target = buffer.view %origins[%origin] : buffer -> view<16x4xi64>
+  scf.for %i = [%zero to %row_count step %one] {
+    %row = index.cast %i : index to i64
+    %base = scalar.muli %row, %row_stride : i64
+    %slot_base = scalar.addi %base, %slot_origin : i64
+    %attention_base = scalar.addi %base, %attention_origin : i64
+    %tokens_base = scalar.addi %base, %tokens_offset : i64
+    %progress_base = scalar.addi %base, %progress_offset : i64
+    func.call @llama32_row_view(%views, %row_count, %i, %zero, %base, %control_bytes) : (buffer, index, index, index, i64, i64) -> ()
+    func.call @llama32_row_view(%views, %row_count, %i, %one, %attention_base, %attention_bytes) : (buffer, index, index, index, i64, i64) -> ()
+    func.call @llama32_row_view(%views, %row_count, %i, %two, %tokens_base, %token_bytes) : (buffer, index, index, index, i64, i64) -> ()
+    func.call @llama32_row_view(%views, %row_count, %i, %three, %progress_base, %progress_bytes) : (buffer, index, index, index, i64, i64) -> ()
+    %kv_base = scf.select %pooled, %private_bytes, %attention_base : i64
+    view.store %slot_base, %target[%i, 0] : i64, view<16x4xi64>
+    view.store %slot_base, %target[%i, 1] : i64, view<16x4xi64>
+    view.store %kv_base, %target[%i, 2] : i64, view<16x4xi64>
+    scf.yield
+  }
+  %header_bytes = index.constant 64 : offset
+  %pooled_geometry_bytes = index.constant 104 : offset
+  %geometry_bytes = scf.select %pooled, %pooled_geometry_bytes, %header_bytes : offset
+  %geometry = buffer.alloca<private> align(8) %geometry_bytes : buffer
+  %header = buffer.view %geometry[%origin] : buffer -> view<8xi64>
+  %feedback_split = scalar.constant 64 : i64
+  view.store %block_tokens, %header[0] : i64, view<8xi64>
+  view.store %map_origin, %header[1] : i64, view<8xi64>
+  view.store %zero64, %header[2] : i64, view<8xi64>
+  view.store %feedback_split, %header[3] : i64, view<8xi64>
+  view.store %slot_origin, %header[4] : i64, view<8xi64>
+  view.store %row_stride, %header[5] : i64, view<8xi64>
+  view.store %slot_length, %header[6] : i64, view<8xi64>
+  view.store %slot_count, %header[7] : i64, view<8xi64>
+  scf.if %pooled {
+    %region = buffer.view %geometry[%header_bytes] : buffer -> view<5xi64>
+    %plane_stride = scalar.muli %pool, %plane_token_bytes : i64
+    %block_bytes = scalar.muli %block_tokens, %plane_token_bytes : i64
+    view.store %one64, %region[0] : i64, view<5xi64>
+    view.store %private_bytes, %region[1] : i64, view<5xi64>
+    view.store %planes, %region[2] : i64, view<5xi64>
+    view.store %plane_stride, %region[3] : i64, view<5xi64>
+    view.store %block_bytes, %region[4] : i64, view<5xi64>
+    scf.yield
+  }
+  func.return %allocations, %views, %origins, %draft_origins, %geometry : buffer, buffer, buffer, buffer, buffer
+}
+
+// Native validates its shared envelope first. This variant additionally caps
+// source materialization at512 tokens and the checkpoint's131072 context.
+// Shapes are little-endian i64 {tokens, spans}; all returned records are cold,
+// retained by their native owner and never freed by a model command.
+func.def public @prepare(%prefill: i64, %context: i64, %pool: i64, %rows: i64, %pins: i64, %draft_depth: i32, %shapes: buffer, %shape_count: i64, %weights: buffer, %options: buffer) -> (i64, i32, buffer, buffer, buffer, buffer, buffer, buffer, buffer) {
+  %origin = index.constant 0 : offset
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %zero32 = scalar.constant 0 : i32
+  %zero64 = scalar.constant 0 : i64
+  %one64 = scalar.constant 1 : i64
+  %capacity = scalar.constant 512 : i64
+  %maximum_context = scalar.constant 131072 : i64
+  %maximum_pool = scalar.constant 4194304 : i64
+  %maximum_rows = scalar.constant 16 : i64
+  %maximum_count = scalar.constant 2147483647 : i64
+  %maximum_shapes = scalar.constant 2147483645 : i64
+  %page_size = scalar.constant 64 : i64
+  %fields, %options_type, %field_count = func.call @members(%options) : (buffer) -> (buffer, i32, i64)
+  %object_type = scalar.constant 2 : i32
+  %object = scalar.cmpi eq, %options_type, %object_type : i32
+  %empty_options = scalar.cmpi eq, %field_count, %zero64 : i64
+  %empty_object = scalar.andi %object, %empty_options : i1
+  %no_draft = scalar.cmpi eq, %draft_depth, %zero32 : i32
+  %base_options = scalar.andi %empty_object, %no_draft : i1
+  %prefill_min = scalar.cmpi uge, %prefill, %one64 : i64
+  %valid_prefill_min = scalar.andi %base_options, %prefill_min : i1
+  %prefill_max = scalar.cmpi ule, %prefill, %capacity : i64
+  %valid_prefill_max = scalar.andi %valid_prefill_min, %prefill_max : i1
+  %context_min = scalar.cmpi uge, %context, %prefill : i64
+  %valid_context_min = scalar.andi %valid_prefill_max, %context_min : i1
+  %context_max = scalar.cmpi ule, %context, %maximum_context : i64
+  %valid_context_max = scalar.andi %valid_context_min, %context_max : i1
+  %row_min = scalar.cmpi uge, %rows, %one64 : i64
+  %valid_row_min = scalar.andi %valid_context_max, %row_min : i1
+  %row_max = scalar.cmpi ule, %rows, %maximum_rows : i64
+  %valid_row_max = scalar.andi %valid_row_min, %row_max : i1
+  %pool_max = scalar.cmpi ule, %pool, %maximum_pool : i64
+  %valid_pool_max = scalar.andi %valid_row_max, %pool_max : i1
+  %pin_max = scalar.cmpi ule, %pins, %maximum_count : i64
+  %valid_pin_max = scalar.andi %valid_pool_max, %pin_max : i1
+  %shape_max = scalar.cmpi ule, %shape_count, %maximum_shapes : i64
+  %valid_shape_max = scalar.andi %valid_pin_max, %shape_max : i1
+  %remainder = scalar.remui %pool, %page_size : i64
+  %pool_aligned = scalar.cmpi eq, %remainder, %zero64 : i64
+  %pool_options = scalar.andi %valid_shape_max, %pool_aligned : i1
+  %dense = scalar.cmpi eq, %pool, %zero64 : i64
+  %packed = scalar.cmpi ne, %shape_count, %zero64 : i64
+  %has_epochs = scalar.ori %dense, %packed : i1
+  %no_pins = scalar.cmpi eq, %pins, %zero64 : i64
+  %pooled = scalar.cmpi ne, %pool, %zero64 : i64
+  %valid_pins = scalar.ori %no_pins, %pooled : i1
+  %valid_epochs = scalar.andi %pool_options, %has_epochs : i1
+  %supported = scalar.andi %valid_epochs, %valid_pins : i1
+  %supported32 = scalar.extui %supported : i1 to i32
+  %diagnostic = global.load @unsupported : buffer
+  func.call @require(%supported32, %diagnostic) : (i32, buffer) -> ()
+  %bounded = scalar.assume %shape_count [range(%shape_count, 0, 2147483645)] : i64
+  %count = index.cast %bounded : i64 to index
+  %view = buffer.view %shapes[%origin] : buffer -> view<[%count]x2xi64>
+  %prefill_root = global.load @prefill_root : buffer
+  %decode_root = global.load @decode_root : buffer
+  %epoch_root = global.load @epoch_root : buffer
+  %prefill_stage = func.call @llama32_declare_stage(%prefill_root, %prefill, %rows, %capacity, %context, %pool, %weights) : (buffer, i64, i64, i64, i64, i64, buffer) -> (i32)
+  %decode_stage = func.call @llama32_declare_stage(%decode_root, %one64, %rows, %one64, %context, %pool, %weights) : (buffer, i64, i64, i64, i64, i64, buffer) -> (i32)
+  %maximum = scf.for %i = [%zero to %count step %one](%previous = %zero64 : i64) -> (i64) {
+    %tokens = view.load %view[%i, 0] : view<[%count]x2xi64> -> i64
+    %spans = view.load %view[%i, 1] : view<[%count]x2xi64> -> i64
+    %positive = scalar.cmpi uge, %tokens, %one64 : i64
+    %token_bound = scalar.cmpi ule, %tokens, %capacity : i64
+    %fits_context = scalar.cmpi ule, %tokens, %context : i64
+    %span_min = scalar.cmpi uge, %spans, %one64 : i64
+    %span_bound = scalar.cmpi ule, %spans, %maximum_rows : i64
+    %token_range = scalar.andi %positive, %token_bound : i1
+    %token_fit = scalar.andi %token_range, %fits_context : i1
+    %span_range = scalar.andi %span_min, %span_bound : i1
+    %valid_shape = scalar.andi %token_fit, %span_range : i1
+    %valid_shape32 = scalar.extui %valid_shape : i1 to i32
+    func.call @require(%valid_shape32, %diagnostic) : (i32, buffer) -> ()
+    %stage = func.call @llama32_declare_stage(%epoch_root, %tokens, %spans, %capacity, %context, %pool, %weights) : (buffer, i64, i64, i64, i64, i64, buffer) -> (i32)
+    %larger = scalar.cmpi ugt, %tokens, %previous : i64
+    %next = scf.select %larger, %tokens, %previous : i64
+    scf.yield %next : i64
+  }
+  %smaller = scalar.cmpi ult, %maximum, %prefill : i64
+  %packed_prefill = scf.select %smaller, %maximum, %prefill : i64
+  %effective_prefill = scf.select %pooled, %packed_prefill, %prefill : i64
+  %two64 = scalar.constant 2 : i64
+  %stage_count64 = scalar.addi %shape_count, %two64 : i64
+  %shared = scalar.trunci %stage_count64 : i64 to i32
+  %state_bytes = index.constant 8 : offset
+  %state = buffer.alloca<private> align(4) %state_bytes : buffer
+  %state_view = buffer.view %state[%origin] : buffer -> view<2xi32>
+  view.store %prefill_stage, %state_view[0] : i32, view<2xi32>
+  view.store %decode_stage, %state_view[1] : i32, view<2xi32>
+  %terminal = global.load @terminal : buffer
+  %allocations, %views, %origins, %draft_origins, %geometry = func.call @llama32_storage(%context, %pool, %rows, %pins, %packed) : (i64, i64, i64, i64, i1) -> (buffer, buffer, buffer, buffer, buffer)
+  func.return %effective_prefill, %shared, %state, %terminal, %allocations, %views, %origins, %draft_origins, %geometry : i64, i32, buffer, buffer, buffer, buffer, buffer, buffer, buffer
+}

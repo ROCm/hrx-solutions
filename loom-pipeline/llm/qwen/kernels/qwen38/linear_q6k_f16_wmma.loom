@@ -648,7 +648,6 @@ template.def<@qwen38.dense_q6k_f16_wmma.c64t32.epilogue> device @qwen38_dense_q6
 // Assigns one 16-channel by 32-token tile to each of four waves. The waves
 // share the activation tile while retaining independent F32 accumulators.
 template.def<@qwen38.dense_q6k_f16_wmma.c64t32.body> device @qwen38_dense_q6k_f16_wmma_c64t32_body(%epilogue: index, %token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %output: buffer) {
-  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index

@@ -1,0 +1,116 @@
+// Llama 3.2 3B model bindings for shared static FFN command templates.
+// Gate/up are canonical Q4_K. Down uses the exact checkpoint Q6/Q4 layer mask.
+// Inputs/outputs are F32 except the already-packed decode gate/up input.
+// Post-attention normalization belongs to llama32_ffn_norm; scratch is local.
+config.decl @llama.model.hidden_size : index
+config.decl @llama.model.ffn_size : index
+config.decl @llama.model.ffn_gate_up_weight_bytes : index
+config.decl @llama.model.ffn_down_q4_weight_bytes : index
+config.decl @llama.model.ffn_down_q6_weight_bytes : index
+config.decl @llama.model.v_down_q6_layers : i32
+
+template.decl @llm.ffn.gate_up_decode(%hidden_size: index, %ffn_size: index, %use_generic_quantized_projections: i1, %use_mmvq_compat: i1, %ffn_gate_is_q4: i1, %ffn_gate_is_q6: i1, %shape_ffn_gate_weight_bytes: index, %shape_ffn_row_bytes: index, %ffn_gate_weight: view<[%shape_ffn_gate_weight_bytes]xi8>, %ffn_up_weight: view<[%shape_ffn_gate_weight_bytes]xi8>, %post_normalized_q8: buffer, %swiglu: buffer)
+template.decl @llm.ffn.down_decode(%hidden_size: index, %ffn_size: index, %use_generic_quantized_projections: i1, %use_mmvq_compat: i1, %ffn_down_is_q4: i1, %ffn_down_is_q6: i1, %shape_ffn_down_weight_bytes: index, %shape_ffn_row_bytes: index, %shape_hidden_row_bytes: index, %ffn_down_weight: view<[%shape_ffn_down_weight_bytes]xi8>, %swiglu: buffer, %residual: buffer)
+template.decl @llm.ffn.gate_up_prefill(%hidden_size: index, %ffn_size: index, %use_generic_quantized_projections: i1, %use_mmvq_compat: i1, %ffn_gate_is_q4: i1, %ffn_gate_is_q6: i1, %token_count: index, %token_capacity: index, %schedule_token_count: index, %projection_row_origin: index, %projection_count_origin: offset, %uses_m4: i1, %m4_token_count: index, %shape_ffn_capacity_bytes: index, %shape_ffn_gate_weight_bytes: index, %shape_hidden_q8_capacity_bytes: index, %shape_hidden_q8_depth4_bytes: index, %ffn_gate_weight: view<[%shape_ffn_gate_weight_bytes]xi8>, %ffn_up_weight: view<[%shape_ffn_gate_weight_bytes]xi8>, %post_normalized: buffer, %control: buffer, %swiglu: buffer)
+template.decl @llm.ffn.down_prefill(%hidden_size: index, %ffn_size: index, %use_generic_quantized_projections: i1, %use_mmvq_compat: i1, %ffn_down_is_q4: i1, %ffn_down_is_q6: i1, %token_count: index, %token_capacity: index, %schedule_token_count: index, %projection_row_origin: index, %projection_count_origin: offset, %uses_m4: i1, %m4_token_count: index, %shape_ffn_capacity_bytes: index, %shape_ffn_down_weight_bytes: index, %shape_hidden_capacity_bytes: index, %ffn_down_weight: view<[%shape_ffn_down_weight_bytes]xi8>, %control: buffer, %swiglu: buffer, %residual: buffer)
+
+command.program.def public @llama32_ffn_gate_up_decode(%layer: index) launch(%parameters: buffer, %post_normalized_q8: buffer, %swiglu: buffer) where [range(%layer, 0, 27)] {
+  %hidden_size = config.get @llama.model.hidden_size : index
+  %ffn_size = config.get @llama.model.ffn_size : index
+  %four = index.constant 4 : index
+  %ffn_row_bytes = index.mul %ffn_size, %four : index
+  %hidden_row_bytes = index.mul %hidden_size, %four : index
+  %generic = scalar.constant true : i1
+  %token_count = index.constant 1 : index
+  %weight_bytes = config.get @llama.model.ffn_gate_up_weight_bytes : index
+  %is_q4 = scalar.constant true : i1
+  %is_q6 = scalar.constant false : i1
+  %gate_weight = command.parameter %parameters, "blk.{}.ffn_gate.weight"[%layer] : view<[%weight_bytes]xi8>
+  %up_weight = command.parameter %parameters, "blk.{}.ffn_up.weight"[%layer] : view<[%weight_bytes]xi8>
+  %compat = scalar.constant true : i1
+  template.apply<@llm.ffn.gate_up_decode>(%hidden_size, %ffn_size, %generic, %compat, %is_q4, %is_q6, %weight_bytes, %ffn_row_bytes, %gate_weight, %up_weight, %post_normalized_q8, %swiglu) : (index, index, i1, i1, i1, i1, index, index, view<[%weight_bytes]xi8>, view<[%weight_bytes]xi8>, buffer, buffer)
+  command.return
+}
+
+command.program.def public @llama32_ffn_down_decode(%layer: index) launch(%parameters: buffer, %swiglu: buffer, %residual: buffer) where [range(%layer, 0, 27)] {
+  %hidden_size = config.get @llama.model.hidden_size : index
+  %ffn_size = config.get @llama.model.ffn_size : index
+  %four = index.constant 4 : index
+  %ffn_row_bytes = index.mul %ffn_size, %four : index
+  %hidden_row_bytes = index.mul %hidden_size, %four : index
+  %generic = scalar.constant true : i1
+  %token_count = index.constant 1 : index
+  %layer_mask = config.get @llama.model.v_down_q6_layers : i32
+  %layer32 = index.cast %layer : index to i32
+  %one32 = scalar.constant 1 : i32
+  %zero32 = scalar.constant 0 : i32
+  %bit = scalar.shli %one32, %layer32 : i32
+  %selected = scalar.andi %layer_mask, %bit : i32
+  %is_q6 = scalar.cmpi ne, %selected, %zero32 : i32
+  %is_q4 = scalar.cmpi eq, %selected, %zero32 : i32
+  %q4_bytes = config.get @llama.model.ffn_down_q4_weight_bytes : index
+  %q6_bytes = config.get @llama.model.ffn_down_q6_weight_bytes : index
+  %weight_bytes = scf.select %is_q6, %q6_bytes, %q4_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.ffn_down.weight"[%layer] : view<[%weight_bytes]xi8>
+  %compat = scalar.constant true : i1
+  template.apply<@llm.ffn.down_decode>(%hidden_size, %ffn_size, %generic, %compat, %is_q4, %is_q6, %weight_bytes, %ffn_row_bytes, %hidden_row_bytes, %weight, %swiglu, %residual) : (index, index, i1, i1, i1, i1, index, index, index, view<[%weight_bytes]xi8>, buffer, buffer)
+  command.return
+}
+
+command.program.def public @llama32_ffn_gate_up_prefill(%layer: index, %token_count: index) launch(%parameters: buffer, %control: buffer, %post_normalized: buffer, %swiglu: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 512)] {
+  %hidden_size = config.get @llama.model.hidden_size : index
+  %ffn_size = config.get @llama.model.ffn_size : index
+  %four = index.constant 4 : index
+  %ffn_row_bytes = index.mul %ffn_size, %four : index
+  %hidden_row_bytes = index.mul %hidden_size, %four : index
+  %generic = scalar.constant true : i1
+  %weight_bytes = config.get @llama.model.ffn_gate_up_weight_bytes : index
+  %is_q4 = scalar.constant true : i1
+  %is_q6 = scalar.constant false : i1
+  %gate_weight = command.parameter %parameters, "blk.{}.ffn_gate.weight"[%layer] : view<[%weight_bytes]xi8>
+  %up_weight = command.parameter %parameters, "blk.{}.ffn_up.weight"[%layer] : view<[%weight_bytes]xi8>
+  %no_m4 = scalar.constant false : i1
+  %ffn_capacity_bytes = index.mul %token_count, %ffn_row_bytes : index
+  %hidden_capacity_bytes = index.mul %token_count, %hidden_row_bytes : index
+  %group_values = index.constant 128 : index
+  %group_bytes = index.constant 144 : index
+  %hidden_groups = index.div %hidden_size, %group_values : index
+  %hidden_q8_row_bytes = index.mul %hidden_groups, %group_bytes : index
+  %hidden_q8_capacity_bytes = index.mul %token_count, %hidden_q8_row_bytes : index
+  %hidden_q8_depth4_bytes = index.mul %four, %hidden_q8_row_bytes : index
+  %compat = scalar.constant true : i1
+  %projection_row_origin = index.constant 0 : index
+  %projection_count_origin = index.constant 0 : offset
+  template.apply<@llm.ffn.gate_up_prefill>(%hidden_size, %ffn_size, %generic, %compat, %is_q4, %is_q6, %token_count, %token_count, %token_count, %projection_row_origin, %projection_count_origin, %no_m4, %four, %ffn_capacity_bytes, %weight_bytes, %hidden_q8_capacity_bytes, %hidden_q8_depth4_bytes, %gate_weight, %up_weight, %post_normalized, %control, %swiglu) : (index, index, i1, i1, i1, i1, index, index, index, index, offset, i1, index, index, index, index, index, view<[%weight_bytes]xi8>, view<[%weight_bytes]xi8>, buffer, buffer, buffer)
+  command.return
+}
+
+command.program.def public @llama32_ffn_down_prefill(%layer: index, %token_count: index) launch(%parameters: buffer, %control: buffer, %swiglu: buffer, %residual: buffer) where [range(%layer, 0, 27), range(%token_count, 1, 512)] {
+  %hidden_size = config.get @llama.model.hidden_size : index
+  %ffn_size = config.get @llama.model.ffn_size : index
+  %four = index.constant 4 : index
+  %ffn_row_bytes = index.mul %ffn_size, %four : index
+  %hidden_row_bytes = index.mul %hidden_size, %four : index
+  %generic = scalar.constant true : i1
+  %layer_mask = config.get @llama.model.v_down_q6_layers : i32
+  %layer32 = index.cast %layer : index to i32
+  %one32 = scalar.constant 1 : i32
+  %zero32 = scalar.constant 0 : i32
+  %bit = scalar.shli %one32, %layer32 : i32
+  %selected = scalar.andi %layer_mask, %bit : i32
+  %is_q6 = scalar.cmpi ne, %selected, %zero32 : i32
+  %is_q4 = scalar.cmpi eq, %selected, %zero32 : i32
+  %q4_bytes = config.get @llama.model.ffn_down_q4_weight_bytes : index
+  %q6_bytes = config.get @llama.model.ffn_down_q6_weight_bytes : index
+  %weight_bytes = scf.select %is_q6, %q6_bytes, %q4_bytes : index
+  %weight = command.parameter %parameters, "blk.{}.ffn_down.weight"[%layer] : view<[%weight_bytes]xi8>
+  %no_m4 = scalar.constant false : i1
+  %ffn_capacity_bytes = index.mul %token_count, %ffn_row_bytes : index
+  %hidden_capacity_bytes = index.mul %token_count, %hidden_row_bytes : index
+  %compat = scalar.constant true : i1
+  %projection_row_origin = index.constant 0 : index
+  %projection_count_origin = index.constant 0 : offset
+  template.apply<@llm.ffn.down_prefill>(%hidden_size, %ffn_size, %generic, %compat, %is_q4, %is_q6, %token_count, %token_count, %token_count, %projection_row_origin, %projection_count_origin, %no_m4, %four, %ffn_capacity_bytes, %weight_bytes, %hidden_capacity_bytes, %weight, %control, %swiglu, %residual) : (index, index, i1, i1, i1, i1, index, index, index, index, offset, i1, index, index, index, index, view<[%weight_bytes]xi8>, buffer, buffer, buffer)
+  command.return
+}
+

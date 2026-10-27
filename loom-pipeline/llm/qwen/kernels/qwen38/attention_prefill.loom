@@ -1,3 +1,7 @@
+template.decl @llm.attention.head_rms_value(%raw: f32, %head_divisor: f32, %epsilon: f32, %lane: index, %head_size: index, %norm_weight: buffer) -> (f32)
+
+func.decl @llm_attention_online_softmax_update(%old_max: f32, %old_sum: f32, %old_acc: f32, %score: f32, %value: f32) -> (f32, f32, f32)
+
 // Model geometry is supplied by the selected architecture catalog.
 config.decl @qwen.model.head_gate_size : index
 config.decl @qwen.model.head_scratch_bytes : index
@@ -61,7 +65,6 @@ template.def<@qwen38.attention.query_prepare> device @qwen38_attention_query_pre
     %projection_origin = index.scale %token_begin, %projection_row_bytes : index, offset -> offset
     %activation_origin = index.scale %token_begin, %activation_row_bytes : index, offset -> offset
     %projection_view = buffer.view %query_gate_projection[%projection_origin] : buffer -> view<[%token_count]x[%shape_query_gate_size]xf32>
-    %weight_view = buffer.view %norm_weight[%c0_offset] : buffer -> view<[%shape_head_size]xf32>
     %query_view = buffer.view %query[%activation_origin] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
     %gate_view = buffer.view %gate[%activation_origin] : buffer -> view<[%token_count]x[%shape_attention_width]xf32>
     %head_projection_base = index.mul %head, %c512 : index
@@ -72,15 +75,8 @@ template.def<@qwen38.attention.query_prepare> device @qwen38_attention_query_pre
     %output_index = index.add %output_head_base, %lane : index
     %raw_query = view.load %projection_view[%token, %query_index] : view<[%token_count]x[%shape_query_gate_size]xf32> -> f32
     %raw_gate = view.load %projection_view[%token, %gate_index] : view<[%token_count]x[%shape_query_gate_size]xf32> -> f32
-    %square = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %raw_query, %raw_query : f32
-    %sum = kernel.workgroup.reduce<addf> %square : f32
     %head_size_f32 = config.get @qwen.model.head_divisor : f32
-    %mean = scalar.divf<nnan|ninf|nsz|arcp> %sum, %head_size_f32 : f32
-    %biased_mean = scalar.addf<nnan|ninf|nsz> %mean, %epsilon : f32
-    %inverse_rms = scalar.rsqrtf<nnan|ninf|nsz|afn> %biased_mean : f32
-    %weight = view.load %weight_view[%lane] : view<[%shape_head_size]xf32> -> f32
-    %normalized0 = scalar.mulf<nnan|ninf|nsz> %raw_query, %inverse_rms : f32
-    %normalized = scalar.mulf<nnan|ninf|nsz> %normalized0, %weight : f32
+    %normalized = template.apply<@llm.attention.head_rms_value>(%raw_query, %head_size_f32, %epsilon, %lane, %shape_head_size, %norm_weight) : (f32, f32, f32, index, index, buffer) -> (f32)
     %shape_head_scratch_bytes = config.get @qwen.model.head_scratch_bytes : index
     %scratch_bytes = index.cast %shape_head_scratch_bytes : index to offset
     %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
@@ -145,22 +141,14 @@ template.def<@qwen38.attention.kv_prepare> device @qwen38_attention_kv_prepare(%
     %projection_origin = index.scale %token_begin, %projection_row_bytes : index, offset -> offset
     %key_projection_view = buffer.view %key_projection[%projection_origin] : buffer -> view<[%token_count]x[%shape_kv_size]xf32>
     %value_projection_view = buffer.view %value_projection[%projection_origin] : buffer -> view<[%token_count]x[%shape_kv_size]xf32>
-    %weight_view = buffer.view %norm_weight[%c0_offset] : buffer -> view<[%shape_head_size]xf32>
     %key_cache_view = buffer.view %key_cache[%key_origin] : buffer -> view<[%physical_capacity]x[%shape_kv_size]xf16>
     %value_cache_view = buffer.view %value_cache[%value_origin] : buffer -> view<[%physical_capacity]x[%shape_kv_size]xf16>
     %head_base = index.mul %head, %c256 : index
     %projection_index = index.add %head_base, %lane : index
     %raw_key = view.load %key_projection_view[%token, %projection_index] : view<[%token_count]x[%shape_kv_size]xf32> -> f32
     %raw_value = view.load %value_projection_view[%token, %projection_index] : view<[%token_count]x[%shape_kv_size]xf32> -> f32
-    %square = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %raw_key, %raw_key : f32
-    %sum = kernel.workgroup.reduce<addf> %square : f32
     %head_size_f32 = config.get @qwen.model.head_divisor : f32
-    %mean = scalar.divf<nnan|ninf|nsz|arcp> %sum, %head_size_f32 : f32
-    %biased_mean = scalar.addf<nnan|ninf|nsz> %mean, %epsilon : f32
-    %inverse_rms = scalar.rsqrtf<nnan|ninf|nsz|afn> %biased_mean : f32
-    %weight = view.load %weight_view[%lane] : view<[%shape_head_size]xf32> -> f32
-    %normalized0 = scalar.mulf<nnan|ninf|nsz> %raw_key, %inverse_rms : f32
-    %normalized = scalar.mulf<nnan|ninf|nsz> %normalized0, %weight : f32
+    %normalized = template.apply<@llm.attention.head_rms_value>(%raw_key, %head_size_f32, %epsilon, %lane, %shape_head_size, %norm_weight) : (f32, f32, f32, index, index, buffer) -> (f32)
     %shape_head_scratch_bytes = config.get @qwen.model.head_scratch_bytes : index
     %scratch_bytes = index.cast %shape_head_scratch_bytes : index to offset
     %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
@@ -259,16 +247,7 @@ kernel.def export("qwen38_attention_prefill_reference") @qwen38_attention_prefil
     %dot_part0 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %query_value, %key : f32
     %dot_part = scalar.mulf<reassoc|nnan|ninf|nsz> %dot_part0, %attention_scale : f32
     %score = kernel.workgroup.reduce<addf> %dot_part : f32
-    %new_max = scalar.maxnumf %old_max, %score : f32
-    %old_delta = scalar.subf %old_max, %new_max : f32
-    %score_delta = scalar.subf %score, %new_max : f32
-    %old_scale = scalar.expf<afn> %old_delta : f32
-    %new_scale = scalar.expf<afn> %score_delta : f32
-    %rescaled_sum = scalar.mulf<reassoc|nnan|ninf|nsz> %old_sum, %old_scale : f32
-    %new_sum = scalar.addf<reassoc|nnan|ninf|nsz> %rescaled_sum, %new_scale : f32
-    %rescaled_acc = scalar.mulf<reassoc|nnan|ninf|nsz> %old_acc, %old_scale : f32
-    %weighted_value = scalar.mulf<reassoc|nnan|ninf|nsz> %value, %new_scale : f32
-    %new_acc = scalar.addf<reassoc|nnan|ninf|nsz> %rescaled_acc, %weighted_value : f32
+    %new_max, %new_sum, %new_acc = func.call @llm_attention_online_softmax_update(%old_max, %old_sum, %old_acc, %score, %value) : (f32, f32, f32, f32, f32) -> (f32, f32, f32)
     scf.yield %new_max, %new_sum, %new_acc : f32, f32, f32
   }
   %attention_value = scalar.divf<nnan|ninf|nsz|arcp> %final_acc, %final_sum : f32

@@ -1,0 +1,236 @@
+func.decl @ggml_qk_mmq_compat_select(%capacity: index, %token: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer) -> (i1)
+func.decl @ggml_q4k_q8_1_x4_row_lane_policy(%round_weight_scales: i1, %input_size: index, %weight: buffer, %weight_row_byte_base: offset, %q8_input: buffer, %q8_row_byte_base: offset, %lane: index) -> (f32)
+// Explicit small-MMVQ compatibility policy; canonical entrypoints are unchanged.
+// Wave32 is part of this arithmetic contract. Other logical counts and inactive
+// rows use the existing canonical contraction/reduction, with no new accuracy claim.
+template.decl @ggml.q8_1_x4.word(%q8_input: buffer, %row_byte_base: offset, %q8_block: index, %word_in_block: index) -> (vector<4xi8>, f32)
+func.decl @ggml_q4k_q8_1_x4_row_lane(%input_size: index, %weight: buffer, %weight_row_byte_base: offset, %q8_input: buffer, %q8_row_byte_base: offset, %lane: index) -> (f32)
+config.decl @ggml.linear_q4k_q8_1_x4.token_capacity : %value: index where [range(%value, 1, 2048)]
+config.decl @ggml.linear_q4k_q8_1_x4.output_capacity : %value: index where [range(%value, 1, 262144)]
+amdgpu.target<gfx11-generic> @ggml_q4k_compat_wave32 {subgroup_size = 32}
+func.decl @ggml_qk_mmvq_compat_select(%capacity: index, %token: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer) -> (i1, i1, i1)
+func.decl @ggml_qk_mmvq_compat_reduce(%lane_acc: f32) -> (f32)
+func.def inline @ggml_q4k_compat_header(%weight: buffer, %block_byte_base: offset, %group: index) -> (f32, f32, i32, i32) {
+  %c4 = index.constant 4 : index
+  %scale_byte_add = index.constant 4 : offset
+  %c4_i32 = scalar.constant 4 : i32
+  %c6_i32 = scalar.constant 6 : i32
+  %c15_i32 = scalar.constant 15 : i32
+  %c63_i32 = scalar.constant 63 : i32
+  %bounded_group = index.assume %group [range(%group, 0, 7)] : index
+  %scale_byte_base = index.add %block_byte_base, %scale_byte_add : offset
+  %half_view = buffer.view %weight[%block_byte_base] : buffer -> view<2xf16>
+  %scale_view = buffer.view %weight[%scale_byte_base] : buffer -> view<12xi8>
+  %d_f16 = view.load %half_view[0] : view<2xf16> -> f16
+  %dmin_f16 = view.load %half_view[1] : view<2xf16> -> f16
+  %d = scalar.extf %d_f16 : f16 to f32
+  %dmin = scalar.extf %dmin_f16 : f16 to f32
+  %is_low_group = index.cmp ult, %bounded_group, %c4 : index
+  %scale, %minimum = scf.if %is_low_group -> (i32, i32) {
+    %minimum_index = index.add %bounded_group, %c4 : index
+    %scale_i8 = view.load %scale_view[%bounded_group] : view<12xi8> -> i8
+    %minimum_i8 = view.load %scale_view[%minimum_index] : view<12xi8> -> i8
+    %scale_u8 = scalar.extui %scale_i8 : i8 to i32
+    %minimum_u8 = scalar.extui %minimum_i8 : i8 to i32
+    %scale_low6 = scalar.andi %scale_u8, %c63_i32 : i32
+    %minimum_low6 = scalar.andi %minimum_u8, %c63_i32 : i32
+    scf.yield %scale_low6, %minimum_low6 : i32, i32
+  } else {
+    %packed_index = index.add %bounded_group, %c4 : index
+    %scale_high_index = index.sub %bounded_group, %c4 : index
+    %packed_i8 = view.load %scale_view[%packed_index] : view<12xi8> -> i8
+    %scale_high_i8 = view.load %scale_view[%scale_high_index] : view<12xi8> -> i8
+    %minimum_high_i8 = view.load %scale_view[%bounded_group] : view<12xi8> -> i8
+    %packed = scalar.extui %packed_i8 : i8 to i32
+    %scale_high = scalar.extui %scale_high_i8 : i8 to i32
+    %minimum_high = scalar.extui %minimum_high_i8 : i8 to i32
+    %scale_low4 = scalar.andi %packed, %c15_i32 : i32
+    %minimum_low4 = scalar.shrui %packed, %c4_i32 : i32
+    %scale_high2_raw = scalar.shrui %scale_high, %c6_i32 : i32
+    %minimum_high2_raw = scalar.shrui %minimum_high, %c6_i32 : i32
+    %scale_high2 = scalar.shli %scale_high2_raw, %c4_i32 : i32
+    %minimum_high2 = scalar.shli %minimum_high2_raw, %c4_i32 : i32
+    %scale_value = scalar.ori %scale_low4, %scale_high2 : i32
+    %minimum_value = scalar.ori %minimum_low4, %minimum_high2 : i32
+    scf.yield %scale_value, %minimum_value : i32, i32
+  }
+  func.return %d, %dmin, %scale, %minimum : f32, f32, i32, i32
+}
+
+// Two disjoint four-code words from one 32-value quantization group.
+func.def inline @ggml_q4k_compat_terms(%weight: buffer, %weight_row: offset, %q8_input: buffer, %q8_row: offset, %block: index, %group: index, %word: index) -> (f32, f32, f32, f32) {
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %c8 = index.constant 8 : index
+  %block_bytes = index.constant 144 : offset
+  %payload_add = index.constant 16 : offset
+  %block_add = index.scale %block, %block_bytes : index, offset -> offset
+  %block_base = index.add %weight_row, %block_add : offset
+  %payload_base = index.add %block_base, %payload_add : offset
+  %codes = buffer.view %weight[%payload_base] : buffer -> view<32xi32>
+  %page = index.div %group, %c2 : index
+  %page_base = index.mul %page, %c8 : index
+  %code0 = index.add %page_base, %word : index
+  %code1 = index.add %code0, %c4 : index
+  %nibble = index.rem %group, %c2 : index
+  %shift_index = index.mul %nibble, %c4 : index
+  %shift = index.cast %shift_index : index to i32
+  %mask = scalar.constant 252645135 : i32
+  %raw0 = view.load %codes[%code0] : view<32xi32> -> i32
+  %raw1 = view.load %codes[%code1] : view<32xi32> -> i32
+  %shifted0 = scalar.shrui %raw0, %shift : i32
+  %shifted1 = scalar.shrui %raw1, %shift : i32
+  %packed0 = scalar.andi %shifted0, %mask : i32
+  %packed1 = scalar.andi %shifted1, %mask : i32
+  %word0 = vector.splat %packed0 : vector<1xi32>
+  %word1 = vector.splat %packed1 : vector<1xi32>
+  %q4_0 = vector.bitcast %word0 : vector<1xi32> to vector<4xi8>
+  %q4_1 = vector.bitcast %word1 : vector<1xi32> to vector<4xi8>
+  %q8_block0 = index.mul %block, %c8 : index
+  %q8_block = index.add %q8_block0, %group : index
+  %word_hi = index.add %word, %c4 : index
+  %q8_0, %d8 = template.apply<@ggml.q8_1_x4.word>(%q8_input, %q8_row, %q8_block, %word) : (buffer, offset, index, index) -> (vector<4xi8>, f32)
+  %q8_1, %d8_hi = template.apply<@ggml.q8_1_x4.word>(%q8_input, %q8_row, %q8_block, %word_hi) : (buffer, offset, index, index) -> (vector<4xi8>, f32)
+  %zero = vector.constant 0 : vector<1xi32>
+  %ones = vector.constant 1 : vector<4xi8>
+  %dot0 = vector.dot4i<u8s8> %q4_0, %q8_0, %zero : vector<4xi8>, vector<4xi8>, vector<1xi32>
+  %dot1 = vector.dot4i<u8s8> %q4_1, %q8_1, %dot0 : vector<4xi8>, vector<4xi8>, vector<1xi32>
+  %sum0 = vector.dot4i<s8s8> %ones, %q8_0, %zero : vector<4xi8>, vector<4xi8>, vector<1xi32>
+  %sum1 = vector.dot4i<s8s8> %ones, %q8_1, %sum0 : vector<4xi8>, vector<4xi8>, vector<1xi32>
+  %dot = vector.extract %dot1[0] : vector<1xi32> -> i32
+  %sum = vector.extract %sum1[0] : vector<1xi32> -> i32
+  %d4, %dmin, %scale, %minimum = func.call @ggml_q4k_compat_header(%weight, %block_base, %group) : (buffer, offset, index) -> (f32, f32, i32, i32)
+  %scaled_dot_i32 = scalar.muli %dot, %scale : i32
+  %scaled_sum_i32 = scalar.muli %sum, %minimum : i32
+  %scaled_dot = scalar.sitofp %scaled_dot_i32 : i32 to f32
+  %scaled_sum = scalar.sitofp %scaled_sum_i32 : i32 to f32
+  %positive = scalar.mulf %d4, %d8 : f32
+  %negative = scalar.mulf %dmin, %d8 : f32
+  func.return %positive, %scaled_dot, %negative, %scaled_sum : f32, f32, f32, f32
+}
+
+func.def inline @ggml_q4k_compat_row(%input_size: index, %weight: buffer, %weight_row_byte_base: offset, %q8_input: buffer, %q8_row_byte_base: offset, %lane: index, %one_row: i1, %reverse_minima: i1) -> (f32) {
+  %bounded_input = index.assume %input_size [range(%input_size, 256, 32768), multiple_of(%input_size, 256)] : index
+  %bounded_lane = index.assume %lane [range(%lane, 0, 31)] : index
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %c16 = index.constant 16 : index
+  %c256 = index.constant 256 : index
+  %zero = scalar.constant 0.0 : f32
+  %lane_block = index.div %bounded_lane, %c16 : index
+  %local_lane = index.rem %bounded_lane, %c16 : index
+  %pair = index.div %local_lane, %c4 : index
+  %group0 = index.mul %pair, %c2 : index
+  %group1 = index.add %group0, %c1 : index
+  %word = index.rem %local_lane, %c4 : index
+  %block_count = index.div %bounded_input, %c256 : index
+  %result = scf.for %block = [%lane_block to %block_count step %c2](%accumulator = %zero : f32) -> (f32) {
+    %p0, %dot0, %m0, %sum0 = func.call @ggml_q4k_compat_terms(%weight, %weight_row_byte_base, %q8_input, %q8_row_byte_base, %block, %group0, %word) : (buffer, offset, buffer, offset, index, index, index) -> (f32, f32, f32, f32)
+    %p1, %dot1, %m1, %sum1 = func.call @ggml_q4k_compat_terms(%weight, %weight_row_byte_base, %q8_input, %q8_row_byte_base, %block, %group1, %word) : (buffer, offset, buffer, offset, index, index, index) -> (f32, f32, f32, f32)
+    %iteration_result = scf.if %one_row -> (f32) {
+      // Retained gfx1151 T1 E7348/E73B4/E73CC/E73D4/E73D8.
+      %one_positive0 = scalar.fmaf %p0, %dot0, %accumulator : f32
+      %one_neg_m0 = scalar.negf %m0 : f32
+      %one_neg_m1 = scalar.negf %m1 : f32
+      %negative0_partial = scalar.mulf %one_neg_m0, %sum0 : f32
+      %negative_partial = scalar.fmaf %one_neg_m1, %sum1, %negative0_partial : f32
+      %one_positive1 = scalar.fmaf %p1, %dot1, %one_positive0 : f32
+      %one_result = scalar.addf %one_positive1, %negative_partial : f32
+      scf.yield %one_result : f32
+    } else {
+      %positive0 = scalar.fmaf %p0, %dot0, %accumulator : f32
+      %positive1 = scalar.fmaf %p1, %dot1, %positive0 : f32
+      %neg_m0 = scalar.negf %m0 : f32
+      %neg_m1 = scalar.negf %m1 : f32
+      // Retained gfx1151 T3: column0 min0/min1; columns1/2 min1/min0.
+      %minimum_result = scf.if %reverse_minima -> (f32) {
+        %minimum1_first = scalar.fmaf %neg_m1, %sum1, %positive1 : f32
+        %minimum0_last = scalar.fmaf %neg_m0, %sum0, %minimum1_first : f32
+        scf.yield %minimum0_last : f32
+      } else {
+        %minimum0_first = scalar.fmaf %neg_m0, %sum0, %positive1 : f32
+        %minimum1_last = scalar.fmaf %neg_m1, %sum1, %minimum0_first : f32
+        scf.yield %minimum1_last : f32
+      }
+      scf.yield %minimum_result : f32
+    }
+    scf.yield %iteration_result : f32
+  }
+  func.return %result : f32
+}
+
+kernel.def target(@ggml_q4k_compat_wave32) export("ggml_linear_q4k_q8_1_x4_compat") @ggml_linear_q4k_q8_1_x4_compat(%token_count: index, %input_size: index, %output_size: index) {
+  %bounded_token_count = index.assume %token_count [range(%token_count, 1, 2048)] : index
+  %bounded_output_size = index.assume %output_size [range(%output_size, 1, 262144)] : index
+  %subgroup_size = target.subgroup.size : index
+  %workgroup_size = index.constant 256 : index
+  %c1 = index.constant 1 : index
+  %subgroups_per_workgroup = index.div %workgroup_size, %subgroup_size : index
+  %output_padding = index.sub %subgroups_per_workgroup, %c1 : index
+  %padded_output_size = index.add %bounded_output_size, %output_padding : index
+  %output_tiles = index.div %padded_output_size, %subgroups_per_workgroup : index
+  kernel.launch.config workgroups(%output_tiles, %bounded_token_count, %c1) workgroup_size(%workgroup_size, %c1, %c1) : index
+} launch(%token_count: index, %input_size: index, %output_size: index, %row_origin: index, %fixed_count: i32, %count_origin: offset, %count_view: buffer, %q8_input: buffer, %weight: buffer, %output: buffer) {
+  %q8_noalias, %weight_noalias, %output_noalias = buffer.assume.noalias %q8_input, %weight, %output : buffer, buffer, buffer
+  %token_capacity = config.get @ggml.linear_q4k_q8_1_x4.token_capacity : index
+  %output_capacity = config.get @ggml.linear_q4k_q8_1_x4.output_capacity : index
+  %bounded_token_count = index.assume %token_count [range(%token_count, 1, 2048), le(%token_count, %token_capacity)] : index
+  %bounded_input_size = index.assume %input_size [range(%input_size, 256, 32768), multiple_of(%input_size, 256)] : index
+  %bounded_output_size = index.assume %output_size [range(%output_size, 1, 262144), le(%output_size, %output_capacity)] : index
+  %subgroup_size = target.subgroup.size : index
+  %workgroup_size = index.constant 256 : index
+  %c0 = index.constant 0 : index
+  %c128 = index.constant 128 : index
+  %c144_bytes = index.constant 144 : offset
+  %c256 = index.constant 256 : index
+  %subgroups_per_workgroup = index.div %workgroup_size, %subgroup_size : index
+  %channel_tile = kernel.workgroup.id<x> : index
+  %token0 = kernel.workgroup.id<y> : index
+  %token = index.assume %token0 [lt(%token0, %bounded_token_count)] : index
+  %subgroup = kernel.subgroup.id : index
+  %lane = kernel.subgroup.lane.id : index
+  %channel_base = index.mul %channel_tile, %subgroups_per_workgroup : index
+  %channel0 = index.add %channel_base, %subgroup : index
+  %valid_channel = index.cmp ult, %channel0, %bounded_output_size : index
+  %safe_channel0 = scf.select %valid_channel, %channel0, %c0 : index
+  %safe_channel = index.assume %safe_channel0 [lt(%safe_channel0, %output_capacity)] : index
+  %q4_block_count = index.div %bounded_input_size, %c256 : index
+  %weight_row_bytes = index.scale %q4_block_count, %c144_bytes : index, offset -> offset
+  %weight_row_byte_base = index.scale %safe_channel, %weight_row_bytes : index, offset -> offset
+  %q8_group_count = index.div %bounded_input_size, %c128 : index
+  %q8_row_bytes = index.scale %q8_group_count, %c144_bytes : index, offset -> offset
+  %q8_row_byte_base = index.scale %token, %q8_row_bytes : index, offset -> offset
+  %specialized, %one_row, %reverse_minima = func.call @ggml_qk_mmvq_compat_select(%bounded_token_count, %token, %row_origin, %fixed_count, %count_origin, %count_view) : (index, index, index, i32, offset, buffer) -> (i1, i1, i1)
+  %round_weight_scales = func.call @ggml_qk_mmq_compat_select(%bounded_token_count, %token, %row_origin, %fixed_count, %count_origin, %count_view) : (index, index, index, i32, offset, buffer) -> (i1)
+  %lane_acc = scf.if %valid_channel -> (f32) {
+    %value = scf.if %specialized -> (f32) {
+      %v = func.call @ggml_q4k_compat_row(%bounded_input_size, %weight_noalias, %weight_row_byte_base, %q8_noalias, %q8_row_byte_base, %lane, %one_row, %reverse_minima) : (index, buffer, offset, buffer, offset, index, i1, i1) -> (f32)
+      scf.yield %v : f32
+    } else {
+      %v = func.call @ggml_q4k_q8_1_x4_row_lane_policy(%round_weight_scales, %bounded_input_size, %weight_noalias, %weight_row_byte_base, %q8_noalias, %q8_row_byte_base, %lane) : (i1, index, buffer, offset, buffer, offset, index) -> (f32)
+      scf.yield %v : f32
+    }
+    scf.yield %value : f32
+  } else {
+    %c0_f32 = scalar.constant 0.0 : f32
+    scf.yield %c0_f32 : f32
+  }
+  %dot = scf.if %specialized -> (f32) {
+    %ordered_dot = func.call @ggml_qk_mmvq_compat_reduce(%lane_acc) : (f32) -> (f32)
+    scf.yield %ordered_dot : f32
+  } else {
+    %canonical_dot = kernel.subgroup.reduce<addf> %lane_acc : f32
+    scf.yield %canonical_dot : f32
+  }
+  %is_lane_zero = index.cmp eq, %lane, %c0 : index
+  scf.if %valid_channel {
+    scf.if %is_lane_zero {
+      %c0_offset = index.constant 0 : offset
+      %output_view = buffer.view %output_noalias[%c0_offset] : buffer -> view<[%bounded_token_count]x[%bounded_output_size]xf32>
+      view.store %dot, %output_view[%token, %channel0] : f32, view<[%bounded_token_count]x[%bounded_output_size]xf32>
+    }
+  }
+  kernel.return
+}
+

@@ -1,3 +1,5 @@
+template.decl @ggml.q5k.f16_wmma.split_k_5120x48.body(%partial_split_bytes: offset, %token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %partials: buffer)
+
 // Model geometry is supplied by the selected architecture catalog.
 config.decl @qwen.model.gdn_alpha_split_bytes : index
 
@@ -19,19 +21,11 @@ kernel.decl @qwen38_linear_q5k_f16_wmma(%token_count: index, %input_size: index,
 
 amdgpu.target<gfx11-generic> @qwen38_dense_gfx11_wave64_split_k {subgroup_size = 64}
 
-kernel.def target(@qwen38_dense_gfx11_wave64_split_k) export("qwen38_linear_q5k_f16_wmma_alpha_split_k") @qwen38_linear_q5k_f16_wmma_alpha_split_k(%token_count0: index, %input_size0: index, %output_size0: index) {
-  %token_count = index.assume %token_count0 [range(%token_count0, 0, 32), multiple_of(%token_count0, 32)] : index
-  %input_size = index.assume %input_size0 [range(%input_size0, 5120, 5120)] : index
-  %output_size = index.assume %output_size0 [range(%output_size0, 48, 48)] : index
-  %c1 = index.constant 1 : index
-  %c7 = index.constant 7 : index
-  %c32 = index.constant 32 : index
-  %c256 = index.constant 256 : index
-  %token_tiles = index.div %token_count, %c32 : index
-  kernel.launch.config workgroups(%c1, %token_tiles, %c7) workgroup_size(%c256, %c1, %c1) : index
-} launch(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %partials: buffer) {
+// Canonical Q5_K, K5120/N48, seven ordered split planes. The caller supplies
+// the plane stride and the existing 256-thread wave64 grid; input is F32.
+// Weights round to F16 before WMMA; partials accumulate/store in F32.
+template.def<@ggml.q5k.f16_wmma.split_k_5120x48.body> device @ggml_q5k_f16_wmma_split_k_5120x48_body(%partial_split_bytes: offset, %token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %partials: buffer) {
 
-  %shape_hidden_size = config.get @qwen.model.hidden_size : index
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
@@ -54,8 +48,6 @@ kernel.def target(@qwen38_dense_gfx11_wave64_split_k) export("qwen38_linear_q5k_
   %metadata_stage_bytes = index.constant 4096 : offset
   %wave_result_stage_bytes = index.constant 1024 : offset
   %result_stage_bytes = index.constant 4096 : offset
-  %shape_gdn_alpha_split_bytes = config.get @qwen.model.gdn_alpha_split_bytes : index
-  %partial_split_bytes = index.cast %shape_gdn_alpha_split_bytes : index to offset
   %c0_f16x4 = vector.constant 0.0 : vector<4xf16>
   %c0_f32x2 = vector.constant 0.0 : vector<2xf32>
   %zero_accumulator = vector.constant 0.0 : vector<4xf32>
@@ -84,7 +76,7 @@ kernel.def target(@qwen38_dense_gfx11_wave64_split_k) export("qwen38_linear_q5k_
   %subgroup_channel_add = index.mul %subgroup, %c16 : index
   %partial_offset = index.scale %split_index, %partial_split_bytes : index, offset -> offset
   %input_noalias, %weight_noalias, %partials_noalias = buffer.assume.noalias %input, %weight, %partials : buffer, buffer, buffer
-  %input_view = buffer.view %input_noalias[%c0_offset] : buffer -> view<32x[%shape_hidden_size]xf32>
+  %input_view = buffer.view %input_noalias[%c0_offset] : buffer -> view<32x[%input_size]xf32>
   %partial_view = buffer.view %partials_noalias[%partial_offset] : buffer -> view<32x48xf32>
   %weight_stage = buffer.alloca<workgroup> align(16) %weight_stage_bytes : buffer
   %activation_stage = buffer.alloca<workgroup> align(16) %activation_stage_bytes : buffer
@@ -161,7 +153,7 @@ kernel.def target(@qwen38_dense_gfx11_wave64_split_k) export("qwen38_linear_q5k_
         %activation_row = index.assume %activation_row0 [range(%activation_row0, 0, 31)] : index
         %input_k0 = index.add %k_origin, %activation_k : index
         %input_k = index.assume %input_k0 [range(%input_k0, 0, 5118), multiple_of(%input_k0, 2), lt(%input_k0, %last_input_pair_start)] : index
-        %loaded = vector.load %input_view[%activation_row, %input_k] : view<32x[%shape_hidden_size]xf32> -> vector<2xf32>
+        %loaded = vector.load %input_view[%activation_row, %input_k] : view<32x[%input_size]xf32> -> vector<2xf32>
         %activation_values = vector.fptrunc %loaded : vector<2xf32> to vector<2xf16>
         vector.store %activation_values, %activation_stage_physical_view[%activation_row, %activation_k] : vector<2xf16>, view<32x40xf16>
       }
@@ -203,6 +195,23 @@ kernel.def target(@qwen38_dense_gfx11_wave64_split_k) export("qwen38_linear_q5k_
     %values1 = vector.load %result_physical_view[%publish_token, %publish_channel_add] : view<16x16xf32> -> vector<4xf32>
     vector.store %values1, %partial_view[%publish_token1, %channel] : vector<4xf32>, view<32x48xf32>
   }
+  template.return
+}
+
+kernel.def target(@qwen38_dense_gfx11_wave64_split_k) export("qwen38_linear_q5k_f16_wmma_alpha_split_k") @qwen38_linear_q5k_f16_wmma_alpha_split_k(%token_count0: index, %input_size0: index, %output_size0: index) {
+  %token_count = index.assume %token_count0 [range(%token_count0, 0, 32), multiple_of(%token_count0, 32)] : index
+  %input_size = index.assume %input_size0 [range(%input_size0, 5120, 5120)] : index
+  %output_size = index.assume %output_size0 [range(%output_size0, 48, 48)] : index
+  %c1 = index.constant 1 : index
+  %c7 = index.constant 7 : index
+  %c32 = index.constant 32 : index
+  %c256 = index.constant 256 : index
+  %token_tiles = index.div %token_count, %c32 : index
+  kernel.launch.config workgroups(%c1, %token_tiles, %c7) workgroup_size(%c256, %c1, %c1) : index
+} launch(%token_count_data: buffer, %input_size0: index, %output_size0: index, %input: buffer, %weight: buffer, %partials: buffer) {
+  %shape_gdn_alpha_split_bytes = config.get @qwen.model.gdn_alpha_split_bytes : index
+  %partial_split_bytes = index.cast %shape_gdn_alpha_split_bytes : index to offset
+  template.apply<@ggml.q5k.f16_wmma.split_k_5120x48.body>(%partial_split_bytes, %token_count_data, %input_size0, %output_size0, %input, %weight, %partials) : (offset, buffer, index, index, buffer, buffer, buffer)
   kernel.return
 }
 

@@ -1,0 +1,95 @@
+// Llama output weight/normalization policy; numerical orchestration is shared.
+// The exact checkpoint ties output to canonical Q6_K token_embd.weight.
+// The rows root requires all1..64 supplied rows to be valid. The last-row root
+// selects a nonempty span's last active row from native {count,base,...} control
+// at an explicit origin, independently of prepared capacity and packed start.
+config.decl @llama.model.hidden_size : index
+config.decl @llama.model.vocabulary_size : index
+config.decl @llama.model.embedding_weight_bytes : index
+config.decl @llama.model.rms_epsilon : f32
+command.program.decl @llama32_output_norm(%token_count: index) launch(%parameters: buffer, %input: buffer, %output: buffer)
+template.decl @llm.output.project_greedy(%token_count: index, %normalized_origin: offset, %output_origin: offset, %shape_hidden_size: index, %shape_vocabulary_size: index, %shape_argmax_partial_row_bytes: index, %shape_hidden_q8_row_bytes: index, %shape_logits_row_bytes: index, %shape_output_weight_bytes: index, %use_grouped_projection: i1, %use_mmvq_compat: i1, %output_weight: view<[%shape_output_weight_bytes]xi8>, %normalized: buffer, %token_id: buffer)
+template.decl @llm.rmsnorm.row(%hidden_size0: index, %element_count_f32: f32, %input_row_count: index, %input_row: index, %output_origin: offset, %output_is_f16: i1, %epsilon: f32, %input: buffer, %weight: buffer, %output: buffer)
+
+// Native invocation guarantees1<=active_count<=capacity-token_begin. Empty or
+// retired spans do not issue this command. The normalized output is one F32 row
+// at0; input, immutable gamma and normalized output are disjoint.
+kernel.def @llama32_output_norm_last_f32(%token_capacity: index) {
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  kernel.launch.config workgroups(%one, %one, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%token_capacity0: index, %token_begin0: index, %control_origin: offset, %control: buffer, %input: buffer, %weight: buffer, %output: buffer) {
+  %capacity = index.assume %token_capacity0 [range(%token_capacity0, 1, 512)] : index
+  %begin = index.assume %token_begin0 [range(%token_begin0, 0, 511), lt(%token_begin0, %capacity)] : index
+  %remaining = index.sub %capacity, %begin : index
+  %words = buffer.view %control[%control_origin] : buffer -> view<3xi32>
+  %count_i32 = view.load %words[0] : view<3xi32> -> i32
+  %count0 = index.cast %count_i32 : i32 to index
+  %count = index.assume %count0 [range(%count0, 1, 512), le(%count0, %remaining)] : index
+  %one = index.constant 1 : index
+  %last_local = index.sub %count, %one : index
+  %last0 = index.add %begin, %last_local : index
+  %last = index.assume %last0 [range(%last0, 0, 511), lt(%last0, %capacity)] : index
+  %hidden_size = config.get @llama.model.hidden_size : index
+  %width32 = index.cast %hidden_size : index to i32
+  %divisor = scalar.uitofp %width32 : i32 to f32
+  %epsilon = config.get @llama.model.rms_epsilon : f32
+  %origin = index.constant 0 : offset
+  %half_output = scalar.constant false : i1
+  template.apply<@llm.rmsnorm.row>(%hidden_size, %divisor, %capacity, %last, %origin, %half_output, %epsilon, %input, %weight, %output) : (index, f32, index, index, offset, i1, f32, buffer, buffer, buffer)
+  kernel.return
+}
+
+command.program.def public @llama32_output_head_rows_greedy(%token_count: index) launch(%parameters: buffer, %residual: buffer, %normalized: buffer, %token_ids: buffer) where [range(%token_count, 1, 64)] {
+  %hidden_size = config.get @llama.model.hidden_size : index
+  %vocabulary_size = config.get @llama.model.vocabulary_size : index
+  %weight_bytes = config.get @llama.model.embedding_weight_bytes : index
+  %group_values = index.constant 128 : index
+  %group_bytes = index.constant 144 : index
+  %four = index.constant 4 : index
+  %one = index.constant 1 : index
+  %partial_values = index.constant 4096 : index
+  %partial_padding = index.constant 4095 : index
+  %groups = index.div %hidden_size, %group_values : index
+  %q8_row_bytes = index.mul %groups, %group_bytes : index
+  %logits_row_bytes = index.mul %vocabulary_size, %four : index
+  %padded_vocabulary = index.add %vocabulary_size, %partial_padding : index
+  %partials = index.div %padded_vocabulary, %partial_values : index
+  %partial_row_bytes = index.mul %partials, %four : index
+  %generic_schedule = scalar.constant false : i1
+  %output_origin = index.constant 0 : offset
+  %weight = command.parameter %parameters, "token_embd.weight" : view<[%weight_bytes]xi8>
+  command.program.launch @llama32_output_norm[%token_count](%parameters, %residual, %normalized) : [index](buffer, buffer, buffer)
+  %normalized_origin = index.constant 0 : offset
+  %compat = scalar.constant true : i1
+  template.apply<@llm.output.project_greedy>(%token_count, %normalized_origin, %output_origin, %hidden_size, %vocabulary_size, %partial_row_bytes, %q8_row_bytes, %logits_row_bytes, %weight_bytes, %generic_schedule, %compat, %weight, %normalized, %token_ids) : (index, offset, offset, index, index, index, index, index, index, i1, i1, view<[%weight_bytes]xi8>, buffer, buffer)
+  command.return
+}
+
+command.program.def public @llama32_output_head_last_greedy(%token_capacity: index, %token_begin: index, %control_origin: offset) launch(%parameters: buffer, %residual: buffer, %control: buffer, %normalized: buffer, %token_ids: buffer) where [range(%token_capacity, 1, 512), range(%token_begin, 0, 511), lt(%token_begin, %token_capacity)] {
+  %hidden_size = config.get @llama.model.hidden_size : index
+  %vocabulary_size = config.get @llama.model.vocabulary_size : index
+  %weight_bytes = config.get @llama.model.embedding_weight_bytes : index
+  %group_values = index.constant 128 : index
+  %group_bytes = index.constant 144 : index
+  %four = index.constant 4 : index
+  %one = index.constant 1 : index
+  %partial_values = index.constant 4096 : index
+  %partial_padding = index.constant 4095 : index
+  %groups = index.div %hidden_size, %group_values : index
+  %q8_row_bytes = index.mul %groups, %group_bytes : index
+  %logits_row_bytes = index.mul %vocabulary_size, %four : index
+  %padded_vocabulary = index.add %vocabulary_size, %partial_padding : index
+  %partials = index.div %padded_vocabulary, %partial_values : index
+  %partial_row_bytes = index.mul %partials, %four : index
+  %generic_schedule = scalar.constant false : i1
+  %output_origin = index.constant 0 : offset
+  %weight = command.parameter %parameters, "token_embd.weight" : view<[%weight_bytes]xi8>
+  %norm_weight = command.parameter %parameters, "output_norm.weight" : view<[%hidden_size]xf32>
+  kernel.launch @llama32_output_norm_last_f32[%token_capacity](%token_capacity, %token_begin, %control_origin, %control, %residual, %norm_weight, %normalized) : [index](index, index, offset, buffer, buffer, view<[%hidden_size]xf32>, buffer)
+  %normalized_origin = index.constant 0 : offset
+  %compat = scalar.constant true : i1
+  template.apply<@llm.output.project_greedy>(%one, %normalized_origin, %output_origin, %hidden_size, %vocabulary_size, %partial_row_bytes, %q8_row_bytes, %logits_row_bytes, %weight_bytes, %generic_schedule, %compat, %weight, %normalized, %token_ids) : (index, offset, offset, index, index, index, index, index, index, i1, i1, view<[%weight_bytes]xi8>, buffer, buffer)
+  command.return
+}
+

@@ -4,7 +4,7 @@ Initial catalog: one CHAT executable and one recipe. Addition DATA: another reci
 on that executable, a second CHAT executable, and a nonpreparing ASR executable.
 Names and catalog paths intentionally differ from product model names.
 
-Source declarations reuse accepted current native source closures. Installed
+Source declarations reuse frozen accepted native source closures. Installed
 fixtures reuse actual accepted compiled program bytes from a caller-supplied wheel,
 verified by the literal hashes here. The fixture manifests represent normalized
 artifact DATA, not a claim that the uniform producer has emitted them. Source and
@@ -23,3 +23,8 @@ executes the caller-supplied real Loom decoder (`GENERIC_MODALITY_FIXTURE_DECODE
 It calls real prepare/stage and the strict independent installed checker, without
 filtering producer receipts or deriving release expectations from its output.
 `GENERIC_MODALITY_FIXTURE_WHEEL` supplies the existing immutable bytecode inputs.
+`GENERIC_MODALITY_FIXTURE_SOURCE_ROOT` supplies the matching immutable
+`loom-pipeline` source directory. Its declared file hashes must match the literal
+fixture declarations; current product sources may have changed since those
+bytecode inputs were built. Keep these historical inputs together rather than
+refreshing their expected identities from current or produced data.

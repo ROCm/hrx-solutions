@@ -152,7 +152,7 @@ class ActualDiscoveryTest(unittest.TestCase):
         found = recipes.list()
         self.assertEqual([r['id'] for r, _ in found], sorted(p.stem for p in EXAMPLES))
         inventory = pipelines.list()
-        self.assertEqual(len(inventory), 3)
+        self.assertEqual(len(inventory), 4)
         for path in EXAMPLES:
             recipe, identity = recipes.load(path.stem)
             self.assertEqual(recipe, json.loads(path.read_bytes()))
@@ -180,7 +180,7 @@ class ActualDiscoveryTest(unittest.TestCase):
             native = pipelines.programs(executable, catalog, Deadline.after(10))
             self.assertEqual(native['prepare'], executable['programs']['prepare'])
             self.assertEqual(native['sources'], executable['programs']['sources'])
-        self.assertEqual(len(pipelines.list(modality='chat')), 2)
+        self.assertEqual(len(pipelines.list(modality='chat')), 3)
         self.assertEqual(len(pipelines.list(modality='asr')), 1)
         with self.assertRaises(HemError):
             pipelines.list(modality='tts')

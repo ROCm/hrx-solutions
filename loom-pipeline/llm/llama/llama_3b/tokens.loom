@@ -1,0 +1,22 @@
+// Copyright 2026 The IREE Authors
+//
+// Licensed under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+// Source-owned terminal policy for this exact Llama checkpoint. Preserve raw
+// logits/argmax for reference; only native publication canonicalizes the three
+// primary EOG IDs to the one declared native terminal. This helper is shared
+// by host publication and the isolated/packed model-root output adapters.
+func.def public inline @llama32_native_token(%token: i32, %eos: i32) -> (i32) {
+  %end_text = scalar.constant 128001 : i32
+  %end_message = scalar.constant 128008 : i32
+  %end_turn = scalar.constant 128009 : i32
+  %a = scalar.cmpi eq, %token, %end_text : i32
+  %b = scalar.cmpi eq, %token, %end_message : i32
+  %c = scalar.cmpi eq, %token, %end_turn : i32
+  %ab = scalar.ori %a, %b : i1
+  %stop = scalar.ori %ab, %c : i1
+  %native = scf.select %stop, %eos, %token : i32
+  func.return %native : i32
+}
