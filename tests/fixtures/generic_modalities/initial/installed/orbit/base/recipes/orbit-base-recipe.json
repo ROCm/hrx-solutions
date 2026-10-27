@@ -1,0 +1,33 @@
+{
+  "format": 3,
+  "id": "orbit-base-recipe",
+  "name": "Generic onboarding orbit-base-recipe",
+  "files": {
+    "weights": {
+      "path": "model.gguf",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "fixture/orbit-base-recipe",
+        "revision": "1111111111111111111111111111111111111111",
+        "filename": "model.gguf"
+      }
+    },
+    "tokenizer": {
+      "path": "tokenizer.json",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "fixture/orbit-base-recipe",
+        "revision": "1111111111111111111111111111111111111111",
+        "filename": "tokenizer.json"
+      }
+    }
+  },
+  "configuration": {
+    "rows": 4,
+    "context_capacity": 8192,
+    "pool_capacity": 32768,
+    "prefill_capacity": 128,
+    "mtp": false
+  },
+  "executable": "orbit/base/executable.json"
+}

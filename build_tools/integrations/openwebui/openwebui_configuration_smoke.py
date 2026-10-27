@@ -209,7 +209,7 @@ class ConfigurationGate:
         from hrx_solutions.integrations.pi.hem_pi_contracts import provider_id
         server = self.gate.servers[namespace][0]
         answer = self.gate.command(namespace, 'instance', 'start', 'small', '--name', 'shared-08b',
-            '--server', server, '--pipeline', 'qwen-08b')
+            '--server', server, '--executable', 'llm/qwen/qwen_08b/executable.json')
         assert answer['completed'] and answer['accepted']
         return provider_id(server) + '.shared-08b'
 
@@ -272,7 +272,7 @@ class ConfigurationGate:
             name='Unrelated profile', meta={}, params={'temperature': .123}, access_grants=[]))
         self.profile = self.request('/api/v1/models/model?id=foreign-profile')
         default_config = self.request('/api/v1/configs/models')
-        gate.import_model('a', 'small', gate.args.model08, 'Qwen3.5-0.8B-UD-Q5_K_XL.gguf', 'qwen-08b')
+        gate.import_model('a', 'small', gate.args.model08, 'Qwen3.5-0.8B-UD-Q5_K_XL.gguf', 'qwen35-08b-q5-k-xl')
         targets = {}
         for namespace, name in [('a', 'webui-first'), ('c', 'webui-second')]:
             gate.states[namespace] = gate.states['a']

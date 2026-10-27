@@ -52,6 +52,28 @@ class SmokeFailureTest(unittest.TestCase):
         git.assert_called_once_with(
             ['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True)
 
+    def test_import_helper_matches_real_cli_artifact_view(self):
+        from binding.python import hem_cli
+        from tests.gguf_fixtures import write_gguf
+        source=self.root/'real-cli-inputs'
+        source.mkdir()
+        write_gguf(source/'fixture.gguf')
+        (source/'tokenizer.json').write_text('{"model": {}}')
+        def command(namespace,*arguments):
+            output,diagnostic=io.StringIO(),io.StringIO()
+            with mock.patch.dict(os.environ,{'LOOM_SERVE_DIR':str(self.gate.state_path(namespace))}), \
+                 redirect_stdout(output),redirect_stderr(diagnostic):
+                status=hem_cli.main([*arguments,'--json'])
+            self.assertEqual(status,0,diagnostic.getvalue()+output.getvalue())
+            return json.loads(output.getvalue())
+        with mock.patch.object(self.gate,'command',side_effect=command):
+            answer=self.gate.import_model('a','small',source,'fixture.gguf','qwen35-08b-q5-k-xl')
+        self.assertNotIn('weights',answer)
+        self.assertNotIn('tokenizer',answer)
+        self.assertEqual({item['role'] for item in answer['artifacts']},{'weights','tokenizer'})
+        self.assertTrue(all(item['ownership']=='caller-reference' for item in answer['artifacts']))
+        self.assertEqual(answer['native_readiness'],'unprobed')
+
     def test_import_result_artifacts_keep_exact_alias_identity_and_containment(self):
         source = self.root / 'inputs'
         source.mkdir()
@@ -68,7 +90,7 @@ class SmokeFailureTest(unittest.TestCase):
                                  for role, format, logical in (('weights', 'gguf', 'model.gguf'),
                                                               ('tokenizer', 'json', 'tokenizer.json'))])
         with mock.patch.object(self.gate, 'command', return_value=answer):
-            self.assertIs(self.gate.import_model('a', 'small', source, 'fixture.gguf', 'qwen-08b'), answer)
+            self.assertIs(self.gate.import_model('a', 'small', source, 'fixture.gguf', 'qwen35-08b-q5-k-xl'), answer)
         mutations = [
             lambda a: a['artifacts'].pop(),
             lambda a: a['artifacts'].append(deepcopy(a['artifacts'][0])),
@@ -85,16 +107,16 @@ class SmokeFailureTest(unittest.TestCase):
             mutate(invalid)
             with self.subTest(mutation=index), mock.patch.object(self.gate, 'command', return_value=invalid):
                 with self.assertRaises(AssertionError):
-                    self.gate.import_model('a', 'small', source, 'fixture.gguf', 'qwen-08b')
+                    self.gate.import_model('a', 'small', source, 'fixture.gguf', 'qwen35-08b-q5-k-xl')
         alias = directory / 'model.gguf'
         alias.unlink()
         alias.symlink_to(source / 'tokenizer.json')
         with mock.patch.object(self.gate, 'command', return_value=answer), self.assertRaises(AssertionError):
-            self.gate.import_model('a', 'small', source, 'fixture.gguf', 'qwen-08b')
+            self.gate.import_model('a', 'small', source, 'fixture.gguf', 'qwen35-08b-q5-k-xl')
         alias.unlink()
         alias.write_bytes(b'copied input weights')
         with mock.patch.object(self.gate, 'command', return_value=answer), self.assertRaises(AssertionError):
-            self.gate.import_model('a', 'small', source, 'fixture.gguf', 'qwen-08b')
+            self.gate.import_model('a', 'small', source, 'fixture.gguf', 'qwen35-08b-q5-k-xl')
 
     def test_internal_private_root_separates_state_from_report_and_venv_paths(self):
         from build_tools.ci_tools.local_ci_runtime import create
@@ -232,10 +254,10 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
             'models/hem_models.py',
             'models/model_download.py',
             'models/model_store.py',
-            'models/moonshine_preparation.py',
-            'models/moonshine_preparer_identity.py',
-            'models/recipe_types.py', 'models/recipes.py', 'models/pipelines.py',
-            'models/pipelines_qwen.py', 'models/pipelines_moonshine.py',
+            'models/preparation/__init__.py',
+            'models/preparation/moonshine.py',
+            'models/preparation/moonshine_contract.py',
+            'models/recipes.py', 'models/pipelines.py',
             'models/modalities/__init__.py', 'models/modalities/chat.py', 'models/modalities/asr.py',
             'integrations/__init__.py',
             'integrations/pi/__init__.py',
@@ -255,11 +277,12 @@ class SmokeNamespacePayloadTest(unittest.TestCase):
         from build_tools.validation.check_installed_cpu import CLI_FILES
         for name in CLI_FILES:
             self.files[name] = (source / name).read_bytes()
-        catalog = source.parents[1] / 'loom-pipeline'
-        for relative in ('llm/qwen/qwen_08b/recipes/qwen35-08b-q5-k-xl.json',
-                         'llm/qwen/qwen_27b/recipes/qwen38-27b-q5-k-xl.json',
-                         'recognition/moonshine/streaming_tiny/recipes/moonshine-streaming-tiny.json'):
-            self.files['loom-pipeline/' + relative] = (catalog / relative).read_bytes()
+        from build_tools.validation.recipe_inventory_test import fixture
+        self.release, _, installed = fixture()
+        self.files.update({'loom-pipeline/' + name: value for name, value in installed.items()})
+        self.release_patch = mock.patch.object(check_installed_cpu.recipe_inventory, 'load_release', return_value=self.release)
+        self.release_patch.start()
+        self.addCleanup(self.release_patch.stop)
         self.wheel=self.root/'fixture.whl'
         with zipfile.ZipFile(self.wheel,'w') as archive:
             for name,data in self.files.items():
@@ -605,7 +628,7 @@ class CiProfileTest(unittest.TestCase):
             self.gate.run_ci08()
         self.assertEqual([name for name, args in calls],
                          ['server', 'import', 'activate', 'query', 'command', 'command', 'shutdown'])
-        self.assertEqual(calls[1][1][-2:], ('Qwen3.5-0.8B-UD-Q5_K_XL.gguf', 'qwen-08b'))
+        self.assertEqual(calls[1][1][-2:], ('Qwen3.5-0.8B-UD-Q5_K_XL.gguf', 'qwen35-08b-q5-k-xl'))
         self.assertEqual(calls[4][1][1:3], ('instance', 'stop'))
         self.assertTrue(self.gate.results['success'])
 
@@ -625,7 +648,7 @@ class CiProfileTest(unittest.TestCase):
         imported.assert_not_called()
         self.assertEqual(invoked.call_args_list[0].args,
                          ('a', 'model', 'download', 'qwen35-08b-q5-k-xl',
-                          '--id', 'small-a', '--pipeline', 'qwen-08b'))
+                          '--id', 'small-a', '--executable', 'llm/qwen/qwen_08b/executable.json'))
         self.assertTrue(self.gate.results['success'])
 
     def test_diagnostics_are_bounded_redacted_and_exclude_weights(self):

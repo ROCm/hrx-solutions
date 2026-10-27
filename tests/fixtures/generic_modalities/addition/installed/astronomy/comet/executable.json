@@ -1,0 +1,121 @@
+{
+  "format": 1,
+  "id": "comet-text-v1",
+  "modality": "chat",
+  "native_contract": "text-v1",
+  "serving": {
+    "bounds": {
+      "rows": [
+        1,
+        16
+      ],
+      "context_capacity": [
+        1,
+        262144
+      ],
+      "pool_capacity": [
+        1,
+        4194304
+      ],
+      "prefill_capacity": [
+        1,
+        262144
+      ]
+    },
+    "mtp_depth_max": 0,
+    "defaults": {
+      "rows": 4,
+      "context_capacity": 8192,
+      "pool_capacity": 32768,
+      "prefill_capacity": 128,
+      "mtp": false
+    }
+  },
+  "assets": {
+    "weights": {
+      "format": "gguf",
+      "path": null
+    },
+    "tokenizer": {
+      "format": "json",
+      "path": null
+    }
+  },
+  "programs": {
+    "root": "astronomy/comet",
+    "encoding": "bytecode",
+    "prepare": "pipeline.loombc",
+    "control": "pipeline.loombc",
+    "sources": [
+      "pipeline.loombc"
+    ],
+    "support": [],
+    "files": {
+      "pipeline.loombc": "c5808355e40236b08d5ae3428f332482561fc41d2f3c6cdee6678b29802ade3a"
+    }
+  },
+  "preparation": null,
+  "provenance": {
+    "source_declaration_sha256": "31f1cea5ac23bf8608d1ac38e8c230cf6acaed4e8d402d81f865c5a3e1e7c61b",
+    "source_files": {
+      "qwen/qwen_08b/config.loom": "5e5ef829035ff5030a479e9a412c971c2572764140ddc8a0b638e45e0f167f36",
+      "qwen/qwen_08b/control.loom": "d76df80f41048cd3b952986cdcd36b151a69d0fa6fd427eca140c817cbcacf2a",
+      "qwen/qwen_08b/prepare.loom": "b4601c8b7a9bfeca486e1c8e316f11137f598ba5858c142984593ff499e9fa56",
+      "qwen/qwen_08b/weights.loom": "1a1591143a75fae4358492cf956e7a1ab23c5a79b918231e4e1d89d5334445a1",
+      "qwen/prefill.loom": "3f255a49266b831dca83d430eb74403901284793f3ef32092697f46ee8779e79",
+      "qwen/weights_prepare.loom": "2c6649958a9aa3b6e18dc7a818323d7110d6f22182122d9cbc6da25dd4bd7699",
+      "qwen/epoch.loom": "9551dd8102ebb17204981793c13945d67eedd3b02e07d8f2b345a7d1d2a24d33",
+      "qwen/mtp.loom": "5afc9ea9290766792c61324471c1e714b495f2dd325c449cc8a577b345ec98c6",
+      "qwen/verify.loom": "e254d9e113622edc28bfe5abe7e4e2c0dab0388000cfe7d3d69c5feed3c89323",
+      "qwen/continue.loom": "5071f2e76427883ba3acb1b17c2b03234031b142c0fe7af5d844c642423b8627",
+      "motifs/ggml/linear_q4k_q8_1_x4.loom": "4fec2f0341841765aa01043e104130f34f7cc0f5160378e9781e0ffa6907572f",
+      "motifs/ggml/linear_q5k_q8_1_x4.loom": "989573cfe0bfce21b49b71d78697d1a988ca9d95a258451995b07a93e9f4db76",
+      "motifs/ggml/linear_q6k_f32_decode.loom": "623fb0244fd1104728d5685106834e6deff6e9ac4182f91bd65c116add38585f",
+      "motifs/ggml/linear_q6k_q8_1_x4.loom": "5e440a4e1f763ce8adb5fbab8f46dd611cda3f2dd643951acc0be17ffc02673b",
+      "motifs/ggml/linear_q8_0_q8_1_x4.loom": "d0f51f63058e821e1a0e4861eccff52bab1a95cae8ec9d2096be98e74226af58",
+      "motifs/ggml/linear_qk_common.loom": "1bcb786f15ffd6d32a4f8072f00d7b0efe4b335b5d16930d845e023568182c4a",
+      "motifs/ggml/quantize_q8_1_x4.loom": "0e4c35863f379e435f258c578720a5896eb5a92195fe6ac20110b8b7f852db49",
+      "qwen/kernels/qwen38/attention_common.loom": "d8fac43ce63a0f65fdadd5e89f429ce16373a7708349b39485a85c3c9f56fcbe",
+      "qwen/kernels/qwen38/continuation.loom": "d18f9923ef1f15c1c568f253dfb27c1fe42f882c556f0fa35c1aca4e90cf491b",
+      "qwen/kernels/qwen38/attention_decode.loom": "1d391f4da0a9871650f01406530a9f75e3f729ac2314953aeeb93331e205ba50",
+      "qwen/kernels/qwen38/attention_decode_split.loom": "c70325d2325e1a553e423187e894d6683f234a1ec4c07797f7ce338a34719e32",
+      "qwen/kernels/qwen38/attention_prefill.loom": "716c2b095f53f22bb915e6ca55a22caf4da6df952976602fa35796ae7b09d34e",
+      "qwen/kernels/qwen38/attention_prefill_wmma.loom": "d2637bc468dea3985837fdf04f1c3755d9e84010d6dfaa8e6859d78c51adcf76",
+      "qwen/kernels/qwen38/attention_spans.loom": "268f6c8a340e50f4a8d2a905da274c542805c4ebb465f002f5bfe361e4e370e8",
+      "qwen/kernels/qwen38/decode_control.loom": "5bfd65b7132872f54da6a25fd497856d27baeab68c58eb5ed996cb6ed8921081",
+      "qwen/kernels/qwen38/ffn_gate_up_q5k_f16_wmma_wave32.loom": "b7a3797fe218aadbc67860cc9d7f8978480ed45e3277faf693d93f37420ec83c",
+      "qwen/kernels/qwen38/ffn_gate_up_prefetch.loom": "41adf234bf266ae3d7be08799f0883b8b4c940d000e6d1313189c1bf31c0a475",
+      "qwen/kernels/qwen38/gdn_common.loom": "eeb68be797668f61c32f220c68ba7944e7d569e2d8954e8d8c0f01deabd34b32",
+      "qwen/kernels/qwen38/gdn_decode.loom": "3e9c6a4f50dfc4a25eb1554539f961f927f8587375a77cb928deecce276f3efc",
+      "qwen/kernels/qwen38/gdn_prefill.loom": "07bfe2ef1836c125eca5e2252eb3ff2aa96aa0c10de8f740217d0402309bae08",
+      "qwen/kernels/qwen38/gdn_spans.loom": "1a67b71e258fa6e2877057545dd27cce656a2c070dea2199b72c2cdff8d0d4bc",
+      "qwen/kernels/qwen38/gdn_speculation.loom": "6b8151fe06dc5e8c574c0b979227ba8c755a9dd21a34bd2d41cbf71c76b8246e",
+      "qwen/kernels/qwen38/greedy_argmax.loom": "82ffab2af1265e1b31208a02305f8396981e583806a3e407af1b03b47fa95345",
+      "qwen/kernels/qwen38/layer_decode.loom": "a8f1fceacd0da64dbf86ee52308d034e0b3139b071ea1b42083c4b1578835f3c",
+      "qwen/kernels/qwen38/layer_prefill.loom": "6c5d7b17d91590692f7588f9cd2bb1de36e1d313d261fc405490229925abf3df",
+      "qwen/kernels/qwen38/linear_q4k_f16_wmma_split_k.loom": "04ad97481aff04265a1968feebe6473cffa3a2206e1ccbde67aefb74dd7b5865",
+      "qwen/kernels/qwen38/linear_q5k_f16_wmma.loom": "9388e267f896565b0786cbc2be3da8bf57e9343d10a215c8b5b71e9ed04acc84",
+      "qwen/kernels/qwen38/linear_q5k_f16_wmma_split_k.loom": "261c47f82ddd43b1e77de40bc0b7de71c609f5059e9e7cfde0c4f734d95cbcd8",
+      "qwen/kernels/qwen38/linear_q5k_f16_wmma_wave32.loom": "3e85141f2194668edc491b37a32d44e7ffce81626a3c0b3e2f4a057e91b99f72",
+      "qwen/kernels/qwen38/linear_q6k_f16_wmma.loom": "198be59b4e1245ae6fd0931b7f73cb9acf405fa7638d08d807dc568784df125e",
+      "qwen/kernels/qwen38/linear_q6k_f16_wmma_metadata.loom": "85b420dab0efa4d47197f54c915318731b9184d1a6b06bf1b137232e91d13e77",
+      "qwen/kernels/qwen38/mtp_accept.loom": "9d905274eb2dc01c0accbffed0e0aa3434a71b3e122889a5a219d84ef80bfd9d",
+      "qwen/kernels/qwen38/mtp_prepare.loom": "b9558109bead59a78d05f349de6c76cbf5807671044d379930a3b1a77eef89c0",
+      "qwen/kernels/qwen38/mtp_proposal.loom": "9bb202fd5e3c8935f7eb0ee67820e049798cdb835ad13bba2c2cacaae0f7eb82",
+      "qwen/kernels/qwen38/output_projection.loom": "7ea207a6a9ae5d258d0c7c4ace0cfe80a2f66275ebe8db06358118c3cad212e2",
+      "qwen/kernels/qwen38/output_spans.loom": "49680ea76aced5a0830f41a2fa46fa55c1e877a911103667fb5630cca3ba2b5c",
+      "qwen/kernels/qwen38/spans.loom": "ac7083017e3d9f707daa5e3e8bda61bcd9c516682857b6744f7138745b059ef8",
+      "qwen/kernels/qwen38/token_embedding.loom": "272801e2dc0c3e4729d07bb5fc1fbe610a32663d12344f830993f15ee7c1ddc0",
+      "qwen/programs/qwen38/attention_layer_decode.loom": "5a17d6d11b438f31404fba62096e18c3f7a866e61f2e789824f13b555a1589cd",
+      "qwen/programs/qwen38/attention_layer_prefill.loom": "22c0a62b3c24d9e3f57617c1a9c4860ffe37731a6c418434ad0584fc5a5c0edd",
+      "qwen/programs/qwen38/gdn_commit.loom": "dae645ba2f385ebd2fcc35d77e115b688e8dbc3d9a4887dec3151e2e645d6b96",
+      "qwen/programs/qwen38/gdn_layer_decode.loom": "4dfa43fed5e2c1ce6c62552378e24478238d3252c04ac486c5ccdaf5dd42f518",
+      "qwen/programs/qwen38/gdn_layer_prefill.loom": "28a6bad5611d1871c84f09f4d66362c2b6bafa85ece1adbbb1750b153f97b2d0",
+      "qwen/programs/qwen38/model_decode.loom": "434c690a61be54faaa3d599a7218b9a34a79d903a9eda2f297d6df83f1950b82",
+      "qwen/programs/qwen38/model_prefill.loom": "5c5a92c4adff5c09a36ceca86d9290ae0d9d260bd752b6f6d2269689ccb7a710",
+      "qwen/programs/qwen38/output_head_decode.loom": "d3387e423e3be93b1521552469f4a3fcbad6ac40d4bba151425e1a6ac3880ee6",
+      "qwen/programs/qwen38/ffn.loom": "dff21bdc8eb85de3ea329e7c49e7dc2148cc93fee3b0605cbac291626bbe189c",
+      "qwen/programs/qwen38/embedding.loom": "20ada2c0aa015b6000b0c1c3787a5ebf4080e0000d50ae80859846f988e8c507"
+    }
+  }
+}

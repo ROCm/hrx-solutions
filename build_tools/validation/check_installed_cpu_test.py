@@ -14,6 +14,7 @@ from unittest.mock import patch
 import zipfile
 
 from build_tools.validation import check_installed_cpu as gate
+from build_tools.validation.recipe_inventory_test import fixture as catalog_fixture, parse as catalog_parse
 
 
 class InstalledPayloadTest(unittest.TestCase):
@@ -23,8 +24,11 @@ class InstalledPayloadTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.package = self.root / 'package'
         self.package.mkdir()
-        self.files = {'__init__.py': b'', '_native/bin/loom-serve': b'ELF fixture',
-                      'loom-pipeline/qwen/control.loom': b'catalog fixture'}
+        self.files = {'__init__.py': b'', '_native/bin/loom-serve': b'ELF fixture'}
+        self.release, self.catalog_source, self.catalog_installed = catalog_fixture()
+        expected = patch.object(gate.recipe_inventory, 'load_release', return_value=self.release)
+        expected.start()
+        self.addCleanup(expected.stop)
         source = Path(__file__).resolve().parents[2] / 'binding/python'
         for name in (
             'integrations/__init__.py',
@@ -49,10 +53,10 @@ class InstalledPayloadTest(unittest.TestCase):
             'models/hem_models.py',
             'models/model_download.py',
             'models/model_store.py',
-            'models/moonshine_preparation.py',
-            'models/moonshine_preparer_identity.py',
-            'models/recipe_types.py', 'models/recipes.py', 'models/pipelines.py',
-            'models/pipelines_qwen.py', 'models/pipelines_moonshine.py',
+            'models/preparation/__init__.py',
+            'models/preparation/moonshine.py',
+            'models/preparation/moonshine_contract.py',
+            'models/recipes.py', 'models/pipelines.py',
             'models/modalities/__init__.py', 'models/modalities/chat.py', 'models/modalities/asr.py',
             'integrations/__init__.py',
             'integrations/pi/__init__.py',
@@ -72,11 +76,8 @@ class InstalledPayloadTest(unittest.TestCase):
         from build_tools.validation.check_installed_cpu import CLI_FILES
         for name in CLI_FILES:
             self.files[name] = (source / name).read_bytes()
-        catalog = source.parents[1] / 'loom-pipeline'
-        for relative in ('llm/qwen/qwen_08b/recipes/qwen35-08b-q5-k-xl.json',
-                         'llm/qwen/qwen_27b/recipes/qwen38-27b-q5-k-xl.json',
-                         'recognition/moonshine/streaming_tiny/recipes/moonshine-streaming-tiny.json'):
-            self.files['loom-pipeline/' + relative] = (catalog / relative).read_bytes()
+        self.files.update({'loom-pipeline/' + relative: content
+                          for relative, content in self.catalog_installed.items()})
         self.wheel = self.root / 'fixture.whl'
         with zipfile.ZipFile(self.wheel, 'w') as archive:
             for name, content in self.files.items():
@@ -123,6 +124,23 @@ class InstalledPayloadTest(unittest.TestCase):
                                     archive.writestr(member, data)
                     with self.assertRaises(AssertionError):
                         gate.verify_wheel_payload(self.wheel, self.package)
+
+    def test_retired_model_dispatch_and_pipeline_domain_cannot_ship_or_linger(self):
+        for relative in gate.RETIRED_MODULES:
+            with self.subTest(relative=relative):
+                with zipfile.ZipFile(self.wheel, 'a') as archive:
+                    archive.writestr('hrx_solutions/' + relative, b'# retired')
+                with self.assertRaisesRegex(AssertionError, 'retired module in wheel'):
+                    gate.verify_wheel_payload(self.wheel, self.package)
+                with zipfile.ZipFile(self.wheel, 'w') as archive:
+                    for name, content in self.files.items():
+                        archive.writestr('hrx_solutions/' + name, content)
+                stale = self.package / relative
+                stale.parent.mkdir(parents=True, exist_ok=True)
+                stale.write_bytes(b'# retired')
+                with self.assertRaisesRegex(AssertionError, 'retired installed module'):
+                    gate.verify_wheel_payload(self.wheel, self.package)
+                stale.unlink()
 
     def test_nested_packages_refuse_installed_symlinks_even_with_identical_bytes(self):
         for name in self.files:
@@ -304,54 +322,49 @@ class InstalledPayloadTest(unittest.TestCase):
                 authored.unlink()
 
     def test_generated_catalog_parity_rejects_stale_sources_or_modified_bytecode(self):
-        from build_tools.model_tools import loom_catalog
-        repository = Path(__file__).resolve().parents[2]
+        # Structural gate fixtures; genuine product/producer onboarding is a
+        # separate real-API suite, not inferred from these parser callbacks.
         source_root = self.root / 'catalog-source'
-        shutil.copytree(repository / 'loom-pipeline', source_root / 'loom-pipeline', symlinks=True)
-        inventory = source_root / 'loom-pipeline/catalog_sources.bzl'
-        products = {}
-        for architecture, variant in loom_catalog.variants(inventory).items():
-            output = self.root / 'bc' / variant['output']
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_bytes(b'LOOMfixture')
-            products[architecture] = output
-        with patch.object(loom_catalog, 'validate_bytecode_artifact'):
-            loom_catalog.stage_bytecode_catalog(self.package / 'loom-pipeline/llm', products, inventory, decoder=Path('fixture-decoder'))
-        (self.package / 'loom-pipeline/qwen/control.loom').unlink()
-        for recipe in (source_root / 'loom-pipeline').glob('**/recipes/*.json'):
-            target = self.package / 'loom-pipeline' / recipe.relative_to(source_root / 'loom-pipeline')
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(recipe.read_bytes())
-        with self.subTest(contract='generated catalog parity'):
-            self.assertIn('loom-pipeline/llm/qwen/qwen_08b/prepare.loom', gate.source_parity(source_root,self.package))
-            source = source_root / 'loom-pipeline/llm/qwen/qwen_08b/prepare.loom'
+        for relative, content in self.catalog_source.items():
+            path = source_root / 'loom-pipeline' / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        modules = {}
+        for name in ('recipes', 'pipelines'):
+            module = types.ModuleType('hrx_solutions.models.' + name)
+            module.parse = catalog_parse
+            modules[module.__name__] = module
+        reference, expected = next(iter(self.release['executables'].items()))
+        source_relative = expected['source']['programs']['root'] + '/main.loom'
+        output_relative = expected['compiled']['root'] + '/main.loombc'
+        with patch.dict(sys.modules, modules):
+            self.assertIn('loom-pipeline/' + source_relative, gate.source_parity(source_root, self.package))
+            source = source_root / 'loom-pipeline' / source_relative
             original = source.read_bytes()
-            source.write_bytes(original+b'\n// current source changed')
-            with self.assertRaisesRegex(AssertionError,'stale installed catalog input'):
-                gate.source_parity(source_root,self.package)
+            source.write_bytes(original + b'changed source')
+            with self.assertRaisesRegex(RuntimeError, 'hash mismatch'):
+                gate.source_parity(source_root, self.package)
             source.write_bytes(original)
-            output = self.package / 'loom-pipeline/llm/qwen/qwen_08b/pipeline.loombc'
-            output.write_bytes(b'LOOMchanged')
-            with self.assertRaisesRegex(AssertionError,'installed bytecode mismatch'):
-                gate.source_parity(source_root,self.package)
-            output.write_bytes(b'LOOMfixture')
-            local = output.parent
-            mutations = (
-                ('pipeline.json', 'installed pipeline descriptor mismatch'),
-                ('compatibility.json', 'installed catalog file inventory mismatch'),
-                ('weights.loombc', 'installed catalog file inventory mismatch'),
-            )
-            for filename, error in mutations:
-                target = local / filename
-                original = target.read_bytes() if target.exists() else None
-                target.write_bytes(b'{}' if filename.endswith('.json') else b'LOOMextra')
-                with self.subTest(filename=filename), self.assertRaisesRegex((AssertionError, ValueError), error):
+            output = self.package / 'loom-pipeline' / output_relative
+            original = output.read_bytes()
+            output.write_bytes(b'LOOM changed')
+            with self.assertRaisesRegex(RuntimeError, 'hash mismatch'):
+                gate.source_parity(source_root, self.package)
+            output.write_bytes(original)
+            declaration = self.package / 'loom-pipeline' / reference
+            original = declaration.read_bytes()
+            document = json.loads(original)
+            document['id'] = 'wrong identity'
+            declaration.write_text(json.dumps(document))
+            with self.assertRaisesRegex(RuntimeError, 'semantic drift'):
+                gate.source_parity(source_root, self.package)
+            declaration.write_bytes(original)
+            for name in ('obsolete.json', 'extra.loombc'):
+                extra = output.parent / name
+                extra.write_bytes(b'LOOM extra')
+                with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, 'inventory'):
                     gate.source_parity(source_root, self.package)
-                if original is None:
-                    target.unlink()
-                else:
-                    target.write_bytes(original)
-
+                extra.unlink()
 
     def test_shared_integrations_require_unique_regular_members_in_the_wheel(self):
         import warnings

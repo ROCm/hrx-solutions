@@ -1,6 +1,7 @@
 """Model validation assets and removal of the obsolete native checker."""
 
 from pathlib import Path
+import ast
 from dataclasses import FrozenInstanceError
 import subprocess
 import sys
@@ -16,8 +17,10 @@ import zipfile
 
 from build_tools.wheel_tools import python_packaging as packaging
 from build_tools.wheel_tools import validate_wheel as wheel_validation
-from build_tools.model_tools import loom_catalog, moonshine_catalog, moonshine_preparer
-from build_tools.wheel_tools.validate_wheel import HEM_MODULES, MODEL_MODULES, OBSOLETE_MODULES, OBSOLETE_ENTRY_POINTS, REQUIRED_ENTRY_POINTS, PI_ASSETS, validate_wheel
+from build_tools.model_tools import loom_catalog, package_families
+from build_tools.model_tools.catalog_test_fixture import CatalogFixture
+from build_tools.validation import recipe_inventory
+from build_tools.wheel_tools.validate_wheel import HEM_MODULES, MODEL_MODULES, MODEL_PYTHON_PATHS, OBSOLETE_MODULES, OBSOLETE_ENTRY_POINTS, REQUIRED_ENTRY_POINTS, PI_ASSETS, validate_wheel
 from binding.python.integrations.pi import hem_pi_assets, hem_pi_contracts
 import hashlib
 import json
@@ -27,30 +30,19 @@ from build_tools.wheel_tools.validate_wheel import validate_pi_sdist
 from build_tools.versioning import read_package_version
 
 
-def fixture_bundle():
-    # Explicit test descriptor union, independent of producer output discovery.
-    files = ['loom-pipeline/llm/LICENSE-APACHE-2.0']
-    for arch, recipe in (('qwen_08b', 'qwen35-08b-q5-k-xl'), ('qwen_27b', 'qwen38-27b-q5-k-xl')):
-        files += ['loom-pipeline/llm/qwen/' + arch + '/' + name
-                  for name in ('pipeline.loombc', 'pipeline.json', 'recipes/' + recipe + '.json')]
-    files += ['loom-pipeline/recognition/moonshine/streaming_tiny/' + name for name in (
-        'prepare.loombc', 'control.loombc', 'weights.loombc', 'providers.loombc',
-        'catalog.json', 'sources.json', 'LICENSE.moonshine', 'LICENSE-APACHE-2.0',
-        'artifacts.json', 'recipes/moonshine-streaming-tiny.json')]
-    files += ['_native/share/loom-serve/preparers/moonshine/' + name for name in
-              ('prepare_assets.py', 'model.json', 'LICENSE', 'provenance.json')]
-    return tuple(files)
-
-
 class PackagingTest(unittest.TestCase):
     def setUp(self):
-        temporary=tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
+        temporary=tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         self.root=Path(temporary.name)
-        self.decode = patch.object(loom_catalog, 'validate_bytecode_artifact').start()
-        self.preparer_data = {'prepare_assets.py': b'# synthetic trusted tool\n', 'model.json': b'{}\n'}
-        patch.object(moonshine_preparer, 'FILES', {name:hashlib.sha256(data).hexdigest()
-                                                for name,data in self.preparer_data.items()}).start()
+        self.fixture=CatalogFixture(self.root/'catalog-fixture')
+        shutil.copytree(packaging.REPO_ROOT/'binding',self.fixture.repository/'binding',dirs_exist_ok=True)
+        (self.fixture.repository/'binding/python/models/preparation/moonshine-operation.json').write_text(
+            json.dumps(self.fixture.operation,indent=2)+'\n')
+        patch.object(wheel_validation,'REPO_ROOT',self.fixture.repository).start()
+        reviewed=recipe_inventory.load_release()
+        self.release=self.fixture.release(reviewed)
+        original=recipe_inventory.load_release
+        patch.object(recipe_inventory,'load_release',side_effect=lambda path=None:self.release if path is None else original(path)).start()
         self.addCleanup(patch.stopall)
 
     def context(self, *, environment=None, options=None):
@@ -67,7 +59,7 @@ class PackagingTest(unittest.TestCase):
         query.assert_called_once_with(context, '//:loom-serve')
         self.assertIn(packaging.BAZEL_TARGETS['loom-serve'],run.call_args.args[0])
         self.assertIn(loom_catalog.CATALOG_TARGET,run.call_args.args[0])
-        self.assertEqual(run.call_args.args[0][-1],moonshine_catalog.TARGET)
+        self.assertEqual(run.call_args.args[0][-1],loom_catalog.CATALOG_TARGET)
         self.assertNotIn('epoch_check',' '.join(run.call_args.args[0]))
 
     def test_explicit_cache_disable_overrides_stale_rc_for_build_and_query(self):
@@ -82,207 +74,98 @@ class PackagingTest(unittest.TestCase):
                 self.assertIn(option, call.args[0])
 
     def test_catalog_stages_share_one_context_and_required_decoder_lookup(self):
-        bazel, rocm, decoder = (self.root / name for name in ('bazel', 'rocm', 'decoder'))
-        options = ('--config=opt', '--disk_cache=')
-        environment = {'HRX_BAZEL_CACHE_ENABLED': '0'}
-        command = packaging.BazelBuildPy(packaging.BinaryDistribution())
-        command.build_lib = str(self.root / 'build')
+        command=packaging.BazelBuildPy(packaging.BinaryDistribution())
+        command.build_lib=str(self.root/'build')
+        prepared=object()
         with ExitStack() as stack:
-            mocks={}
-            for name, result in (
-                ('validate_wheel_platform', None), ('discover_bazel', bazel),
-                ('discover_rocm_root', rocm), ('build_native_executables', {}),
-                ('wheel_build_options', options), ('bazel_environment', environment),
-                ('discover_hrx_source', self.root / 'hrx'), ('stage_native_payload', []),
-            ):
-                mocks[name]=stack.enter_context(patch.object(packaging, name, return_value=result))
-            stack.enter_context(patch.object(packaging.build_py, 'run'))
-            stack.enter_context(patch.object(packaging.package_families, 'stage_helpers', return_value=[]))
-            stack.enter_context(patch.object(packaging.package_families, 'recipe_bundle', return_value=()))
-            def context_stages(root, prepared, repository):
-                decoder, products, _ = prepared
-                return [path for produce, outputs, _ in products
-                        for path in produce(root, outputs, repository, decoder=decoder)]
-            stack.enter_context(patch.object(packaging.package_families, 'stage', side_effect=context_stages))
-            bytecodes=stack.enter_context(patch.object(loom_catalog, 'query_bytecode_outputs', return_value={}))
-            artifacts=stack.enter_context(patch.object(moonshine_catalog, 'query_outputs', return_value={}))
-            lookup = stack.enter_context(patch.object(loom_catalog, 'query_decoder', return_value=decoder))
-            qwen = stack.enter_context(patch.object(loom_catalog, 'stage_bytecode_catalog', return_value=[]))
-            moonshine = stack.enter_context(patch.object(moonshine_catalog, 'stage', return_value=[]))
+            for name,result in (('validate_wheel_platform',None),('discover_bazel',self.root/'bazel'),
+                                ('discover_rocm_root',self.root/'rocm'),('build_native_executables',{}),
+                                ('discover_hrx_source',self.root/'hrx'),('stage_native_payload',[])):
+                stack.enter_context(patch.object(packaging,name,return_value=result))
+            build=stack.enter_context(patch.object(packaging,'build_native_executables',return_value={}))
+            stack.enter_context(patch.object(packaging.build_py,'run'))
+            prepare=stack.enter_context(patch.object(package_families,'prepare',return_value=prepared))
+            stage=stack.enter_context(patch.object(package_families,'stage',return_value=[]))
+            helpers=stack.enter_context(patch.object(package_families,'stage_helpers',return_value=[]))
             command.run()
-        context=mocks['build_native_executables'].call_args.args[0]
-        mocks['wheel_build_options'].assert_called_once_with(rocm)
-        mocks['bazel_environment'].assert_called_once_with()
-        bytecodes.assert_called_once_with(context.query, context.repository)
-        lookup.assert_called_once_with(context.query)
-        artifacts.assert_called_once_with(context.query)
-        mocks['discover_hrx_source'].assert_called_once_with(context)
-        self.assertEqual((context.executable, context.options, dict(context.environment)), (bazel, options, environment))
-        self.assertIs(qwen.call_args.kwargs['decoder'], decoder)
-        self.assertIs(moonshine.call_args.kwargs['decoder'], decoder)
+        context=build.call_args.args[0]
+        prepare.assert_called_once_with(context.query,context.repository)
+        package=Path(command.build_lib)/'hrx_solutions'
+        stage.assert_called_once_with(package,prepared,context.repository)
+        helpers.assert_called_once_with(package/'_native',prepared,self.root/'hrx',repository=context.repository)
 
     @contextmanager
     def buildpy_fixture(self):
-        repository = packaging.REPO_ROOT
-        products = {}
-        for architecture, variant in loom_catalog.variants(repository / 'loom-pipeline/catalog_sources.bzl').items():
-            path = self.root / 'bazel-out/loom-pipeline/bytecode' / variant['output']
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b'LOOM-qwen-fixture-' + architecture.encode())
-            products[architecture] = path
-        moonshine = {}
-        for name in moonshine_catalog.ARTIFACTS:
-            path = self.root / 'bazel-out/loom-pipeline' / moonshine_catalog.RELATIVE / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b'LOOM-moonshine-fixture-' + name.encode())
-            moonshine[name] = path
-        decoder = self.root / 'decoder'; decoder.write_bytes(b'fixture')
-        queried, staged = [], []
-        def query(context, target):
-            queried.append((context, target))
-            return {loom_catalog.CATALOG_TARGET: tuple(products.values()),
-                    moonshine_catalog.TARGET: tuple(moonshine.values()),
-                    loom_catalog.DECODER_TARGET: (decoder,)}[target]
-        qwen_stage, moonshine_stage = loom_catalog.stage_bytecode_catalog, moonshine_catalog.stage
-        def stage_qwen(*args, **kwargs):
-            staged.append('qwen')
-            return qwen_stage(*args, **kwargs)
-        def stage_moonshine(*args, **kwargs):
-            staged.append('moonshine')
-            return moonshine_stage(*args, **kwargs)
-        def fixture_roots(path, sources, root, decoder, policy=False):
-            return moonshine_catalog.roots('\n'.join((root/source).read_text() for source in sources))
-        hrx, rocm = self.root / 'selected-hrx', self.root / 'rocm'
-        tool = hrx / moonshine_preparer.UPSTREAM
-        tool.mkdir(parents=True, exist_ok=True)
-        (hrx / 'LICENSE').write_bytes(b'selected HRX license')
-        for name, content in self.preparer_data.items():
-            (tool / name).write_bytes(content)
+        fixture=self.fixture
+        rocm=self.root/'rocm'
         for name in packaging.ROCM_RUNTIME_ROOTS:
-            path = rocm / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(name.encode())
-        server = self.root / 'server'; server.write_bytes(b'native fixture')
-        runtime_payload = packaging.resolve_rocm_runtime_payload
-        command = packaging.BazelBuildPy(packaging.BinaryDistribution())
-        command.build_lib = str(self.root / 'build')
+            path=rocm/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(name.encode())
+        server=self.root/'server';server.write_bytes(b'native fixture')
+        command=packaging.BazelBuildPy(packaging.BinaryDistribution());command.build_lib=str(self.root/'build')
+        package=Path(command.build_lib)/'hrx_solutions';python_file=package/'__init__.py'
+        def python_stage():
+            package.mkdir(parents=True);python_file.write_bytes(b'# python fixture')
+        original=packaging.resolve_rocm_runtime_payload
+        contexts=[]
+        def query(context,target):
+            contexts.append(context);return fixture.query(target)
         with ExitStack() as stack:
-            for name, result in (('validate_wheel_platform', None), ('discover_bazel', self.root/'bazel'),
-                                 ('discover_rocm_root', rocm), ('build_native_executables', {'loom-serve': server}),
-                                 ('discover_hrx_source', hrx)):
-                stack.enter_context(patch.object(packaging, name, return_value=result))
-            package = Path(command.build_lib) / 'hrx_solutions'
-            python_file = package / '__init__.py'
-            def python_stage():
-                package.mkdir(parents=True)
-                python_file.write_bytes(b'# python fixture')
-            stack.enter_context(patch.object(packaging.build_py, 'run', side_effect=python_stage))
-            stack.enter_context(patch.object(packaging.build_py, 'get_outputs', side_effect=lambda *args: [str(python_file)]))
-            stack.enter_context(patch.object(packaging, 'resolve_rocm_runtime_payload',
-                side_effect=lambda root, **kwargs: runtime_payload(root, needed_libraries=lambda _: ())))
-            stack.enter_context(patch.object(packaging.package_families, 'recipe_bundle', return_value=fixture_bundle()))
-            stack.enter_context(patch.object(packaging.BazelBuildContext, 'query', query))
-            stack.enter_context(patch.object(loom_catalog, 'stage_bytecode_catalog', side_effect=stage_qwen))
-            stack.enter_context(patch.object(moonshine_catalog, 'stage', side_effect=stage_moonshine))
-            stack.enter_context(patch.object(moonshine_catalog, 'validate_artifact', side_effect=fixture_roots))
-            yield command, package, products, moonshine, hrx, queried, staged
+            for name,result in (('validate_wheel_platform',None),('discover_bazel',self.root/'bazel'),
+                                ('discover_rocm_root',rocm),('build_native_executables',{'loom-serve':server}),
+                                ('discover_hrx_source',fixture.hrx)):
+                stack.enter_context(patch.object(packaging,name,return_value=result))
+            stack.enter_context(patch.object(packaging,'REPO_ROOT',fixture.repository))
+            stack.enter_context(patch.object(packaging.build_py,'run',side_effect=python_stage))
+            stack.enter_context(patch.object(packaging.build_py,'get_outputs',side_effect=lambda *args:[str(python_file)]))
+            stack.enter_context(patch.object(packaging,'resolve_rocm_runtime_payload',side_effect=lambda root,**kwargs:original(root,needed_libraries=lambda _:())))
+            stack.enter_context(patch.object(packaging.BazelBuildContext,'query',query))
+            stack.enter_context(patch.object(loom_catalog.subprocess,'run',side_effect=fixture.decode))
+            yield command,package,contexts
 
-    def test_buildpy_actual_family_queries_stage_catalogs_and_owned_helper_outputs(self):
-        with self.buildpy_fixture() as fixture:
-            command, package, products, moonshine, hrx, queried, staged = fixture
-            command.run()
-            first_outputs = command.get_outputs()
-            helper = package / '_native' / moonshine_preparer.RELATIVE
-            self.assertEqual(set(helper.iterdir()), {helper / name for name in (*self.preparer_data, 'LICENSE', 'provenance.json')})
-            for name, content in self.preparer_data.items():
-                self.assertEqual((helper / name).read_bytes(), content)
-            self.assertEqual((helper / 'LICENSE').read_bytes(), (hrx / 'LICENSE').read_bytes())
-            self.assertEqual(json.loads((helper / 'provenance.json').read_text())['files'], moonshine_preparer.FILES)
-            # Repeat the real build/stage boundary with stale previous native/helper files.
-            (helper / 'stale.py').write_bytes(b'old helper garbage')
-            stale_native = package / '_native/bin/retired-tool'
-            stale_native.write_bytes(b'old native garbage')
-            command.run()
-            final_outputs = command.get_outputs()
-            self.assertFalse((helper / 'stale.py').exists())
-            self.assertFalse(stale_native.exists())
-        self.assertEqual(staged, ['qwen', 'moonshine'] * 2)
-        self.assertEqual([target for _, target in queried],
-                         [loom_catalog.CATALOG_TARGET, moonshine_catalog.TARGET, loom_catalog.DECODER_TARGET] * 2)
-        self.assertTrue(all(context is queried[0][0] for context, _ in queried[:3]))
-        self.assertTrue(all(context is queried[3][0] for context, _ in queried[3:]))
-        self.assertEqual(set(first_outputs), set(final_outputs))
-        self.assertEqual(len(final_outputs), len(set(final_outputs)))
-        self.assertEqual({str(path) for path in package.rglob('*') if path.is_file()}, set(final_outputs))
-        self.assertEqual(len(command._catalog_outputs), len(set(command._catalog_outputs)))
-        package = Path(command.build_lib) / 'hrx_solutions'
-        self.assertEqual({path for path in (package / 'loom-pipeline').rglob('*') if path.is_file()}, set(command._catalog_outputs))
-        self.assertEqual(sum(path.suffix == '.loombc' for path in command._catalog_outputs), 6)
-        from binding.python.models.recipes import parse
-        from build_tools.validation.recipe_inventory import validate_installed
-        validate_installed(package, parse, packaging.REPO_ROOT)
-        for architecture, path in products.items():
-            self.assertEqual((package/'loom-pipeline/llm/qwen'/architecture/'pipeline.loombc').read_bytes(), path.read_bytes())
-        for name, path in moonshine.items():
-            self.assertEqual((package/'loom-pipeline'/moonshine_catalog.RELATIVE/name).read_bytes(), path.read_bytes())
+    def test_buildpy_actual_catalog_queries_stage_catalogs_and_owned_helper_outputs(self):
+        with self.buildpy_fixture() as (command,package,contexts):
+            command.run();first=command.get_outputs()
+            helper=package/'_native/share/loom-serve/preparers/moonshine'
+            self.assertEqual({p.name for p in helper.iterdir()},{*self.fixture.tools,'operation.json','LICENSE','provenance.json'})
+            for name,content in self.fixture.tools.items():self.assertEqual((helper/name).read_bytes(),content)
+            self.assertEqual(json.loads((helper/'operation.json').read_bytes()),self.fixture.operation)
+            (helper/'stale.py').write_text('stale');(package/'_native/bin/retired').write_text('stale')
+            command.run();final=command.get_outputs()
+            self.assertFalse((helper/'stale.py').exists());self.assertFalse((package/'_native/bin/retired').exists())
+        self.assertEqual(self.fixture.queried,[loom_catalog.CATALOG_TARGET,loom_catalog.DECODER_TARGET]*2)
+        self.assertIs(contexts[0],contexts[1]);self.assertIs(contexts[2],contexts[3])
+        self.assertEqual(set(first),set(final));self.assertEqual(len(final),len(set(final)))
+        self.assertEqual({str(p) for p in package.rglob('*') if p.is_file()},set(final))
+        self.assertEqual(sum(p.suffix=='.loombc' for p in command._catalog_outputs),6)
+        from binding.python.models import recipes,pipelines
+        recipe_inventory.validate_installed_catalogs(package,recipes.parse,pipelines.parse,self.fixture.repository)
 
-    def test_duplicate_family_producer_refused_before_actual_buildpy_clears_package(self):
-        producers = packaging.package_families.PRODUCERS
-        with self.buildpy_fixture() as fixture:
-            command, package, _, _, _, queried, staged = fixture
-            retained = package / 'retained.txt'
-            package.mkdir(parents=True); retained.write_bytes(b'existing package')
-            with patch.object(packaging.package_families, 'PRODUCERS', (producers[0], *producers)):
-                with self.assertRaisesRegex(ValueError, 'Duplicate.*producer'):
-                    command.run()
-            self.assertEqual(retained.read_bytes(), b'existing package')
-            self.assertEqual(queried, [])
-            self.assertEqual(staged, [])
+    def test_duplicate_recipe_refused_before_actual_buildpy_clears_package(self):
+        with self.buildpy_fixture() as (command,package,_):
+            package.mkdir(parents=True);retained=package/'retained.txt';retained.write_text('retained')
+            path=next((self.fixture.repository/'loom-pipeline').rglob('recipes/*.json'))
+            document=json.loads(path.read_bytes());document['id']='misplaced';path.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError,'misplaced'):command.run()
+            self.assertEqual(retained.read_text(),'retained');self.assertEqual(self.fixture.queried,[])
 
-    def test_actual_packaging_omitted_required_family_fails_independent_wheel_acceptance(self):
-        with zipfile.ZipFile(self.wheel()) as archive:
-            baseline = {name: archive.read(name) for name in archive.namelist()}
-        producers = packaging.package_families.PRODUCERS
-        for omitted, prefix in (
-            (loom_catalog.CATALOG_TARGET, 'hrx_solutions/loom-pipeline/llm/'),
-            (moonshine_catalog.TARGET, 'hrx_solutions/loom-pipeline/recognition/'),
-        ):
-            selected = tuple(producer for producer in producers if producer[0] != omitted)
-            # The descriptor union detects a producer omission at staging. Keep
-            # that omission active for independent archive acceptance too: a
-            # checker derived from PRODUCERS would skip the required family.
-            with self.subTest(omitted=omitted), patch.object(
-                    packaging.package_families, 'PRODUCERS', selected), self.buildpy_fixture() as fixture:
-                command = fixture[0]
-                with self.assertRaisesRegex(ValueError, 'bundle missing compiled/catalog products'):
-                    command.run()
-                candidate = self.root / 'omitted-family.whl'
-                with zipfile.ZipFile(candidate, 'w') as archive:
-                    for name, content in baseline.items():
-                        if not name.startswith(prefix): archive.writestr(name, content)
-                with self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
-                    wheel_validation.validate_wheel(candidate)
+    def test_actual_packaging_omitted_catalog_fails_independent_wheel_acceptance(self):
+        with zipfile.ZipFile(self.wheel()) as archive:baseline={name:archive.read(name) for name in archive.namelist()}
+        for expected in self.release['executables'].values():
+            prefix='hrx_solutions/loom-pipeline/'+expected['compiled']['root']+'/'
+            candidate=self.root/'omitted-catalog.whl'
+            with zipfile.ZipFile(candidate,'w') as archive:
+                for name,content in baseline.items():
+                    if not name.startswith(prefix):archive.writestr(name,content)
+            with self.assertRaises(RuntimeError):validate_wheel(candidate)
 
-    def test_incomplete_family_refused_before_existing_package_is_cleared(self):
-        command = packaging.BazelBuildPy(packaging.BinaryDistribution())
-        command.build_lib = str(self.root / 'build')
-        retained = Path(command.build_lib) / 'hrx_solutions/retained.txt'
-        retained.parent.mkdir(parents=True); retained.write_bytes(b'existing payload')
-        for family, reader in ((loom_catalog, 'query_bytecode_outputs'), (moonshine_catalog, 'query_outputs')):
-            with self.subTest(family=family.__name__), ExitStack() as stack:
-                for name, result in (('validate_wheel_platform', None), ('discover_bazel', self.root/'bazel'),
-                                     ('discover_rocm_root', self.root/'rocm'), ('build_native_executables', {})):
-                    stack.enter_context(patch.object(packaging, name, return_value=result))
-                build = stack.enter_context(patch.object(packaging.build_py, 'run'))
-                stage = stack.enter_context(patch.object(packaging.package_families, 'stage'))
-                stack.enter_context(patch.object(loom_catalog, 'query_bytecode_outputs', return_value={}))
-                stack.enter_context(patch.object(moonshine_catalog, 'query_outputs', return_value={}))
-                stack.enter_context(patch.object(packaging.package_families, 'recipe_bundle', return_value=fixture_bundle()))
-                stack.enter_context(patch.object(family, reader, side_effect=ValueError('incomplete required family')))
-                with self.assertRaisesRegex(ValueError, 'incomplete required family'):
-                    command.run()
-                build.assert_not_called(); stage.assert_not_called()
-                self.assertEqual(retained.read_bytes(), b'existing payload')
+    def test_incomplete_catalog_refused_before_existing_package_is_cleared(self):
+        with self.buildpy_fixture() as (command,package,_):
+            package.mkdir(parents=True);retained=package/'retained.txt';retained.write_text('retained')
+            self.fixture.products.pop(next(iter(self.fixture.products)))
+            with patch.object(packaging.build_py,'run') as python_stage, patch.object(package_families,'stage') as stage:
+                with self.assertRaisesRegex(ValueError,'Missing selected compiler'):command.run()
+                python_stage.assert_not_called();stage.assert_not_called()
+            self.assertEqual(retained.read_text(),'retained')
 
     def test_build_and_all_queries_keep_snapshot_and_metrics_stay_build_only(self):
         environment={'BUILD':'original', 'HRX_BAZEL_METRICS_DIR':str(self.root/'metrics')}
@@ -297,7 +180,7 @@ class PackagingTest(unittest.TestCase):
             return subprocess.CompletedProcess(arguments,0,stdout='server\n')
         with patch.object(packaging.subprocess,'run',side_effect=run) as process:
             self.assertEqual(packaging.build_native_executables(context), {'loom-serve':server})
-            for target in (loom_catalog.DECODER_TARGET,loom_catalog.CATALOG_TARGET,moonshine_catalog.TARGET):
+            for target in (loom_catalog.DECODER_TARGET,loom_catalog.CATALOG_TARGET):
                 self.assertEqual(context.query(target),(server,))
         for call in process.call_args_list:
             args=call.args[0]
@@ -385,38 +268,23 @@ class PackagingTest(unittest.TestCase):
         (native/'bin/loom-qwen-epoch-check').write_text('stale checker')
         (native/'lib').mkdir()
         (native/'lib/stale.so').write_text('stale library')
-        old_helper = native / moonshine_preparer.RELATIVE
+        old_helper = native / Path('share/loom-serve/preparers/moonshine')
         old_helper.mkdir(parents=True)
         (old_helper / 'stale.py').write_text('stale helper')
         outputs=packaging.stage_native_payload(native,{'loom-serve':server},rocm,hrx,needed_libraries=lambda _:())
         self.assertEqual({path.name for path in (native/'bin').iterdir()},{'loom-serve'})
         self.assertFalse((native/'lib/stale.so').exists())
-        self.assertFalse((native / moonshine_preparer.RELATIVE).exists())
+        self.assertFalse((native / Path('share/loom-serve/preparers/moonshine')).exists())
         self.assertTrue((native/'bin/loom-serve').stat().st_mode & 0o111)
         for name in packaging.ROCM_RUNTIME_ROOTS:
             self.assertIn(native/name,outputs)
 
     def wheel(self, *, obsolete=False, missing=None):
         package=self.root/'staged'
-        inventory = packaging.REPO_ROOT / 'loom-pipeline/catalog_sources.bzl'
-        products = {}
-        for architecture, variant in loom_catalog.variants(inventory).items():
-            product = self.root / 'outputs' / variant['output']
-            product.parent.mkdir(parents=True, exist_ok=True)
-            product.write_bytes(b'LOOMfixture')
-            products[architecture] = product
-        catalog=loom_catalog.stage_bytecode_catalog(package / 'loom-pipeline/llm', products, inventory, decoder=Path("fixture-decoder"))
-        moonshine_products = {}
-        for name in moonshine_catalog.ARTIFACTS:
-            product = self.root / 'outputs' / name
-            product.parent.mkdir(parents=True, exist_ok=True)
-            product.write_bytes(b'LOOMfixture')
-            moonshine_products[name] = product
-        def fixture_roots(path, sources, root, decoder, policy=False):
-            return moonshine_catalog.roots('\n'.join((root/source).read_text() for source in sources))
-        with patch.object(moonshine_catalog, 'validate_artifact', side_effect=fixture_roots):
-            catalog.extend(moonshine_catalog.stage(package/'loom-pipeline'/moonshine_catalog.RELATIVE,
-                moonshine_products,packaging.REPO_ROOT,decoder=Path('fixture-decoder')))
+        catalog=self.fixture.stage(package)
+        runtime_license=package/'_native/share/loom-serve/LICENSE'
+        runtime_license.parent.mkdir(parents=True,exist_ok=True)
+        runtime_license.write_bytes((self.fixture.hrx/'LICENSE').read_bytes())
         members={
             'hrx_solutions/_native/bin/loom-serve':b'server',
             'hrx_solutions/_native/share/loom-serve/LICENSE':b'license',
@@ -424,18 +292,6 @@ class PackagingTest(unittest.TestCase):
             'hrx_solutions/_native/lib/libhsa-amd-aqlprofile64.so.1':b'profile',
         }
         members.update({'hrx_solutions/'+path.relative_to(package).as_posix():path.read_bytes() for path in catalog})
-        hrx = self.root / 'fixture-hrx'
-        tool = hrx / moonshine_preparer.UPSTREAM
-        tool.mkdir(parents=True, exist_ok=True)
-        (hrx/'LICENSE').write_text('license')
-        for name,data in self.preparer_data.items():
-            (tool/name).write_bytes(data)
-        destination = package / '_native' / moonshine_preparer.RELATIVE
-        if destination.exists():
-            shutil.rmtree(destination)
-        moonshine_preparer.stage(package/'_native', hrx)
-        members.update({'hrx_solutions/'+path.relative_to(package).as_posix():path.read_bytes()
-                        for path in destination.iterdir()})
         members.update({'hrx_solutions/pi_extension/'+name:
                         (packaging.REPO_ROOT/'binding/python/pi_extension'/name).read_bytes()
                         for name in PI_ASSETS})
@@ -748,13 +604,84 @@ class PackagingTest(unittest.TestCase):
                     validate_wheel(wheel)
 
 
+    def test_staged_recipe_consumers_use_real_functions_and_reject_program_drift(self):
+        from binding.python.models import pipelines
+        from binding.python.hem_common import HemError
+        # Use the exact installed checker body, rebasing only its import namespace
+        # to this composed source. Producer bytecode/decode fixtures are explicit;
+        # parser, finite selector, program checks and modality functions are real.
+        checker=packaging.REPO_ROOT/'build_tools/validation/check_installed_wheel.py'
+        tree=ast.parse(checker.read_text())
+        function=next(node for node in tree.body if isinstance(node,ast.FunctionDef)
+                      and node.name=='check_recipe_consumers')
+        for node in ast.walk(function):
+            if isinstance(node,ast.ImportFrom) and node.module.startswith('hrx_solutions'):
+                node.module=node.module.replace('hrx_solutions','binding.python',1)
+        namespace={'Path':Path}
+        exec(compile(ast.Module(body=[function],type_ignores=[]),str(checker),'exec'),namespace)
+        self.wheel()
+        package=self.root/'staged'
+        consume=namespace['check_recipe_consumers']
+        with patch.object(pipelines,'catalog_roots',return_value=(package/'loom-pipeline',)):
+            self.assertEqual(consume(package),('moonshine-streaming-tiny','qwen35-08b-q5-k-xl','qwen38-27b-q5-k-xl'))
+            module=package/'loom-pipeline/llm/qwen/qwen_08b/pipeline.loombc'
+            original=module.read_bytes()
+            module.write_bytes(b'LOOMtampered')
+            with self.assertRaisesRegex(RuntimeError,'Program hash mismatch'): consume(package)
+            module.write_bytes(original)
+            recipe=package/'loom-pipeline/recognition/moonshine/streaming_tiny/recipes/moonshine-streaming-tiny.json'
+            recipe.unlink()
+            with self.assertRaisesRegex(RuntimeError,'recipe inventory'): consume(package)
+
+    def test_public_recipe_query_consumer_matches_real_cli_without_state(self):
+        from binding.python import hem_cli
+        from binding.python.models import model_download
+        from binding.python.models.preparation import moonshine as moonshine_preparation
+        checker=packaging.REPO_ROOT/'build_tools/validation/check_installed_wheel.py'
+        function=next(node for node in ast.parse(checker.read_text()).body
+                      if isinstance(node,ast.FunctionDef) and node.name=='check_public_recipe_queries')
+        namespace={}
+        exec(compile(ast.Module(body=[function],type_ignores=[]),str(checker),'exec'),namespace)
+        state=self.root/'query-state'
+        def invoke(*arguments):
+            output,diagnostic=io.StringIO(),io.StringIO()
+            from contextlib import redirect_stdout,redirect_stderr
+            with redirect_stdout(output),redirect_stderr(diagnostic):
+                status=hem_cli.main([*arguments,'--json'])
+            self.assertEqual(status,0,diagnostic.getvalue()+output.getvalue())
+            return json.loads(output.getvalue()),diagnostic.getvalue()
+        with patch.dict(os.environ,{'LOOM_SERVE_DIR':str(state)}), \
+             patch.object(model_download,'_run_hf',side_effect=AssertionError('query must not fetch')), \
+             patch.object(moonshine_preparation,'preflight',side_effect=AssertionError('query must not preflight')):
+            self.assertEqual(namespace['check_public_recipe_queries'](invoke),
+                             ('moonshine-streaming-tiny','qwen35-08b-q5-k-xl','qwen38-27b-q5-k-xl'))
+        self.assertFalse(state.exists())
+
+    def test_source_and_wheel_reject_each_retired_model_module(self):
+        retired = ('models/moonshine_preparation.py', 'models/moonshine_preparer_identity.py',
+                   'models/pipelines_qwen.py', 'models/pipelines_moonshine.py', 'models/recipe_types.py', 'models/curated_catalog.py', 'models/hem_model_operations.py',
+                   'models/qwen_validation.py', 'models/pipeline_validation.py', 'pipeline_validation.py')
+        for name in retired:
+            source = self.root / 'retired-source.tar.gz'
+            with tarfile.open(source, 'w:gz') as archive:
+                content = b'# retired graph must not ship\n'
+                member = tarfile.TarInfo('package/binding/python/' + name)
+                member.size = len(content)
+                archive.addfile(member, io.BytesIO(content))
+            with self.subTest(source=name), self.assertRaisesRegex(RuntimeError, 'retired model execution authorities'):
+                wheel_validation.validate_models_sdist(source)
+            wheel = self.wheel()
+            with zipfile.ZipFile(wheel, 'a') as archive:
+                archive.writestr('hrx_solutions/' + name, content)
+            with self.subTest(wheel=name), self.assertRaisesRegex(RuntimeError, 'retired model execution authorities'):
+                validate_wheel(wheel)
+
     def test_sdist_requires_each_exact_regular_model_source_once(self):
         names = (
             'models/__init__.py', 'models/gguf.py', 'models/hem_config.py',
             'models/hem_models.py', 'models/model_download.py', 'models/model_store.py',
-            'models/moonshine_preparation.py', 'models/moonshine_preparer_identity.py',
-            'models/recipe_types.py', 'models/recipes.py', 'models/pipelines.py',
-            'models/pipelines_qwen.py', 'models/pipelines_moonshine.py',
+            'models/preparation/__init__.py', 'models/preparation/moonshine.py', 'models/preparation/moonshine_contract.py',
+            'models/recipes.py', 'models/pipelines.py',
             'models/modalities/__init__.py', 'models/modalities/chat.py', 'models/modalities/asr.py',
         )
         for target in names:
@@ -954,66 +881,103 @@ class PackagingTest(unittest.TestCase):
         self.assertEqual((staged / 'models/recipes.py').read_bytes(),
                          (packaging.REPO_ROOT / 'binding/python/models/recipes.py').read_bytes())
 
+    def test_registered_sdist_gate_rejects_changed_source_with_identical_recipes(self):
+        from binding.python.models import recipes,pipelines
+        root=self.fixture.repository
+        metadata={path.name for path in (root/'loom-pipeline').iterdir()
+                  if path.is_file() and (path.suffix=='.bzl' or path.name=='BUILD.bazel')}
+        paths=recipe_inventory.source_paths(self.release)|metadata
+        operation='binding/python/models/preparation/moonshine-operation.json'
+        baseline={'loom-pipeline/'+name:(root/'loom-pipeline'/name).read_bytes() for name in paths}
+        baseline[operation]=(root/operation).read_bytes()
+        source=next(name for name in baseline if name.endswith('.loom'))
+        unrelated=('validate_pi_sdist','validate_pi_python_sdist','validate_client_sdist',
+                   'validate_models_sdist','validate_cli_sdist','validate_omp_sdist',
+                   'validate_opencode_sdist','validate_openwebui_sdist','validate_shared_integrations_sdist')
+        for changed in (False,True):
+            members=dict(baseline)
+            if changed:members[source]=b'changed native program, unchanged recipes'
+            archive_path=self.root/'source.tar.gz'
+            with tarfile.open(archive_path,'w:gz') as archive:
+                for name,content in members.items():
+                    entry=tarfile.TarInfo('package/'+name);entry.size=len(content)
+                    archive.addfile(entry,io.BytesIO(content))
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(sys,'argv',['validate-wheel','fixture.whl','--sdist',str(archive_path)]))
+                stack.enter_context(patch.object(wheel_validation,'validate_wheel',return_value=(2,1)))
+                for name in unrelated:stack.enter_context(patch.object(wheel_validation,name))
+                # Real combined catalog checker and real parsers at the registered
+                # CLI entrypoint. Unrelated Python/client/ELF gates are isolated.
+                if changed:
+                    with self.assertRaisesRegex(RuntimeError,'Source catalog differs'):wheel_validation.main()
+                else:self.assertEqual(wheel_validation.main(),0)
+
+    def test_setuptools_excludes_source_operation_from_installed_model_package(self):
+        from setuptools.config.pyprojecttoml import read_configuration
+        options=read_configuration(packaging.REPO_ROOT/'pyproject.toml',expand=False)['tool']['setuptools']
+        source=self.root/'python-source';models=source/'models';models.mkdir(parents=True)
+        (source/'__init__.py').write_text('')
+        (models/'__init__.py').write_text('')
+        preparation=models/'preparation';preparation.mkdir()
+        (preparation/'__init__.py').write_text('')
+        operation=preparation/'operation-fixture.json';operation.write_text('{"trusted":true}')
+        distribution=packaging.BinaryDistribution({
+            'packages':['hrx_solutions','hrx_solutions.models','hrx_solutions.models.preparation'],
+            'package_dir':{'hrx_solutions':str(source)},
+            # Model JSON may be found by source manifests/package-data; actual
+            # exclusion must still leave installed native contract as authority.
+            'package_data':{'hrx_solutions.models':['*.json'], 'hrx_solutions.models.preparation':['*.json']},
+            'exclude_package_data':options['exclude-package-data'],
+        })
+        distribution.script_name=str(packaging.REPO_ROOT/'setup.py')
+        command=packaging.build_py(distribution);command.build_lib=str(self.root/'python-stage')
+        command.ensure_finalized();command.run()
+        self.assertTrue((Path(command.build_lib)/'hrx_solutions/models/__init__.py').is_file())
+        self.assertFalse(list(Path(command.build_lib).rglob('*.json')))
+        self.assertTrue(operation.is_file())
+
     def test_wheel_contains_new_validation_assets(self):
         libraries,size=validate_wheel(self.wheel())
         self.assertEqual(libraries,2)
         self.assertGreater(size,0)
         with zipfile.ZipFile(self.root/'fixture.whl') as archive:
             catalog = [name for name in archive.namelist() if name.startswith('hrx_solutions/loom-pipeline/llm/')]
-            self.assertEqual(len(catalog), 8)
+            self.assertEqual(len(catalog), 9)
             self.assertEqual(sum(name.endswith('.loombc') for name in catalog), 2)
             self.assertFalse(any(name.endswith('sources.txt') for name in catalog))
-        with self.assertRaisesRegex(RuntimeError,'missing setup assets.*qwen38-27b-q5-k-xl.json'):
+        with self.assertRaisesRegex(RuntimeError,'recipe inventory'):
             validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/qwen_27b/recipes/qwen38-27b-q5-k-xl.json'))
-        for name in ('__init__', *MODEL_MODULES):
+        for name in MODEL_PYTHON_PATHS:
             with self.subTest(module=name), self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
-                validate_wheel(self.wheel(missing='hrx_solutions/models/'+name+'.py'))
+                validate_wheel(self.wheel(missing='hrx_solutions/'+name))
 
     def test_wheel_requires_both_architecture_catalogs(self):
-        for filename in ('pipeline.loombc', 'pipeline.json', 'recipes/qwen35-08b-q5-k-xl.json'):
-            with self.subTest(filename=filename), self.assertRaisesRegex(RuntimeError, 'missing setup assets'):
+        for filename in ('pipeline.loombc', 'executable.json', 'recipes/qwen35-08b-q5-k-xl.json'):
+            with self.subTest(filename=filename), self.assertRaises(RuntimeError):
                 validate_wheel(self.wheel(missing='hrx_solutions/loom-pipeline/llm/qwen/qwen_08b/'+filename))
 
     def test_wheel_rejects_source_fallback_corruption_and_metadata_drift(self):
-        mutations = ('source', 'bytecode', 'extra', 'descriptor', 'recipe',
-                     'variant', 'source_hash', 'source_inventory', 'bytecode_hash', 'format')
-        for mutation in mutations:
-            wheel = self.wheel()
-            with zipfile.ZipFile(wheel) as archive:
-                members = {name: archive.read(name) for name in archive.namelist()}
-            prefix = 'hrx_solutions/loom-pipeline/llm/'
-            local = prefix + 'qwen/qwen_08b/'
-            if mutation == 'source':
-                members[local+'control.loom'] = b'hidden source fallback'
-            elif mutation == 'bytecode':
-                members[local+'pipeline.loombc'] = b'LOOMstale'
-            elif mutation == 'extra':
-                members[local+'weights.loombc'] = b'LOOMauxiliary'
-            elif mutation in ('descriptor', 'recipe'):
-                name = local + ('pipeline.json' if mutation == 'descriptor' else 'recipes/qwen35-08b-q5-k-xl.json')
-                data = json.loads(members[name])
-                data['variant' if mutation == 'descriptor' else 'id'] = 'wrong'
-                members[name] = json.dumps(data).encode()
+        for mutation in ('source','bytecode','extra','semantic','recipe','source_hash','source_inventory','bytecode_hash','format'):
+            wheel=self.wheel()
+            with zipfile.ZipFile(wheel) as archive:members={name:archive.read(name) for name in archive.namelist()}
+            local='hrx_solutions/loom-pipeline/llm/qwen/qwen_08b/'
+            if mutation=='source':members[local+'control.loom']=b'hidden source'
+            elif mutation=='bytecode':members[local+'pipeline.loombc']=b'LOOMstale'
+            elif mutation=='extra':members[local+'weights.loombc']=b'LOOMextra'
             else:
-                name = prefix + 'catalog-build.json'
-                data = json.loads(members[name])
-                variant = data['variants']['qwen_08b']
-                if mutation == 'variant':
-                    variant['identifier'] = 'wrong'
-                elif mutation == 'source_hash':
-                    variant['sources'][next(iter(variant['sources']))] = '0'*64
-                elif mutation == 'source_inventory':
-                    del variant['sources'][next(iter(variant['sources']))]
-                elif mutation == 'bytecode_hash':
-                    variant['bytecode_sha256'] = '0'*64
-                else:
-                    data['format'] = 1
-                members[name] = json.dumps(data).encode()
-            with zipfile.ZipFile(wheel, 'w') as archive:
-                for name, data in members.items():
-                    archive.writestr(name, data)
-            with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
-                validate_wheel(wheel)
+                name=local+('recipes/qwen35-08b-q5-k-xl.json' if mutation=='recipe' else 'executable.json')
+                data=json.loads(members[name])
+                if mutation=='recipe':data['id']='wrong'
+                elif mutation=='semantic':data['serving']['defaults']['rows']=3
+                elif mutation=='source_hash':data['provenance']['source_declaration_sha256']='0'*64
+                elif mutation=='source_inventory':data['provenance']['source_files'].pop(next(iter(data['provenance']['source_files'])))
+                elif mutation=='bytecode_hash':data['programs']['files']['pipeline.loombc']='0'*64
+                else:data['format']=2
+                members[name]=json.dumps(data).encode()
+            with zipfile.ZipFile(wheel,'w') as archive:
+                for name,content in members.items():archive.writestr(name,content)
+            from binding.python.hem_common import HemError
+            with self.subTest(mutation=mutation),self.assertRaises((RuntimeError,HemError)):validate_wheel(wheel)
 
     def test_wheel_requires_every_hem_component_and_entrypoint(self):
         for name in (*(module+'.py' for module in HEM_MODULES), *wheel_validation.CLI_FILES):

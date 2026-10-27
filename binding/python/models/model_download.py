@@ -13,7 +13,6 @@ import threading
 import time
 
 from . import model_store
-from .recipe_types import HFSource
 from .. import hem_display
 
 
@@ -28,23 +27,15 @@ def cache_root() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))).expanduser().absolute() / "huggingface" / "hub"
 
 
-def _cache_path(source: HFSource) -> Path:
+def _cache_path(source: dict) -> Path:
     """Name the immutable snapshot locator; never resolve it to a mutable copy."""
-    return (cache_root() / ("models--" + source.repo_id.replace("/", "--")) /
-            "snapshots" / source.revision / source.filename)
+    return (cache_root() / ("models--" + source['repo_id'].replace("/", "--")) /
+            "snapshots" / source['revision'] / source['filename'])
 
 
-def source_status(source: HFSource) -> dict:
-    path = _cache_path(source)
-    cached = model_store.readable_file(path)
-    return dict(repo_id=source.repo_id, revision=source.revision, filename=source.filename,
-                cached=cached, cache_path=str(path),
-                size_bytes=path.stat().st_size if cached else None)
-
-
-def command(source: HFSource) -> list[str]:
-    return ['hf', 'download', source.repo_id, source.filename, '--revision',
-            source.revision, '--cache-dir', str(cache_root())]
+def command(source: dict) -> list[str]:
+    return ['hf', 'download', source['repo_id'], source['filename'], '--revision',
+            source['revision'], '--cache-dir', str(cache_root())]
 
 
 def _redact(value: str) -> str:

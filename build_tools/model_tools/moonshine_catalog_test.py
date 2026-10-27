@@ -1,146 +1,10 @@
-"""Selected source ownership, compiled closure and archive integrity contracts."""
-from copy import deepcopy
-import io
-import json
+"""Existing recognition native framing ABI assertions, independent of packaging selectors."""
 from pathlib import Path
-import shutil
-import tarfile
-import tempfile
 import unittest
-from unittest.mock import patch
-import zipfile
 
-from build_tools.model_tools import moonshine_catalog as catalog, loom_catalog
-
-REPOSITORY = Path(__file__).resolve().parents[2]
-
-
-class MoonshineCatalogTest(unittest.TestCase):
+class RecognitionSourceTest(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-        self.source = self.root / 'loom-pipeline' / catalog.RELATIVE
-        self.source.parent.mkdir(parents=True)
-        shutil.copytree(REPOSITORY/'loom-pipeline'/catalog.RELATIVE,self.source)
-        shutil.copyfile(REPOSITORY/'loom-pipeline/moonshine_sources.bzl',self.root/'loom-pipeline/moonshine_sources.bzl')
-        self.groups = catalog.validate_sources(self.root)
-
-    def products(self):
-        paths = {}
-        for name in catalog.ARTIFACTS:
-            path = self.root / 'build' / name; path.parent.mkdir(exist_ok=True)
-            path.write_bytes(b'LOOMfixture'); paths[name] = path
-        return paths
-
-    def stage(self):
-        def decoded(path,sources,root,decoder,policy=False):
-            return catalog.roots('\n'.join((root/source).read_text() for source in sources))
-        destination = self.root/'installed'
-        with patch.object(catalog,'validate_artifact',side_effect=decoded):
-            catalog.stage(destination,self.products(),self.root,decoder=Path('fixture'))
-        return destination
-
-    def test_bound_query_retains_four_artifact_parser_and_rejections(self):
-        outputs={}
-        for name in catalog.ARTIFACTS:
-            path=self.root/'bazel-bin'/catalog.RELATIVE/name
-            path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'LOOMfixture')
-            outputs[name]=path
-        def query(target):
-            self.assertEqual(target,catalog.TARGET)
-            return tuple(outputs.values())
-        self.assertEqual(catalog.query_outputs(query),outputs)
-        paths=tuple(outputs.values())
-        for invalid in (paths[:-1],paths+paths[:1],paths+(self.root/'extra.loombc',)):
-            with self.assertRaisesRegex(ValueError,'Missing|Unexpected|duplicate'):
-                catalog.query_outputs(lambda target:invalid)
-        paths[0].write_bytes(b'bad')
-        with self.assertRaisesRegex(ValueError,'invalid Moonshine'):
-            catalog.query_outputs(query)
-
-    def test_exact_four_artifacts_and_physically_owned_sixteen_inputs(self):
-        self.assertEqual(len({source for group in self.groups.values() for source in group}),16)
-        self.assertEqual(set(self.groups),set(catalog.ARTIFACTS))
-        self.assertEqual(catalog.roots((self.source/'reset.loom').read_text())['commands'],['reset'])
-        self.assertEqual(catalog.roots((self.source/'reset.loom').read_text())['configs'],['moonshine.threads'])
-        (self.source/'encoder.loom').write_text('changed numerical program')
-        with self.assertRaisesRegex(ValueError,'provenance'):
-            catalog.validate_sources(self.root)
-
-    def test_unknown_or_unowned_sources_and_mapping_are_rejected(self):
-        (self.source/'extra.loom').write_text('extra')
-        with self.assertRaisesRegex(ValueError,'Undeclared'):
-            catalog.validate_sources(self.root)
-        (self.source/'extra.loom').unlink()
-        external=self.root/'external.loom';shutil.copyfile(self.source/'encoder.loom',external)
-        (self.source/'encoder.loom').unlink();(self.source/'encoder.loom').symlink_to(external)
-        with self.assertRaisesRegex(ValueError,'physically'):
-            catalog.validate_sources(self.root)
-
-    def test_decoded_function_command_config_closure_and_policy_projection(self):
-        def decode(arguments,**kwargs):
-            Path(arguments[-1].removeprefix('--output=')).write_text(decoded)
-        artifact=self.products()['providers.loombc']
-        inputs='\n'.join((self.source/name).read_text() for name in self.groups['providers.loombc'])
-        decoded=inputs
-        with patch.object(catalog.subprocess,'run',side_effect=decode):
-            expected=catalog.validate_artifact(artifact,self.groups['providers.loombc'],self.source,Path('fixture'))
-            self.assertEqual(expected['commands'],['decode','encode','reset'])
-            decoded=inputs.replace('command.program.def public @encode','command.program.def @encode',1)
-            with self.assertRaisesRegex(ValueError,'closure'):
-                catalog.validate_artifact(artifact,self.groups['providers.loombc'],self.source,Path('fixture'))
-            decoded=loom_catalog.preparation_bytecode_source((self.source/'prepare.loom').read_text(),'weights.loombc')
-            catalog.validate_artifact(self.products()['prepare.loombc'],['prepare.loom'],self.source,Path('fixture'),True)
-            decoded=decoded.replace(b'weights.loombc'.hex(),b'weights.loom'.hex())
-            with self.assertRaisesRegex(ValueError,'policy'):
-                catalog.validate_artifact(self.products()['prepare.loombc'],['prepare.loom'],self.source,Path('fixture'),True)
-
-    def test_installed_inventory_policy_integrity_and_missing_metadata(self):
-        installed=self.stage()
-        document=json.loads((installed/'catalog.json').read_bytes())
-        self.assertEqual(document['definition']['sources'],['providers.loombc'])
-        self.assertNotIn('download_recipe', document)
-        self.assertNotIn('pending_requests', document['definition'])
-        self.assertNotIn('options', document['definition'])
-        self.assertFalse(list(installed.rglob('*.loom')))
-        self.assertEqual({path.relative_to(installed).as_posix() for path in installed.rglob('*') if path.is_file()},
-                         set((*catalog.ARTIFACTS,*catalog.DATA,*catalog.RECIPES,'artifacts.json')))
-        self.assertEqual((installed/catalog.RECIPES[0]).read_bytes(), (self.source/catalog.RECIPES[0]).read_bytes())
-
-    def test_wheel_allowlist_missing_extra_tampered_and_wrong_native_mapping(self):
-        installed=self.stage()
-        original={path.relative_to(installed).as_posix():path.read_bytes() for path in installed.rglob('*') if path.is_file()}
-        cases=[None,'missing-policy','extra-program','tampered','native-source-reference','notice']
-        for case in cases:
-            members=dict(original)
-            if case=='missing-policy':members.pop('weights.loombc')
-            elif case=='extra-program':members['hidden.loombc']=b'LOOMextra'
-            elif case=='tampered':members['weights.loombc']=b'LOOMwrong'
-            elif case=='native-source-reference':
-                document=json.loads(members['catalog.json']);document['definition']['control']='control.loom';members['catalog.json']=json.dumps(document).encode()
-            elif case=='notice':members['LICENSE.moonshine']=b'wrong'
-            path=self.root/'test.whl'
-            with zipfile.ZipFile(path,'w') as archive:
-                for name,content in members.items():archive.writestr('hrx_solutions/loom-pipeline/'+catalog.RELATIVE+'/'+name,content)
-            with zipfile.ZipFile(path) as archive:
-                if case is None:catalog.validate_archive(archive,self.root)
-                else:
-                    with self.subTest(case=case),self.assertRaises(ValueError):catalog.validate_archive(archive,self.root)
-
-    def test_source_archive_owns_inputs_and_excludes_payloads(self):
-        def archive(extra=None,missing=None):
-            path=self.root/'source.tar.gz'
-            with tarfile.open(path,'w:gz') as tar:
-                for source in self.source.iterdir():
-                    if source.name!=missing:tar.add(source,arcname='package/loom-pipeline/'+catalog.RELATIVE+'/'+source.name)
-                if extra:
-                    info=tarfile.TarInfo('package/'+extra);info.size=1;tar.addfile(info,io.BytesIO(b'x'))
-            return tarfile.open(path)
-        with archive() as tar:catalog.validate_source_archive(tar,self.root)
-        with archive(missing='encoder.loom') as tar,self.assertRaisesRegex(ValueError,'missing'):
-            catalog.validate_source_archive(tar,self.root)
-        with archive(extra='recording.wav') as tar,self.assertRaisesRegex(ValueError,'payload'):
-            catalog.validate_source_archive(tar,self.root)
+        self.source = Path(__file__).resolve().parents[2] / 'loom-pipeline/recognition/moonshine/streaming_tiny'
 
     def test_recognition_source_abi_and_framing_bounds(self):
         prepare=(self.source/'prepare.loom').read_text(); control=(self.source/'control.loom').read_text()
@@ -162,4 +26,4 @@ class MoonshineCatalogTest(unittest.TestCase):
         self.assertIn('%packet_length = buffer.length %packet',control)
 
 
-if __name__=='__main__':unittest.main()
+if __name__ == '__main__': unittest.main()

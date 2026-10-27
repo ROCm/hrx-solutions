@@ -1,87 +1,72 @@
-"""Typed contract doubles for configuration orchestration, without native claims."""
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
+"""Actual declarations/policy and plain inspected records; no native execution."""
+from copy import deepcopy
 import json
+from pathlib import Path
+import shutil
+from unittest.mock import patch
 
-from binding.python.models import hem_config, recipes, modalities
-from binding.python.models.recipe_types import (
-    ArtifactRequirement, BundleFile, BundleManifest, Configurable, Constraints,
-    Fixed, PipelineDescriptor, PreparedArtifact, PreparedModel, ProtocolDescriptor,
-    RecognitionPrograms, TextPrograms, Unsupported,
-)
-from binding.python.hem_common import InvalidInput
+from binding.python.models import pipelines, recipes, modalities
+from tests.gguf_fixtures import write_gguf
 
-RECIPE_PATHS = {
-    'qwen-08b': 'llm/qwen/qwen_08b/recipes/qwen35-08b-q5-k-xl.json',
-    'qwen': 'llm/qwen/qwen_27b/recipes/qwen38-27b-q5-k-xl.json',
-    'moonshine-streaming-tiny': 'recognition/moonshine/streaming_tiny/recipes/moonshine-streaming-tiny.json',
-}
-SOURCE = Path(__file__).resolve().parents[1] / 'loom-pipeline'
+SOURCE = next(root for root in pipelines.catalog_roots() if root.is_dir())
 
 
-def recipe_for(pipeline):
-    return recipes.parse((SOURCE / RECIPE_PATHS[pipeline]).read_bytes())
+def recipe_for(identifier):
+    return recipes.load(identifier)[0]
 
 
-def descriptor_for(recipe):
-    if recipe.modality == 'chat':
-        parameters = {key: Configurable('integer', default, Constraints(1, maximum))
-                      for key, default, maximum in [('rows', 4, 16), ('context_capacity', 8192, 262144),
-                          ('pool_capacity', 32768, 4194304), ('prefill_capacity', 128, 262144)]}
-        parameters['mtp'] = Fixed('boolean', False) if recipe.pipeline == 'qwen-08b' else Configurable('boolean', True)
-        parameters['mtp_depth'] = (Unsupported('integer', 'not supported') if recipe.pipeline == 'qwen-08b' else
-            Configurable('integer', 3, Constraints(1, 3), {'parameter': 'mtp', 'equals': True}))
-        programs = TextPrograms('program.loom', 'program.loom', ('program.loom',))
-        protocol = ProtocolDescriptor('chat', 'text', '/v1/chat/completions', 'json', ('text',), ('text',))
-    else:
-        parameters = {'pending_requests': Fixed('integer', 4), 'options': Fixed('object', {})}
-        programs = RecognitionPrograms('program.loom', 'program.loom', ('program.loom',))
-        protocol = ProtocolDescriptor('transcription', 'recognition', '/v1/audio/transcriptions', 'multipart', ('audio',), ('text',))
-    relative = str(Path(RECIPE_PATHS[recipe.pipeline]).parent.parent)
-    return PipelineDescriptor(recipe.pipeline, recipe.modality, parameters, protocol,
-                              tuple(ArtifactRequirement(a.role, (a.format,), 1, 1) for a in recipe.artifacts),
-                              None, programs, BundleManifest(relative, (BundleFile('program.loom', 'program'),)))
-
-
-def prepared_for(root, recipe):
-    directory = root / 'model'
-    directory.mkdir(exist_ok=True)
-    files = []
-    for item in recipe.artifacts:
-        path = directory / item.path
+def record_for(root, recipe, identity):
+    executable, _catalog, executable_identity = pipelines.load(recipe['executable'])
+    directory = Path(root) / 'model'
+    directory.mkdir()
+    paths, assets, evidence = {}, [], []
+    for purpose, item in recipe['files'].items():
+        path = directory / item['path']
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b'synthetic asset, not native readiness')
-        files.append(PreparedArtifact(item.id, item.role, item.format, item.path, path,
-                     'hf-reference' if item.source.kind == 'huggingface' else 'generated-owned'))
-    return PreparedModel('local-fixture', recipe.id, recipe.identity, recipe.pipeline, directory, tuple(files))
+        format = executable['assets'][purpose]['format']
+        if format == 'gguf':
+            write_gguf(path, tensors=[('fixture', [1], 0, 0)])
+        else:
+            path.write_bytes(b'{}')  # Presence fixture; no helper or native load.
+        paths[purpose] = path
+        assets.append(dict(id=purpose, role=purpose, format=format,
+                           logical_path=item['path'], ownership='owned',
+                           prepared_ownership='caller-owned', source_path=str(path)))
+        st = path.stat()
+        evidence.append(dict(path=str(path), device=st.st_dev, inode=st.st_ino,
+                             size=st.st_size, mtime_ns=st.st_mtime_ns, ctime_ns=st.st_ctime_ns))
+    reference = recipe['executable']
+    operation = pipelines.validate_files(executable, recipe['files'])
+    preparation = {'id':operation['id'], 'declaration':operation} if operation is not None else None
+    record = dict(id='fixture', directory=str(directory), pipeline=reference, assets=assets,
+                  provenance=dict(recipe_id=recipe['id'], recipe_identity=identity,
+                    pipeline=reference, declaration=deepcopy(recipe), preparation=preparation, executable=dict(reference=reference,
+                      id=executable['id'], identity=executable_identity, declaration=deepcopy(executable))))
+    return record, paths, tuple(paths.values()), evidence
 
 
 class ConfigurationFixture:
-    def configure(self, pipeline='qwen-08b'):
-        self.recipe = recipe_for(pipeline)
-        self.descriptor = descriptor_for(self.recipe)
+    def configure(self, identifier='qwen35-08b-q5-k-xl'):
         self.catalog_root = self.root / 'loom-pipeline'
-        self.catalog = self.catalog_root / self.descriptor.bundle.catalog_relative_path
-        self.catalog.mkdir(parents=True)
-        (self.catalog / 'program.loom').write_text('synthetic program identity')
-        self.model = prepared_for(self.root, self.recipe)
-        self.binding = SimpleNamespace(describe=lambda: self.descriptor, validate_artifacts=lambda artifacts: None)
-        def validate(settings, descriptor):
-            if descriptor.modality == 'chat':
-                if settings['prefill_capacity'] > settings['context_capacity']:
-                    raise InvalidInput('prefill_capacity must not exceed context_capacity')
-                if settings['prefill_capacity'] < settings.get('mtp_depth', 0) + 1:
-                    raise InvalidInput('prefill_capacity must fit MTP')
-        def definition(settings, prepared, programs):
-            return dict(kind=self.descriptor.protocol.native_kind, prepare=programs.prepare,
-                        control=programs.control, sources=['program.loom'], settings=dict(settings))
-        self.modality = SimpleNamespace(validate=validate, service_definition=definition)
-        for patcher in [patch.object(hem_config.pipelines, 'catalog_roots', return_value=(self.catalog_root,)),
-                        patch.object(hem_config.pipelines, 'get', return_value=self.binding),
-                        patch.object(modalities, 'get', return_value=self.modality)]:
-            patcher.start()
-            self.addCleanup(patcher.stop)
+        shutil.copytree(SOURCE, self.catalog_root)
+        patcher = patch.object(pipelines, 'catalog_roots', return_value=(self.catalog_root,))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.recipe, self.recipe_identity = recipes.load(identifier)
+        self.reference = self.recipe['executable']
+        self.recipe_path = self.catalog_root / Path(self.reference).parent / 'recipes' / (identifier + '.json')
+        self.executable, self.catalog, self.executable_identity = pipelines.load(self.reference)
+        self.serving = self.executable['serving']
+        self.modality = modalities.get(self.executable['modality'])
+        self.record, self.paths, self.dependencies, self.evidence = record_for(
+            self.root, self.recipe, self.recipe_identity)
+
+    def replace_recipe(self, **values):
+        document = dict(self.recipe, **values)
+        self.recipe_path.write_text(json.dumps(document))
+        self.recipe, self.recipe_identity = recipes.load(document['id'])
+        self.record['provenance'].update(recipe_identity=self.recipe_identity,
+                                         declaration=deepcopy(self.recipe))
 
     def config_file(self, contents):
         path = self.root / 'configuration.json'

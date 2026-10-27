@@ -1,13 +1,12 @@
 """Shared filesystem checks for declared acquisition artifacts.
 
-Public recipe/prepared values live in recipe_types; Registry owns persistence.
+Registry owns persistence; generated outputs are plain destination-to-Path maps.
 """
 from __future__ import annotations
 
 from pathlib import Path
 import re
 
-from .recipe_types import GeneratedArtifact
 
 _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -32,19 +31,13 @@ def validate_model_id(model_id: str) -> None:
 
 
 def generated_outputs(attempt, outputs, expected):
-    """Admit one complete typed result without collapsing repeated roles."""
+    """Verify a complete destination-to-file result before staging any member."""
     if (not isinstance(attempt, Path) or not attempt.is_absolute() or attempt.is_symlink()
-            or type(outputs) is not tuple
-            or any(not isinstance(item, GeneratedArtifact) or not isinstance(item.file, Path)
-                   for item in outputs)):
-        raise ModelImportError('Preparation result does not match its complete declared attempt')
-    wanted = {(item.role, item.format, item.path) for item in expected}
-    actual = [(item.role, item.format, item.path) for item in outputs]
-    if len(actual) != len(wanted) or set(actual) != wanted:
-        raise ModelImportError('Preparation result has missing, duplicate or unknown generated outputs')
-    paths, identities = {}, set()
-    for item in outputs:
-        path = item.file
+            or type(outputs) is not dict or set(outputs) != set(expected)
+            or any(not isinstance(path, Path) for path in outputs.values())):
+        raise ModelImportError('Preparation result has missing or unknown generated outputs')
+    identities = set()
+    for path in outputs.values():
         try:
             relative = path.relative_to(attempt)
             if (not path.is_absolute() or '..' in relative.parts or path == attempt
@@ -60,5 +53,4 @@ def generated_outputs(attempt, outputs, expected):
             identities.add(identity)
         except (OSError, ValueError, RuntimeError) as error:
             raise ModelImportError('Preparation output is missing, aliased or outside its attempt') from error
-        paths[item.path] = path
-    return paths
+    return outputs

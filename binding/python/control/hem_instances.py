@@ -13,7 +13,7 @@ from pathlib import Path
 import uuid
 
 from . import hem_process
-from ..models import hem_config, hem_models, recipes
+from ..models import hem_config, hem_models
 from ..hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome, result
 from .hem_http import NativeClient, active_ready, primary_parameters, registration, retired
 from .hem_state import _name
@@ -36,10 +36,10 @@ class InstanceManager:
             self.registry.deadline = prior
 
     def start(self, server, model_id, deadline, *, name=None, overrides=None,
-              config_path=None, pipeline=None, device=0):
+              config_path=None, executable=None, modality=None, device=0):
         with self._budget(deadline):
             return self._start(server, model_id, deadline, name=name, overrides=overrides,
-                               config_path=config_path, pipeline=pipeline, device=device)
+                               config_path=config_path, executable=executable, modality=modality, device=device)
 
     def stop(self, server, name, deadline, *, abort=False, no_wait=False):
         with self._budget(deadline):
@@ -84,7 +84,7 @@ class InstanceManager:
             current_root.relative_to(package)
             current = resolved.catalog.resolve(strict=True)
             relative = current.relative_to(current_root)
-            if relative != resolved.catalog_identity.relative_path:
+            if relative != resolved.catalog_relative_path:
                 raise ValueError('checked catalog location differs')
             launch = Path(server['build']['directory']).resolve(strict=True)
             retained_root = catalog_root.resolve(strict=True)
@@ -94,11 +94,11 @@ class InstanceManager:
             if not current.is_dir() or not retained.is_dir():
                 raise ValueError('catalog must be a directory')
         except (OSError, ValueError) as error:
-            raise HemError('validated pipeline is outside or missing from the matching package catalog') from error
+            raise HemError('checked executable is outside or missing from the matching package catalog') from error
         return retained
 
     def _start(self, server, model_id, deadline, *, name=None, overrides=None,
-              config_path=None, pipeline=None, device=0):
+              config_path=None, executable=None, modality=None, device=0):
         """Return only after ready+active+idle and acknowledged open admission.
 
         A failed/uncertain start is never replayed. Inspect the pending current
@@ -109,9 +109,9 @@ class InstanceManager:
             self._server(server, starting=True)
         with self.registry.lock('model', model_id, deadline=deadline):
             deadline.remaining()
-            files = hem_models.model_files(self.registry, model_id, pipeline=pipeline)
+            record, paths, dependencies, evidence = hem_models.qualify(self.registry, model_id, executable=executable, modality=modality)
             deadline.remaining()
-            resolved = hem_config.resolve(recipes.load(files.recipe_id), files, overrides, config_path, deadline=deadline)
+            resolved = hem_config.resolve(record, paths, dependencies, evidence, overrides, config_path, deadline=deadline)
             deadline.remaining()
             with self.registry.lock('server', server['id'], deadline=deadline):
                 server = self._server(server, starting=True)
@@ -134,7 +134,8 @@ class InstanceManager:
                             pending={'action': 'start', 'stage': 'register', 'accepted': None})
                     row = self._start_native(server, row, client, deadline)
                     return result('running', completed=True, server=server['id'], instance=name,
-                                  model=model_id, pipeline=resolved.pipeline, settings=row['settings'],
+                                  model=model_id, pipeline=resolved.pipeline, executable=resolved.pipeline,
+                                  executable_id=resolved.executable_id, modality=resolved.modality, settings=row['settings'],
                                   incarnation=row['incarnation'], accepted=True)
 
     def _post(self, row, client, route, path, *, deadline):

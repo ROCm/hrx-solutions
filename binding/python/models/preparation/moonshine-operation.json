@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "id": "moonshine-assets-v1",
+  "tool_revision": "61417137f334cfa828b38d6e9b0f2d7190503f16",
+  "tool_files": {
+    "prepare_assets.py": "e42af9c0bb50c2e75bd0178163bcb7e309f395ef2e94a43b50c8d33a1d6d7de9",
+    "model.json": "56cc217f34c5e22a65050e47b87db2ab20064a1e0f125be84463ff7a4ad3306f"
+  },
+  "inputs": {
+    "model.safetensors": {"kind": "huggingface", "repo_id": "moonshine-ai/moonshine-streaming-tiny", "revision": "f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a", "filename": "model.safetensors"},
+    "tokenizer.json": {"kind": "huggingface", "repo_id": "moonshine-ai/moonshine-streaming-tiny", "revision": "f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a", "filename": "tokenizer.json"},
+    "config.json": {"kind": "huggingface", "repo_id": "moonshine-ai/moonshine-streaming-tiny", "revision": "f8e9dfd8c562c257c151a907b7b7f2fe8ff8511a", "filename": "config.json"}
+  },
+  "outputs": {"rotary.safetensors": {"purpose": "rotary", "format": "safetensors"}}
+}

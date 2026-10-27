@@ -1,104 +1,83 @@
-"""ASR setting vocabulary, recognition definitions and honest raw log views."""
-from __future__ import annotations
-
-import json
+"""ASR field semantics and recognition definitions, driven by serving data."""
 from collections.abc import Mapping
+import json
 from pathlib import Path
+from types import MappingProxyType
 
-from ...hem_common import HemError, InvalidInput
-from ..recipe_types import (
-    Configurable, Fixed, LogView, PipelineDescriptor, PreparedModel,
-    ProtocolDescriptor, RecognitionPrograms, Unsupported, freeze_json, json_document,
-)
+from ...hem_common import InvalidInput
 
-
-PROTOCOL = ProtocolDescriptor('transcription', 'recognition', '/v1/audio/transcriptions',
-                              'multipart', ('audio',), ('text',))
-_TYPES = {'pending_requests': 'integer', 'options': 'object'}
+NATIVE_CONTRACT = 'recognition-v1'
+PROTOCOL = MappingProxyType({'operation': 'transcription', 'native_kind': 'recognition',
+            'endpoint': '/v1/audio/transcriptions', 'request_encoding': 'multipart',
+            'input_modalities': ('audio',), 'output_modalities': ('text',)})
 
 
-def _descriptor(descriptor):
-    if (not isinstance(descriptor, PipelineDescriptor) or descriptor.modality != 'asr'
-            or descriptor.protocol != PROTOCOL
-            or set(descriptor.parameters) != set(_TYPES)
-            or not isinstance(descriptor.programs, RecognitionPrograms)):
-        raise HemError('Selected pipeline does not provide the ASR recognition contract')
-    for name, parameter in descriptor.parameters.items():
-        if (not isinstance(parameter, (Configurable, Fixed, Unsupported))
-                or parameter.type != _TYPES[name]):
-            raise HemError(f'Invalid ASR parameter contract: {name}')
-    return descriptor
+def validate_contract(serving):
+    if not isinstance(serving, Mapping) or set(serving) != {'pending_requests', 'defaults'}:
+        raise InvalidInput('ASR serving requires pending_requests bounds and defaults')
+    interval = serving['pending_requests']
+    if (not isinstance(interval, (list, tuple)) or len(interval) != 2
+            or any(type(value) is not int for value in interval)
+            or not 1 <= interval[0] <= interval[1] <= 2**63 - 1):
+        raise InvalidInput('ASR pending_requests requires positive ordered integer bounds')
+    validate_layer(serving, serving['defaults'])
+    _final_rules(serving['defaults'])
 
 
-def describe(binding):
-    """Check the selected binding against the modality-owned vocabulary/protocol."""
-    return _descriptor(binding.describe())
+def defaults(serving):
+    values = dict(serving['defaults'])
+    values['options'] = dict(values['options'])
+    return values
 
 
-def _value(name, value):
-    if name == 'pending_requests':
-        if type(value) is not int:
-            raise InvalidInput('configuration.pending_requests: expected integer')
-        return value
-    if not isinstance(value, Mapping):
-        raise InvalidInput('configuration.options: expected object')
-    try:
-        return freeze_json(value)
-    except ValueError as error:
-        raise InvalidInput('configuration.options: expected finite JSON object') from error
-
-
-def _same(left, right):
-    # JSON spelling also keeps bool/int and integer/float assertions distinct.
-    return json.dumps(json_document(left), sort_keys=True, allow_nan=False) == json.dumps(
-        json_document(right), sort_keys=True, allow_nan=False)
-
-
-def validate(settings, descriptor):
-    """Validate a supplied layer or final settings; ASR has no cross-key rule."""
-    descriptor = _descriptor(descriptor)
-    if not isinstance(settings, Mapping):
-        raise InvalidInput('configuration: expected object')
-    for name, value in settings.items():
-        if name not in _TYPES:
-            raise InvalidInput(f'configuration.{name}: unsupported for modality asr')
-        parameter = descriptor.parameters[name]
-        if isinstance(parameter, Unsupported):
-            raise InvalidInput(f'configuration.{name}: unsupported: {parameter.reason}')
-        value = _value(name, value)
-        if isinstance(parameter, Fixed):
-            if not _same(value, _value(name, parameter.value)):
-                raise InvalidInput(f'configuration.{name}: expected fixed value '
-                                   + json.dumps(json_document(parameter.value), sort_keys=True))
+def validate_layer(serving, values):
+    if not isinstance(values, Mapping):
+        raise InvalidInput('ASR settings must be an object')
+    for key, value in values.items():
+        if key == 'pending_requests':
+            minimum, maximum = serving['pending_requests']
+            if type(value) is not int or not minimum <= value <= maximum:
+                raise InvalidInput(f'pending_requests: expected integer in {minimum}..{maximum}')
+        elif key == 'options':
+            if not isinstance(value, Mapping) or value:
+                raise InvalidInput('options: expected fixed empty object')
         else:
-            limits = parameter.constraints
-            if name == 'pending_requests':
-                if (limits.minimum is not None and value < limits.minimum
-                        or limits.maximum is not None and value > limits.maximum):
-                    raise InvalidInput('configuration.pending_requests: outside supported range')
-            elif limits.allowed_keys is not None and set(value) - set(limits.allowed_keys):
-                raise InvalidInput('configuration.options: unsupported field')
+            raise InvalidInput(f'Unknown ASR setting {key}')
 
 
-def service_definition(settings, prepared, programs):
-    """Construct recognition directly from checked settings/assets/programs."""
-    if not isinstance(settings, Mapping) or set(settings) != set(_TYPES):
-        raise InvalidInput('ASR definition requires effective pending_requests and options')
-    pending = _value('pending_requests', settings['pending_requests'])
-    options = _value('options', settings['options'])
-    if pending <= 0:
-        raise InvalidInput('configuration.pending_requests: expected positive integer')
-    if (not isinstance(prepared, PreparedModel)
-            or not isinstance(prepared.directory, Path) or not prepared.directory.is_absolute()
-            or not isinstance(programs, RecognitionPrograms)):
-        raise InvalidInput('ASR definition requires checked prepared assets and recognition programs')
-    return dict(kind='recognition', prepare=programs.prepare, control=programs.control,
-                sources=list(programs.sources), assets=str(prepared.directory),
-                pending_requests=pending, options=json_document(options))
+def _final_rules(settings):
+    if set(settings) != {'pending_requests', 'options'}:
+        raise InvalidInput('ASR effective settings require pending_requests and options')
 
 
-def interpret(event, descriptor):
-    """Preserve validated raw events; native ASR metric fields are unverified."""
-    _descriptor(descriptor)
-    return LogView(json.dumps(json_document(event), ensure_ascii=True, sort_keys=True,
-                              separators=(',', ':'), allow_nan=False))
+def finalize(serving, settings, sources, ranks):
+    _final_rules(settings)
+
+
+def definition(settings, paths, directory, programs):
+    directory = Path(directory)
+    if not directory.is_absolute():
+        raise InvalidInput('ASR requires an absolute prepared asset directory')
+    return {'kind': 'recognition', **programs, 'sources': list(programs['sources']),
+            'assets': str(directory), 'pending_requests': settings['pending_requests'],
+            'options': dict(settings['options'])}
+
+
+def vocabulary():
+    return {'pending_requests':{'type':'integer'}, 'options':{'type':'object','allowed_keys':[]}}
+
+
+def parameters(serving):
+    minimum, maximum = serving['pending_requests']
+    pending = ({'type': 'integer', 'value': minimum, 'state': 'fixed'}
+               if minimum == maximum else
+               {'type': 'integer', 'default': serving['defaults']['pending_requests'],
+                'constraints': {'minimum': minimum, 'maximum': maximum, 'allowed_keys': None},
+                'active_when': None, 'state': 'configurable'})
+    return {'pending_requests': pending, 'options': {'type': 'object', 'value': {}, 'state': 'fixed'}}
+
+
+def interpret(event):
+    from ..hem_config import json_document
+    return json.dumps(json_document(event), ensure_ascii=True, sort_keys=True,
+                      separators=(',', ':'), allow_nan=False)

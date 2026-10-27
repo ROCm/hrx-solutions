@@ -19,7 +19,7 @@ from binding.python.cli.hem_server_cli import ObservationResult
 SETTINGS = {'rows': 4, 'context_capacity': 8192, 'pool_capacity': 32768,
             'prefill_capacity': 128, 'mtp': False, 'mtp_depth': None}
 MODEL = dict(model='qwen08', id='qwen08', state='ready', completed=True,
-             pipeline='qwen-08b', accessible=True, directory='/models/qwen08',
+             pipeline='demo/chat/executable.json', modality='chat', executable_id='demo-chat', executable='demo/chat/executable.json', accessible=True, directory='/models/qwen08',
              weights='/models/qwen08/model.gguf', tokenizer='/models/qwen08/tokenizer.json',
              check_kind='acquisition-presence',
              artifacts=[dict(id='weights',role='weights',format='gguf',logical_path='model.gguf',path='/models/qwen08/model.gguf',ownership='caller-reference')],
@@ -44,10 +44,13 @@ def fixtures():
     for command in ('show', 'download', 'import', 'validate'):
         result['model', command] = MODEL
     result['model', 'list'] = dict(items=[MODEL])
-    result['model', 'available'] = dict(items=[dict(id='qwen35-08b-q5-k-xl', name='Qwen 0.8B', pipeline='qwen-08b')])
-    info = hem_config.pipeline_info('qwen-08b')
-    result['pipeline', 'show'] = info
-    result['pipeline', 'list'] = dict(items=[info])
+    result['model', 'available'] = dict(items=[dict(id='qwen35-08b-q5-k-xl', name='Qwen 0.8B', pipeline='demo/chat/executable.json', modality='chat', executable_id='demo-chat', executable='demo/chat/executable.json')])
+    info = hem_config.modality_info('chat')
+    result['modality', 'show'] = info
+    result['modality', 'list'] = dict(items=[info])
+    concrete = hem_config.executable_list()[0]
+    result['executable', 'show'] = concrete
+    result['executable', 'list'] = dict(items=[concrete])
     for command in ('status', 'reconcile'):
         result['server', command] = SERVER
     result['server', 'list'] = dict(items=[SERVER])
@@ -57,9 +60,9 @@ def fixtures():
     for command in ('show', 'status'):
         result['instance', command] = INSTANCE
     result['instance', 'list'] = dict(items=[INSTANCE], server='local', endpoint='http://127.0.0.1:8080', server_health='running')
-    result['instance', 'start'] = dict(INSTANCE, state='running', pipeline='qwen-08b')
+    result['instance', 'start'] = dict(INSTANCE, state='running', pipeline='demo/chat/executable.json', modality='chat', executable_id='demo-chat', executable='demo/chat/executable.json')
     result['instance', 'stop'] = dict(instance='chat-small', state='stopped', completed=True)
-    result['instance', 'export'] = dict(instance='chat-small', model='qwen08', pipeline='qwen-08b', output='/exports/register.json', settings=SETTINGS)
+    result['instance', 'export'] = dict(instance='chat-small', model='qwen08', pipeline='demo/chat/executable.json', modality='chat', executable_id='demo-chat', executable='demo/chat/executable.json', output='/exports/register.json', settings=SETTINGS)
     for resource in ('server', 'instance'):
         result[resource, 'logs'] = dict(logs='native log line\n', followed=False)
     result['pi', 'configure'] = dict(state='configured', configured=True, changed=False, completed=True, compatibility=dict(state='compatible'), next_action='loom-control pi configure --check')
@@ -82,7 +85,7 @@ class RendererTest(unittest.TestCase):
 
     def test_all_resource_presentations_and_json_payloads(self):
         cases = fixtures()
-        self.assertEqual(len(cases), 23)
+        self.assertEqual(len(cases), 25)
         for (resource, command), data in cases.items():
             example = hem_help.ACTIONS[resource][command][1].splitlines()[0]
             argv = shlex.split(example)
@@ -118,7 +121,8 @@ class RendererTest(unittest.TestCase):
                 for item in items:
                     self.assertIn(item['name'], output)
                     self.assertIn(item['id'], output)
-                    self.assertIn(item['pipeline'], output)
+                    self.assertIn(item['executable'], output)
+                    self.assertIn(item['modality'], output)
 
     def test_empty_and_unavailable_inventories(self):
         for argv, phrase in ((['model', 'list'], 'No local models'),
@@ -204,7 +208,7 @@ class RendererTest(unittest.TestCase):
         document = '/external model directory/deployment document with spaces.json'
         cases = [
             (['model', 'show', 'qwen08'], dict(MODEL, artifacts=[dict(id='part', role='weights-shard', path=path)]), [path]),
-            (['model', 'import', 'qwen08', '--gguf', 'w.gguf', '--tokenizer', 't.json'],
+            (['model', 'import', 'qwen08', '--recipe', 'example-recipe', '--gguf', 'w.gguf', '--tokenizer', 't.json'],
              dict(MODEL, assets=[dict(ownership='reference', source_path=path)]), [path]),
             (['instance', 'show', 'chat'], dict(INSTANCE, document=document, dependencies=[path]), [document, path]),
             (['instance', 'export', 'qwen08', '--output', 'r.json'],

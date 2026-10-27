@@ -7,7 +7,7 @@ import time
 
 from . import hem_arguments as arguments
 from .. import hem_display
-from ..models import hem_config, hem_models, recipes
+from ..models import hem_config, hem_models, pipelines, modalities
 from ..hem_common import Deadline, HemError, InvalidInput, result
 from ..control.hem_http import NativeClient, registration
 from ..control.hem_instances import InstanceManager
@@ -24,7 +24,7 @@ def configure(parser):
         if command in ("start", "export"):
             child.add_argument("model", type=arguments.name)
             arguments.serving(child)
-            child.add_argument("--pipeline", type=arguments.name)
+            arguments.selection_assertions(child)
         elif command != "list":
             child.add_argument("instance", type=arguments.name)
         if command != "export":
@@ -175,14 +175,23 @@ def _logs(manager, server, args):
 
 def run(args, deadline):
     budget = deadline or Deadline.after()
+    if args.command in ('start', 'export'):
+        if args.executable is not None:
+            selected, catalog, _identity = pipelines.load(args.executable)
+            if args.modality not in (None, selected['modality']):
+                raise InvalidInput('--modality differs from the selected executable modality')
+            pipelines.programs(selected, catalog, budget)
+        elif args.modality is not None:
+            modalities.get(args.modality)
     registry = Registry(deadline=budget)
     if args.command == 'export':
         # No server selection, launch, reservation or export history. Validation
-        # and atomic output are owned by the shared configuration adapter.
+        # qualification persists at this lock boundary; pure resolution/export
+        # consumes its already inspected evidence.
         with registry.lock('model', args.model, deadline=budget):
-            files = hem_models.model_files(registry, args.model, pipeline=args.pipeline)
+            record, paths, dependencies, evidence = hem_models.qualify(registry, args.model, executable=args.executable, modality=args.modality)
             hem_display.emit('Selected recipe/artifact checks; native loading remains unprobed')
-            answer = hem_config.export_deployment(recipes.load(files.recipe_id), files, args.output, args.name or args.model,
+            answer = hem_config.export_deployment(record, paths, dependencies, evidence, args.output, args.name or args.model,
                         overrides=_overrides(args), config_path=args.config, deadline=budget)
         hem_display.emit('# Registration example: replace SERVER:PORT with your compatible server endpoint.')
         hem_display.emit(hem_display.http('POST', 'http://SERVER:PORT/v1/models/register',
@@ -193,7 +202,7 @@ def run(args, deadline):
     if args.command == 'start':
         hem_display.emit('Selected recipe/artifact checks and bookkeeping; native loading is explicit')
         return InstanceManager(registry, processes=manager).start(server, args.model, budget,
-                    name=args.name, overrides=_overrides(args), config_path=args.config, pipeline=args.pipeline)
+                    name=args.name, overrides=_overrides(args), config_path=args.config, executable=args.executable, modality=args.modality)
     if args.command == 'stop':
         return InstanceManager(registry, processes=manager).stop(server, args.instance, budget,
                                                                abort=args.abort, no_wait=args.no_wait)

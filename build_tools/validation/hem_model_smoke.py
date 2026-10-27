@@ -25,6 +25,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from build_tools.ci_tools.local_ci_runtime import validate_stage
+from build_tools.validation import recipe_inventory
 
 
 class Cancelled(BaseException):
@@ -268,9 +269,15 @@ class Gate:
         assert self.command(namespace, 'instance', 'list', '--server', name)['items'] == []
         return record
 
-    def import_model(self, namespace, name, path, filename, pipeline):
+    def qualification(self, label):
+        """Named real-regression fixtures are test DATA, never product dispatch."""
+        release = recipe_inventory.load_release()
+        identifier = release['qualification'][label]
+        return next(recipe for recipe in release['recipes'].values() if recipe['id'] == identifier)
+
+    def import_model(self, namespace, name, path, filename, recipe_id):
         assert (path / filename).is_file() and (path / 'tokenizer.json').is_file()
-        answer = self.command(namespace, 'model', 'import', name, '--gguf', str(path / filename), '--tokenizer', str(path / 'tokenizer.json'), '--alias', '--pipeline', pipeline)
+        answer = self.command(namespace, 'model', 'import', name, '--gguf', str(path / filename), '--tokenizer', str(path / 'tokenizer.json'), '--alias', '--recipe', recipe_id)
         assert answer['completed'] and answer['validation']['valid']
         directory = Path(answer['directory'])
         assert directory == self.state_path(namespace) / 'models' / name
@@ -292,9 +299,9 @@ class Gate:
         assert all(asset['ownership'] == 'reference' for asset in answer['assets'])
         return answer
 
-    def start_instance(self, namespace, model, pipeline):
+    def start_instance(self, namespace, model, executable):
         name = self.servers[namespace][0]
-        answer = self.command(namespace, 'instance', 'start', model, '--server', name, '--pipeline', pipeline)
+        answer = self.command(namespace, 'instance', 'start', model, '--server', name, '--executable', executable)
         assert answer['completed'] and answer['accepted']
         status = self.command(namespace, 'instance', 'status', model, '--server', name)
         loom = status['native']['loom']
@@ -458,14 +465,15 @@ print(json.dumps(dict(record=record, exited=(not process or
     def run_ci08(self):
         """Required backend profile; full two-model qualification remains explicit."""
         self.start_server('a', 'server-a')
+        small = self.qualification('small_chat')
         if self.args.acquire08:
-            answer = self.command('a', 'model', 'download', 'qwen35-08b-q5-k-xl',
-                                  '--id', 'small-a', '--pipeline', 'qwen-08b', command_timeout=600)
+            answer = self.command('a', 'model', 'download', small['id'],
+                                  '--id', 'small-a', '--executable', small['executable'], command_timeout=600)
             assert answer['completed'] and answer['validation']['valid'], answer
         else:
             self.import_model('a', 'small-a', self.args.model08,
-                              'Qwen3.5-0.8B-UD-Q5_K_XL.gguf', 'qwen-08b')
-        self.start_instance('a', 'small-a', 'qwen-08b')
+                              small['files']['weights']['source']['filename'], small['id'])
+        self.start_instance('a', 'small-a', small['executable'])
         self.query('a', 'small-a')
         self.command('a', 'instance', 'stop', 'small-a', '--server', 'server-a')
         assert self.command('a', 'instance', 'list', '--server', 'server-a')['items'] == []
@@ -536,17 +544,18 @@ print(json.dumps(dict(record=record, exited=(not process or
             if getattr(self.args, 'profile', 'full') == 'ci08':
                 self.run_ci08()
                 return
+            small, large = self.qualification('small_chat'), self.qualification('large_chat')
             for namespace in ('a', 'b'):
                 self.start_server(namespace, 'server-' + namespace)
                 self.import_model(namespace, 'small-' + namespace, self.args.model08,
-                                  'Qwen3.5-0.8B-UD-Q5_K_XL.gguf', 'qwen-08b')
-                self.start_instance(namespace, 'small-' + namespace, 'qwen-08b')
+                                  small['files']['weights']['source']['filename'], small['id'])
+                self.start_instance(namespace, 'small-' + namespace, small['executable'])
                 self.query(namespace, 'small-' + namespace)
             # A third native server shares A's registry but keeps an independent native inventory.
             self.states['c'] = self.states['a']
             self.namespace_roots['c'] = 'a'
             self.start_server('c', 'server-sibling')
-            self.start_instance('c', 'small-a', 'qwen-08b')
+            self.start_instance('c', 'small-a', small['executable'])
             self.query('c', 'small-a')
             self.shutdown('c')
             self.query('a', 'small-a')
@@ -564,11 +573,11 @@ print(json.dumps(dict(record=record, exited=(not process or
             self.results['abort_stream_bytes'] = abort_path.stat().st_size
             self.start_server('a', 'server-large')
             self.import_model('a', 'large', self.args.model27,
-                              'Qwen3.8-27B-UD-Q5_K_XL.gguf', 'qwen')
-            self.start_instance('a', 'large', 'qwen')
+                              large['files']['weights']['source']['filename'], large['id'])
+            self.start_instance('a', 'large', large['executable'])
             self.query('a', 'large')
             self.command('a', 'instance', 'stop', 'large', '--server', 'server-large')
-            self.start_instance('a', 'large', 'qwen')
+            self.start_instance('a', 'large', large['executable'])
             graceful_stream, graceful_path = self.long_query('a', 'large')
             pending = self.command('a', 'server', 'shutdown', 'server-large', '--timeout', '0.05', expected=3)
             assert pending['accepted'] is True and not pending['completed'], pending

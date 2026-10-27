@@ -1,270 +1,206 @@
-"""CHAT policy and concrete Qwen contracts without checkpoints or services."""
+"""Actual CHAT declarations and model-independent source/compiled admission."""
+from copy import deepcopy
 from contextlib import ExitStack
-from dataclasses import replace
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 
-from binding.python.hem_common import HemError, InvalidInput
-from binding.python.models import modalities, pipelines, pipelines_qwen, recipes
+from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput
+from binding.python.control.hem_state import Registry
+from binding.python.models import hem_models, model_download, modalities, pipelines, recipes
 from binding.python.models.modalities import chat
-from binding.python.models.recipe_types import (
-    AcquisitionPlan, Artifact, Fixed, GeneratedSource, HFSource, PreparedArtifact,
-    PreparedModel, TextPrograms, Unsupported,
-)
-
-ROOT = Path(__file__).resolve().parents[1]
-QWEN08 = ROOT / 'loom-pipeline/llm/qwen/qwen_08b/recipes/qwen35-08b-q5-k-xl.json'
-QWEN27 = ROOT / 'loom-pipeline/llm/qwen/qwen_27b/recipes/qwen38-27b-q5-k-xl.json'
+from tests.recipe_config_fixture import SOURCE
 
 
-def effective(recipe):
-    # Actual endorsed recipes specify the full active settings; merge orchestration
-    # is intentionally owned/tested by the shared caller lane, not duplicated here.
-    return dict(recipe.configuration)
+class ChatFunctionsTest(unittest.TestCase):
+    def serving(self, identifier='qwen38-27b-q5-k-xl'):
+        recipe, _ = recipes.load(identifier)
+        executable, catalog, _ = pipelines.load(recipe['executable'])
+        return recipe, executable, catalog
 
+    def test_actual_configurations_and_programs_drive_unchanged_native_fields(self):
+        paths={'weights':Path('/hf/custom.gguf'),'tokenizer':Path('/hf/custom.json')}
+        for identifier, depth in (('qwen35-08b-q5-k-xl',0),('qwen38-27b-q5-k-xl',3)):
+            recipe, executable, catalog=self.serving(identifier)
+            serving=executable['serving'];settings=chat.defaults(serving)
+            self.assertEqual(settings,recipe['configuration'])
+            chat.validate_layer(serving,settings);chat.finalize(serving,settings,{}, {})
+            programs=pipelines.programs(executable,catalog,Deadline.after())
+            document=chat.definition(settings,paths,Path('/local'),programs)
+            self.assertEqual(document,{'kind':'text',**programs,'weights':'/hf/custom.gguf',
+                'tokenizer':'/hf/custom.json','rows':4,'context_capacity':8192,'pool_capacity':32768,
+                'prefill_capacity':128,'draft_depth':depth,'options':{}})
+            for invalid in ({'tokenizer':paths['tokenizer']},{**paths,'weights':Path('relative.gguf')}):
+                with self.assertRaises(InvalidInput):chat.definition(settings,invalid,Path('/local'),programs)
 
-class ChatPolicyTest(unittest.TestCase):
-    def setUp(self):
-        self.small = pipelines.get('qwen-08b')
-        self.large = pipelines.get('qwen')
-        self.recipe = recipes.load('qwen35-08b-q5-k-xl')
-        self.large_recipe = recipes.load('qwen38-27b-q5-k-xl')
+    def test_every_current_bound_type_unknown_and_unsupported_field_is_checked(self):
+        for identifier in ('qwen35-08b-q5-k-xl','qwen38-27b-q5-k-xl'):
+            _,executable,_=self.serving(identifier);serving=executable['serving']
+            for values in ({'rows':True},{'rows':1.0},{'rows':0},{'context_capacity':None},
+                           {'mtp':0},{'unknown':1},None,[],{'mtp_depth':True}):
+                with self.subTest(identifier=identifier,values=values),self.assertRaises(InvalidInput):
+                    chat.validate_layer(serving,values)
+            for field,interval in serving['bounds'].items():
+                for value in (interval[0]-1,interval[1]+1):
+                    with self.assertRaises(InvalidInput):chat.validate_layer(serving,{field:value})
+        _,executable,_=self.serving('qwen35-08b-q5-k-xl')
+        for value in ({'mtp':True},{'mtp_depth':1}):
+            with self.assertRaises(InvalidInput):chat.validate_layer(executable['serving'],value)
 
-    def test_real_recipes_same_vocabulary_and_selected_states(self):
-        a, b = self.small.describe(), self.large.describe()
-        self.assertEqual(tuple(a.parameters), tuple(b.parameters))
-        self.assertEqual(set(a.parameters), {'rows', 'context_capacity', 'pool_capacity',
-                                              'prefill_capacity', 'mtp', 'mtp_depth'})
-        self.assertIsInstance(a.parameters['mtp'], Fixed)
-        self.assertIs(a.parameters['mtp'].value, False)
-        self.assertIsInstance(a.parameters['mtp_depth'], Unsupported)
-        self.assertEqual(b.parameters['mtp'].state, 'configurable')
-        self.assertEqual(b.parameters['mtp_depth'].active_when, {'parameter': 'mtp', 'equals': True})
-        self.assertEqual(a.protocol, chat.PROTOCOL)
-        self.assertEqual(a.protocol.native_kind, 'text')
-        for binding, recipe in ((self.small, self.recipe), (self.large, self.large_recipe)):
-            chat.validate(effective(recipe), binding.describe())
-            self.assertIsNone(binding.describe().preparation)
-            self.assertEqual(binding.describe().telemetry.metrics, ())
+    def test_final_completeness_cross_rules_and_explicit_index_path(self):
+        _,executable,_=self.serving();serving=executable['serving'];defaults=chat.defaults(serving)
+        for changes in ({'prefill_capacity':3},{'context_capacity':64}):
+            values={**defaults,**changes}
+            with self.assertRaises(InvalidInput):chat.finalize(serving,values,{}, {})
+        for key in defaults:
+            values=dict(defaults);values.pop(key)
+            with self.subTest(key=key),self.assertRaises(InvalidInput):chat.finalize(serving,values,{}, {})
+        chat.validate_layer(serving,{'prefill_capacity':2,'mtp_depth':3})
+        values=dict(defaults,mtp=False)
+        with self.assertRaises(InvalidInput):chat.finalize(serving,values,{'mtp':'file'},
+                                                               {'mtp':2,'mtp_depth':2})
+        values.pop('mtp_depth');chat.finalize(serving,values,{}, {})
+        document=chat.definition(values,{'weights':Path('/models/model.safetensors.index.json'),
+            'tokenizer':Path('/models/tokenizer.json')},Path('/models'),
+            {'prepare':'p','control':'c','sources':['first','next']})
+        self.assertEqual(document['weights'],'/models/model.safetensors.index.json')
+        self.assertEqual(document['sources'],['first','next'])
+        self.assertEqual(document['draft_depth'],0)
 
-    def test_modality_name_is_policy_not_recipe_or_local_identity(self):
-        changed = replace(self.recipe, id='another-name', name='Different display')
-        self.small.validate_artifacts(changed.artifacts)
-        chat.validate(effective(changed), self.small.describe())
-        self.assertIs(modalities.get(changed.modality), chat)
-        for value in ('qwen', 'moonshine', 'transcription', None):
-            with self.assertRaises(InvalidInput):
-                modalities.get(value)
-
-    def test_exact_types_ranges_fixed_unsupported_and_missing(self):
-        settings = effective(self.recipe)
-        for key, value in (('rows', True), ('rows', 1.0), ('rows', 0), ('rows', 17),
-                           ('context_capacity', None), ('mtp', True), ('mtp_depth', 1),
-                           ('unknown', 1)):
-            with self.subTest(key=key, value=value), self.assertRaises(InvalidInput):
-                chat.validate({**settings, key: value}, self.small.describe())
-        for key in settings:
-            bad = dict(settings)
-            del bad[key]
-            with self.subTest(missing=key), self.assertRaises(InvalidInput):
-                chat.validate(bad, self.small.describe())
-
-    def test_final_capacity_and_mtp_cross_rules(self):
-        large = effective(self.large_recipe)
-        for values in ({'context_capacity': 64, 'prefill_capacity': 128},
-                       {'prefill_capacity': 3}, {'mtp': False}, {'mtp_depth': 4}):
-            with self.subTest(values=values), self.assertRaises(InvalidInput):
-                chat.validate({**large, **values}, self.large.describe())
-        disabled = {key: value for key, value in large.items() if key != 'mtp_depth'}
-        disabled['mtp'] = False
-        chat.validate(disabled, self.large.describe())
-        with self.assertRaisesRegex(InvalidInput, 'Missing CHAT setting mtp_depth'):
-            chat.validate({key: value for key, value in large.items() if key != 'mtp_depth'}, self.large.describe())
-        chat.validate({**effective(self.recipe), 'context_capacity': 64, 'prefill_capacity': 32},
-                      self.small.describe())
-
-    def test_native_definition_uses_explicit_prepared_paths_and_mtp(self):
-        for binding, recipe in ((self.small, self.recipe), (self.large, self.large_recipe)):
-            prepared = PreparedModel('local-name', recipe.id, recipe.identity, binding.id, Path('/private/model'),
-                (PreparedArtifact('weights', 'weights', 'gguf', 'custom.gguf', Path('/hf/cache/custom.gguf'), 'hf-reference'),
-                 PreparedArtifact('tokenizer', 'tokenizer', 'json', 'tokenizer.json', Path('/hf/cache/custom.json'), 'hf-reference')))
-            settings = effective(recipe)
-            chat.validate(settings, binding.describe())
-            result = chat.service_definition(settings, prepared, TextPrograms('p.loom', 'c.loom', ('first.loom', 'next.loom')))
-            self.assertEqual(result, {'kind': 'text', 'prepare': 'p.loom', 'control': 'c.loom',
-                'sources': ['first.loom', 'next.loom'], 'weights': '/hf/cache/custom.gguf',
-                'tokenizer': '/hf/cache/custom.json', 'rows': 4, 'context_capacity': 8192,
-                'pool_capacity': 32768, 'prefill_capacity': 128,
-                'draft_depth': 3 if binding.id == 'qwen' else 0, 'options': {}})
-            self.assertEqual(prepared.local_id, 'local-name')
-
-    def test_policy_and_raw_fallback_have_no_io(self):
-        descriptor = self.small.describe()
-        prepared = PreparedModel('local', 'recipe', 'identity', 'qwen-08b', Path('/model'),
-            (PreparedArtifact('w', 'weights', 'gguf', 'w.gguf', Path('/model/w.gguf'), 'hf-reference'),
-             PreparedArtifact('t', 'tokenizer', 'json', 't.json', Path('/model/t.json'), 'hf-reference')))
+    def test_defaults_support_and_logs_are_pure_unshared_values(self):
+        _,executable,_=self.serving();serving=executable['serving']
+        values=chat.defaults(serving);chat.defaults(serving)['rows']=999
+        self.assertEqual(chat.defaults(serving),values)
+        chat.parameters(serving)['rows']['constraints']['maximum']=999
+        self.assertEqual(chat.parameters(serving)['rows']['constraints']['maximum'],16)
+        chat.interpret({})
         with ExitStack() as stack:
-            for target in ('builtins.open', 'pathlib.Path.open', 'subprocess.run', 'socket.create_connection'):
-                stack.enter_context(patch(target, side_effect=AssertionError('modality performed I/O')))
-            chat.describe(self.small)
-            chat.validate(effective(self.recipe), descriptor)
-            chat.service_definition(effective(self.recipe), prepared, descriptor.programs)
-            view = chat.interpret({'event': 'unknown', 'value': 'line\nbreak'}, descriptor)
-        self.assertEqual(json.loads(view.text), {'event': 'unknown', 'value': 'line\nbreak'})
-        self.assertEqual(view.metrics, ())
-        self.assertFalse(view.recognized)
+            for target in ('builtins.open','pathlib.Path.open','subprocess.run','socket.create_connection'):
+                stack.enter_context(patch(target,side_effect=AssertionError('policy I/O')))
+            chat.defaults(serving);chat.parameters(serving);chat.validate_layer(serving,values)
+            chat.finalize(serving,values,{}, {})
+            event=MappingProxyType({'unknown':(MappingProxyType({'text':'hi'}),)})
+            self.assertEqual(json.loads(chat.interpret(event)),{'unknown':[{'text':'hi'}]})
+        self.assertEqual(chat.PROTOCOL['endpoint'],'/v1/chat/completions')
 
-    def test_chat_selection_does_not_import_asr_or_shape_checker(self):
-        code = ('import sys; from binding.python.models import pipelines, modalities; '
-                'modalities.get("chat"); pipelines.get("qwen-08b").describe(); '
-                'assert "binding.python.models.modalities.asr" not in sys.modules; '
-                'assert "binding.python.models.qwen_validation" not in sys.modules')
-        subprocess.run([sys.executable, '-c', code], cwd=ROOT, check=True, capture_output=True, text=True)
+    def test_modality_import_does_not_select_or_import_any_model(self):
+        self.assertIs(modalities.get('chat'),chat)
+        for unknown in ('qwen','moonshine','transcription',None):
+            with self.assertRaises(InvalidInput):modalities.get(unknown)
+        code=('import sys; from binding.python.models import modalities; '
+              'modalities.get("chat"); '
+              'assert not any(n.endswith(("pipelines_qwen","pipelines_moonshine","modalities.asr")) for n in sys.modules)')
+        subprocess.run([sys.executable,'-c',code],check=True,capture_output=True,text=True)
+
+    def test_actual_cached_acquisition_and_both_native_definitions_without_network_or_helper(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);registry=Registry(root/'state')
+            with patch.dict(os.environ,{'HF_HUB_CACHE':str(root/'hf')}), \
+                 patch.object(model_download,'_run_hf',side_effect=AssertionError('network')), \
+                 patch('binding.python.models.preparation.moonshine.preflight',side_effect=AssertionError('helper')), \
+                 patch('binding.python.models.preparation.moonshine.prepare',side_effect=AssertionError('helper')):
+                for identifier,depth in (('qwen35-08b-q5-k-xl',0),('qwen38-27b-q5-k-xl',3)):
+                    recipe,executable,catalog=self.serving(identifier);cached={}
+                    for purpose,item in recipe['files'].items():
+                        path=model_download._cache_path(item['source']);path.parent.mkdir(parents=True,exist_ok=True)
+                        path.write_bytes(b'opaque presence fixture; no inference proof');cached[purpose]=path
+                    stats={k:p.stat() for k,p in cached.items()}
+                    self.assertEqual(hem_models.download(registry,identifier,model_id=identifier,offline=True)['state'],'ready')
+                    record=registry.get_model(identifier);paths,dependencies,evidence=hem_models.inspect_record(record)
+                    self.assertEqual(set(paths.values()),set(dependencies));self.assertEqual(evidence,record['validation']['evidence'])
+                    for purpose,path in paths.items():
+                        self.assertEqual(os.readlink(path),str(cached[purpose]));self.assertEqual(cached[purpose].stat(),stats[purpose])
+                    programs=pipelines.programs(executable,catalog,Deadline.after())
+                    document=chat.definition(recipe['configuration'],paths,Path(record['directory']),programs)
+                    self.assertEqual(document['draft_depth'],depth)
+                    self.assertEqual(document['weights'],str(paths['weights']))
+                    self.assertEqual(document['tokenizer'],str(paths['tokenizer']))
+
+    def test_declared_asset_policy_preserves_custom_paths_and_rejects_unbound_generation(self):
+        recipe,executable,_=self.serving('qwen35-08b-q5-k-xl');files=deepcopy(recipe['files'])
+        files['weights']['path']='custom/nested.gguf';pipelines.validate_files(executable,files)
+        for purpose in files:
+            changed=deepcopy(files);changed[purpose]['source']={'kind':'generated'}
+            with self.assertRaises(HemError):pipelines.validate_files(executable,changed)
+        for changed in ({},{**files,'extra':files['weights']},
+                        {**files,'tokenizer':dict(files['tokenizer'],path='tokenizer.bin')}):
+            with self.assertRaises(HemError):pipelines.validate_files(executable,changed)
 
 
-class QwenProgramsTest(unittest.TestCase):
+class ProgramAdmissionTest(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name) / 'loom-pipeline'
-        self.catalog = self.root / 'llm/qwen/qwen_08b'
-        self.catalog.mkdir(parents=True)
-        (self.root / 'llm/LICENSE-APACHE-2.0').write_text('test license')
-        self.roots = patch.object(pipelines, 'catalog_roots', return_value=(self.root,))
-        self.roots.start()
-        self.addCleanup(self.roots.stop)
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        self.root=Path(temporary.name)/'loom-pipeline';shutil.copytree(SOURCE,self.root)
+        patcher=patch.object(pipelines,'catalog_roots',return_value=(self.root,));patcher.start();self.addCleanup(patcher.stop)
+        self.reference='llm/qwen/qwen_08b/executable.json'
 
-    def source(self):
-        entries = ('config.loom', 'prepare.loom', 'control.loom', 'weights.loom', 'provider.loom')
-        for name in entries:
-            (self.catalog / name).write_text('fixture program')
-        (self.catalog / 'sources.txt').write_text('\n'.join(entries) + '\n')
-        return entries
+    def selected(self):
+        return pipelines.load(self.reference)
 
-    def bytecode(self):
-        content = b'LOOMtest bytecode'
-        (self.catalog / 'pipeline.loombc').write_bytes(content)
-        descriptor = {'format': 1, 'variant': 'qwen35-08b-ud-q5-k-xl-v1',
-                      'module': 'pipeline.loombc', 'sha256': hashlib.sha256(content).hexdigest()}
-        (self.catalog / 'pipeline.json').write_text(json.dumps(descriptor))
-        return descriptor
+    def compiled(self,reference=None):
+        source,catalog,identity=pipelines.load(reference or self.reference)
+        value=deepcopy(source);value['id']='compiled-fixture-'+value['modality']
+        relative='compiled/'+value['id'];root=self.root/relative;root.mkdir(parents=True)
+        names=['pipeline.loombc']+(['weights.loombc'] if value['programs']['support'] else [])
+        for name in names:(root/name).write_bytes(b'LOOM synthetic integrity fixture '+name.encode())
+        value['programs']=dict(root=relative,encoding='bytecode',prepare=names[0],control=names[0],
+            sources=[names[0]],support=names[1:],files={n:hashlib.sha256((root/n).read_bytes()).hexdigest() for n in names})
+        value['provenance']=dict(source_declaration_sha256=identity,source_files=source['programs']['files'])
+        self.reference=relative+'/executable.json';(root/'executable.json').write_text(json.dumps(value))
+        return root,value
 
-    def test_source_roles_and_package_relative_shipping_manifest(self):
-        self.source()
-        descriptor = pipelines_qwen.get('qwen-08b').describe()
-        self.assertEqual(descriptor.programs, TextPrograms('prepare.loom', 'control.loom', ('config.loom', 'provider.loom')))
-        self.assertEqual(descriptor.bundle.catalog_relative_path, 'llm/qwen/qwen_08b')
-        paths = {entry.path for entry in descriptor.bundle.files}
-        self.assertIn('loom-pipeline/llm/qwen/qwen_08b/pipeline.loombc', paths)
-        self.assertIn('loom-pipeline/llm/LICENSE-APACHE-2.0', paths)
-        self.assertNotIn('compatibility.json', ' '.join(paths))
-        self.assertFalse(any(path.endswith('.loom') for path in paths))
+    def test_real_source_missing_changed_duplicate_escape_and_expired_reads(self):
+        value,catalog,_=self.selected();name=next(iter(value['programs']['files']));path=catalog/name;before=path.read_bytes()
+        pipelines.programs(value,catalog,Deadline.after())
+        for content in (None,b'changed'):
+            if content is None:path.unlink()
+            else:path.write_bytes(content)
+            with self.assertRaises(HemError):pipelines.programs(value,catalog,Deadline.after())
+            path.write_bytes(before)
+        for role,invalid in (('prepare','../outside.loom'),('sources',[value['programs']['sources'][0]]*2)):
+            changed=deepcopy(value);changed['programs'][role]=invalid
+            with self.assertRaises(HemError):pipelines.parse(json.dumps(changed).encode())
+        with patch.object(Path,'open',side_effect=AssertionError('expired I/O')),self.assertRaises(DeadlineExpired):
+            pipelines.programs(value,catalog,Deadline(0,clock=lambda:1))
 
-    def test_bytecode_roles_and_hash_variant_format_rejection(self):
-        metadata = self.bytecode()
-        self.assertEqual(pipelines_qwen.get('qwen-08b').programs,
-                         TextPrograms('pipeline.loombc', 'pipeline.loombc', ('pipeline.loombc',)))
-        for field, value in (('format', True), ('variant', 'other'), ('module', '../outside.loombc'), ('sha256', '0' * 64)):
-            with self.subTest(field=field):
-                (self.catalog / 'pipeline.json').write_text(json.dumps({**metadata, field: value}))
-                with self.assertRaises(HemError):
-                    pipelines_qwen.get('qwen-08b')
-        (self.catalog / 'pipeline.json').write_text(json.dumps(metadata))
-        (self.catalog / 'pipeline.loombc').write_bytes(b'not bytecode')
-        with self.assertRaises(HemError):
-            pipelines_qwen.get('qwen-08b')
+    def test_compiled_singleton_and_required_support_hash_inventory(self):
+        root,value=self.compiled('recognition/moonshine/streaming_tiny/executable.json')
+        selected,catalog,_=self.selected();programs=pipelines.programs(selected,catalog,Deadline.after())
+        self.assertEqual(programs['sources'],['pipeline.loombc'])
+        (root/'weights.loombc').write_bytes(b'LOOM changed')
+        with self.assertRaises(HemError):pipelines.programs(selected,catalog,Deadline.after())
 
-    def test_singleton_rejects_duplicate_descriptor_and_extra_program(self):
-        metadata = self.bytecode()
-        text = json.dumps(metadata)
-        (self.catalog / 'pipeline.json').write_text(text[:-1] + ', "format": 1}')
-        with self.assertRaisesRegex(HemError, 'Duplicate'):
-            pipelines_qwen.get('qwen-08b')
-        (self.catalog / 'pipeline.json').write_text(text)
-        (self.catalog / 'extra.loom').write_text('undeclared')
-        with self.assertRaisesRegex(HemError, 'unexpected executable'):
-            pipelines_qwen.get('qwen-08b')
+    def test_compiled_extra_executable_hash_and_encoding_provenance_are_required(self):
+        root,value=self.compiled();selected,catalog,_=self.selected()
+        (root/'extra.loom').write_text('undeclared')
+        with self.assertRaises(HemError):pipelines.programs(selected,catalog,Deadline.after())
+        (root/'extra.loom').unlink();(root/'pipeline.loombc').write_bytes(b'wrong encoding')
+        selected['programs']['files']['pipeline.loombc']=hashlib.sha256((root/'pipeline.loombc').read_bytes()).hexdigest()
+        with self.assertRaises(HemError):pipelines.programs(selected,catalog,Deadline.after())
+        value['provenance']=None
+        with self.assertRaises(HemError):pipelines.parse(json.dumps(value).encode())
 
-    def test_compiled_variant_identities_do_not_swap(self):
-        metadata = self.bytecode()
-        other = self.catalog.parent / 'qwen_27b'
-        other.mkdir()
-        (other / 'pipeline.loombc').write_bytes((self.catalog / 'pipeline.loombc').read_bytes())
-        (other / 'pipeline.json').write_text(json.dumps({**metadata, 'variant': 'qwen38-27b-ud-q5-k-xl-v1'}))
-        self.assertTrue(pipelines_qwen.get('qwen').describe().parameters['mtp'].default)
-        (other / 'pipeline.json').write_text(json.dumps(metadata))
-        with self.assertRaisesRegex(HemError, 'variant'):
-            pipelines_qwen.get('qwen')
+    def test_closed_declaration_rejects_obsolete_authorities_and_wrong_asset_types(self):
+        value,_,_=self.selected()
+        for field in ('download_recipe','pending_requests','options','definition'):
+            changed=deepcopy(value);changed[field]={}
+            with self.assertRaises(HemError):pipelines.parse(json.dumps(changed).encode())
+        changed=deepcopy(value);changed['assets']['weights']['path']=True
+        with self.assertRaises(HemError):pipelines.parse(json.dumps(changed).encode())
+        (self.root/self.reference).unlink()
+        with self.assertRaises(HemError):self.selected()  # No sources.txt/catalog.json fallback.
 
-    def test_source_manifest_requires_roles_unique_identity_and_containment(self):
-        entries = self.source()
-        for values in (entries[:-2] + ('provider.loom',), entries + ('prepare.loom',),
-                       entries + ('../qwen_08b/prepare.loom',), entries + ('/absolute.loom',)):
-            with self.subTest(values=values):
-                (self.catalog / 'sources.txt').write_text('\n'.join(values))
-                with self.assertRaises(HemError):
-                    pipelines_qwen.get('qwen-08b')
-        (self.catalog / 'sources.txt').write_text('\n'.join(entries))
-        outside = self.root.parent / 'outside.loom'
-        outside.write_text('outside')
-        (self.catalog / 'provider.loom').unlink()
-        (self.catalog / 'provider.loom').symlink_to(outside)
-        with self.assertRaises(HemError):
-            pipelines_qwen.get('qwen-08b')
-
-    def test_source_internal_shared_symlink_is_allowed(self):
-        self.source()
-        shared = self.catalog.parent / 'shared.loom'
-        shared.write_text('reviewed internal source')
-        (self.catalog / 'control.loom').unlink()
-        (self.catalog / 'control.loom').symlink_to(shared)
-        self.assertEqual(pipelines_qwen.get('qwen-08b').programs.control, 'control.loom')
-
-    def test_unknown_and_missing_selected_catalog_are_domain_errors(self):
-        with self.assertRaises(InvalidInput):
-            pipelines_qwen.get('moonshine-streaming-tiny')
-        with self.assertRaisesRegex(HemError, 'No pipeline catalog'):
-            pipelines_qwen.get('qwen')
-
-
-class QwenArtifactsTest(unittest.TestCase):
-    def setUp(self):
-        self.binding = pipelines.get('qwen-08b')
-        self.recipe = recipes.load('qwen35-08b-q5-k-xl')
-
-    def test_actual_artifacts_and_changed_safe_source_values_are_admitted(self):
-        self.binding.validate_artifacts(self.recipe.artifacts)
-        first, second = self.recipe.artifacts
-        changed = replace(first, id='different-id', path='different.gguf',
-                          source=HFSource('other/repo', 'a' * 40, 'other.gguf'))
-        self.binding.validate_artifacts((changed, second))
-
-    def test_generated_wrong_roles_formats_and_parser_suffixes_rejected(self):
-        first, second = self.recipe.artifacts
-        for entries in ((first,), (first, first), (replace(first, source=GeneratedSource()), second),
-                        (replace(first, format='safetensors'), second),
-                        (replace(first, path='weights.bin'), second), (first, replace(second, path='t.bin'))):
-            with self.subTest(entries=entries), self.assertRaises(InvalidInput):
-                self.binding.validate_artifacts(entries)
-
-    def test_noop_preflight_and_no_generated_preparation(self):
-        plan = AcquisitionPlan(self.recipe.id, 'qwen-08b', self.recipe.artifacts, (), None)
-        deadline = unittest.mock.Mock()
-        self.assertIsNone(self.binding.preflight(plan, deadline))
-        deadline.assert_not_called()
-        self.assertEqual(self.binding.prepare(plan, {}, Path('/must-not-be-created'), deadline), ())
-        self.assertEqual(deadline.mock_calls, [])
-        with self.assertRaises(InvalidInput):
-            self.binding.prepare(replace(plan, pipeline='qwen'), {}, Path('/unused'), deadline)
-        with self.assertRaises(InvalidInput):
-            self.binding.prepare(replace(plan, generated=(self.recipe.artifacts[0],)), {}, Path('/unused'), deadline)
-
-
-if __name__ == '__main__':
-    unittest.main()
+    def test_manifest_and_program_symlinks_cannot_escape_and_errors_stay_domain_errors(self):
+        value,catalog,_=self.selected();name=next(iter(value['programs']['files']));path=catalog/name
+        outside=self.root.parent/'outside.loom';outside.write_bytes(path.read_bytes());path.unlink();path.symlink_to(outside)
+        with self.assertRaises(HemError):pipelines.programs(value,catalog,Deadline.after())
+        for error in (PermissionError('unreadable'),RuntimeError('symlink loop')):
+            with patch.object(Path,'resolve',side_effect=error),self.assertRaises(HemError):self.selected()

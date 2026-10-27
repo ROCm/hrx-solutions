@@ -1,30 +1,55 @@
 """Pure recipe configuration and checked native documents for every modality."""
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
 import re
 import sys
 import tempfile
+from types import MappingProxyType
 from typing import Mapping, Optional
 
 from ..hem_common import Deadline, HemError, InvalidInput
-from . import pipelines, recipes
-from .recipe_types import PreparedModel, Recipe, freeze_json, json_document
+from . import modalities, pipelines, recipes
 
 EXPORT_RESPONSIBILITY = (
     "Export does not reserve dependencies or validate a running server. You must "
-    "preserve all referenced model assets and pipeline programs/policies, and use "
+    "preserve all referenced model assets and executable programs/policies, and use "
     "a compatible server for the entire raw-curl registration lifetime. Package "
     "upgrades or external file changes may invalidate paths; revalidate/regenerate "
     "before use."
 )
 
 
+def freeze_json(value):
+    """Own immutable JSON at the checked boundary; never share caller containers."""
+    if isinstance(value, Mapping):
+        if any(type(key) is not str for key in value):
+            raise ValueError("JSON object keys must be strings")
+        return MappingProxyType({key: freeze_json(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze_json(item) for item in value)
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    raise ValueError("expected finite JSON value")
+
+
+def json_document(value):
+    """Copy the checked JSON into existing public/native output containers."""
+    if isinstance(value, Mapping):
+        return {key: json_document(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [json_document(item) for item in value]
+    return value
+
+
 def load_config(path: Optional[Path]) -> dict:
-    """Read strict JSON; descriptor field admission happens for every layer."""
+    """Read strict JSON; selected modality admission happens for every layer."""
     if path is None:
         return {}
     def pairs(entries):
@@ -47,109 +72,74 @@ def load_config(path: Optional[Path]) -> dict:
         raise InvalidInput(f"Cannot read configuration {path}: {exc}") from exc
 
 
-def _settings(values, source, descriptor):
-    if not isinstance(values, Mapping):
-        raise InvalidInput(f"{source} must be an object of serving settings")
-    try:
-        freeze_json(values)
-    except (ValueError, RecursionError) as error:
-        raise InvalidInput(f"{source}: expected finite JSON settings") from error
-    for key, value in values.items():
-        where = f"{source}.{key}"
-        parameter = descriptor.parameters.get(key)
-        if parameter is None:
-            raise InvalidInput(f"{where}: unknown parameter for modality {descriptor.modality}")
-        if parameter.state == 'unsupported':
-            raise InvalidInput(f"{where}: unsupported for {descriptor.id}: {parameter.reason}")
-        valid_type = (type(value) is int if parameter.type == 'integer' else
-                      type(value) is bool if parameter.type == 'boolean' else
-                      isinstance(value, Mapping) if parameter.type == 'object' else False)
-        if not valid_type:
-            raise InvalidInput(f"{where}: expected {parameter.type}")
-        if parameter.state == 'fixed':
-            if value != parameter.value:
-                raise InvalidInput(f"{where}: expected fixed value {json_document(parameter.value)!r}")
-        elif parameter.state == 'configurable':
-            limits = parameter.constraints
-            if (limits.minimum is not None and value < limits.minimum or
-                    limits.maximum is not None and value > limits.maximum):
-                raise InvalidInput(f"{where}: outside permitted range {limits.minimum}..{limits.maximum}")
-            if limits.allowed_keys is not None and set(value) - set(limits.allowed_keys):
-                raise InvalidInput(f"{where}: unsupported object keys")
-        else:
-            raise HemError(f"Pipeline {descriptor.id}: invalid parameter state {parameter.state!r}")
-    return values
-
-
-def effective_settings(recipe, descriptor, file_settings=None, overrides=None):
-    """Validate fields at each layer, then conditional applicability at the end."""
+def effective_settings(recipe, serving, modality, file_settings=None, overrides=None):
+    """Admit each layer with concrete policy, then validate final winners once."""
     values, sources, ranks = {}, {}, {}
-    for key, parameter in descriptor.parameters.items():
-        if parameter.state in ('configurable', 'fixed'):
-            values[key] = parameter.default if parameter.state == 'configurable' else parameter.value
-            sources[key], ranks[key] = 'default', 0
-    _settings(values, 'default', descriptor)
-    for rank, (label, layer) in enumerate((('recipe', recipe.configuration),
-                                         ('file', {} if file_settings is None else file_settings),
-                                         ('override', {} if overrides is None else overrides)), 1):
-        _settings(layer, label, descriptor)
+    layers = (('default', modality.defaults(serving)), ('recipe', recipe['configuration']),
+              ('file', {} if file_settings is None else file_settings),
+              ('override', {} if overrides is None else overrides))
+    for rank, (label, layer) in enumerate(layers):
+        if not isinstance(layer, Mapping):
+            raise InvalidInput(f'{label}: expected settings object')
+        try:
+            freeze_json(layer)
+            modality.validate_layer(serving, layer)
+        except (ValueError, RecursionError) as error:
+            raise InvalidInput(f'{label}: expected finite JSON settings') from error
         for key, value in layer.items():
             values[key], sources[key], ranks[key] = value, label, rank
-    for key, parameter in descriptor.parameters.items():
-        condition = getattr(parameter, 'active_when', None)
-        if condition is not None and values.get(condition['parameter']) != condition['equals']:
-            controlling = condition['parameter']
-            if key in values and ranks[key] > 0 and ranks[key] >= ranks[controlling]:
-                raise InvalidInput(f"configuration.{key}: explicit value conflicts with inactive {controlling}")
-            values.pop(key, None)
-            sources[key] = {'state': 'inactive', 'by': sources[controlling]}
+    modality.finalize(serving, values, sources, ranks)
     return freeze_json(values), freeze_json(sources)
 
 
-def _document(value):
-    if is_dataclass(value):
-        return {field.name: _document(getattr(value, field.name)) for field in fields(value)}
-    if isinstance(value, Mapping):
-        return {key: _document(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_document(item) for item in value]
-    return value
+def _executable_info(reference, executable, catalog, identity, budget):
+    modality = modalities.get(executable['modality'])
+    programs = pipelines.programs(executable, catalog, budget)
+    if executable['modality'] == 'chat':
+        programs = dict(programs)
+        programs['providers'] = programs.pop('sources')
+    return json_document(freeze_json(dict(
+        executable=reference, executable_id=executable['id'], executable_identity=identity,
+        modality=executable['modality'], native_contract=executable['native_contract'],
+        parameters=modality.parameters(executable['serving']), protocol=modality.PROTOCOL,
+        catalog=str(catalog), programs=programs, assets=executable['assets'],
+        preparation=executable['preparation'], telemetry={'raw_events':'unverified','metrics':[]})))
 
 
-def _catalog(descriptor):
-    relative = Path(descriptor.bundle.catalog_relative_path)
-    if relative.is_absolute() or not relative.parts or any(part in ('.', '..') for part in relative.parts):
-        raise HemError(f"Pipeline {descriptor.id}: invalid catalog path")
-    for root in pipelines.catalog_roots():
-        candidate = root / relative
-        if candidate.is_dir():
-            try:
-                candidate.resolve(strict=True).relative_to(root.resolve(strict=True))
-            except (OSError, ValueError) as error:
-                raise HemError(f"Pipeline {descriptor.id}: catalog escapes its root") from error
-            return candidate.resolve(strict=True)
-    raise HemError(f"No packaged catalog for pipeline {descriptor.id!r}")
+def executable_info(reference, *, deadline=None):
+    budget = deadline or Deadline.after()
+    budget.remaining()
+    executable, catalog, identity = pipelines.load(reference)
+    return _executable_info(reference, executable, catalog, identity, budget)
 
 
-def pipeline_info(identifier: str) -> dict:
-    descriptor = pipelines.get(identifier).describe()
-    return dict(_document(descriptor), pipeline=descriptor.id, catalog=str(_catalog(descriptor)))
+def executable_list(modality=None, *, deadline=None):
+    budget = deadline or Deadline.after()
+    budget.remaining()
+    return [_executable_info(reference, executable, catalog, identity, budget)
+            for reference, executable, catalog, identity in pipelines.list(modality=modality)]
 
 
-def available_pipelines() -> tuple[str, ...]:
-    """Discovery validates all recipes; selected serving never calls this."""
-    return tuple(sorted({recipe.pipeline for recipe in recipes.list()}))
+def _modality_info(name, executables):
+    modality = modalities.get(name)
+    return json_document(freeze_json(dict(modality=name,
+        native_contract=modality.NATIVE_CONTRACT, protocol=modality.PROTOCOL,
+        vocabulary=modality.vocabulary(), executables=executables,
+        telemetry={'raw_events':'unverified','metrics':[]})))
 
 
-@dataclass(frozen=True)
-class CatalogIdentity:
-    pipeline: str
-    contract: str
-    relative_path: Path
-    tree_sha256: str
+def modality_info(name, *, deadline=None):
+    modalities.get(name)  # Reject unsupported modalities before inventory reads.
+    return _modality_info(name, executable_list(modality=name, deadline=deadline))
 
 
-def _catalog_snapshots(pipeline, deadline):
+def modality_list(*, deadline=None):
+    rows = executable_list(deadline=deadline)
+    return [_modality_info(name, [row for row in rows if row['modality'] == name])
+            for name in modalities.NAMES]
+
+
+def _catalog_snapshots(deadline):
     # Reuse native retention's complete-root names+content identity. Models are
     # external inputs and never part of this digest.
     from ..control.hem_process import tree_identity
@@ -168,10 +158,8 @@ def _catalog_snapshots(pipeline, deadline):
     return snapshots
 
 
-def _checked_catalog_identity(pipeline, contract, catalog, snapshots, deadline):
+def _checked_catalog(catalog, snapshots, deadline):
     from ..control.hem_process import tree_identity
-    if not isinstance(contract, str) or not contract:
-        raise InvalidInput('Checked catalog contract identity must be a nonempty string')
     try:
         selected = Path(catalog).resolve(strict=True)
         matches = [(root, selected.relative_to(root)) for root in snapshots
@@ -180,27 +168,31 @@ def _checked_catalog_identity(pipeline, contract, catalog, snapshots, deadline):
             raise ValueError('selected catalog has no authoritative root')
         root, relative = matches[0]
         if tree_identity(root, deadline) != snapshots[root]:
-            raise InvalidInput('Pipeline catalog changed during serving resolution')
-        return CatalogIdentity(pipeline, contract, relative, snapshots[root])
+            raise InvalidInput('Executable catalog changed during serving resolution')
+        return relative, snapshots[root]
     except (OSError, ValueError) as error:
-        raise InvalidInput('Selected pipeline is outside or missing from the packaged catalog') from error
+        raise InvalidInput('Selected executable is outside or missing from the packaged catalog') from error
 
 
 @dataclass(frozen=True)
 class ResolvedConfiguration:
-    model: PreparedModel
+    model_id: str
     pipeline: str
     catalog: Path
     settings: Mapping
     sources: Mapping
     definition: Mapping
-    catalog_identity: CatalogIdentity
+    catalog_relative_path: Path
+    catalog_tree_sha256: str
     dependencies: tuple[Path, ...]
     recipe_identity: str
     modality: str
+    evidence: tuple
+    executable_id: str
+    executable_identity: str
 
     def __post_init__(self):
-        for name in ('settings', 'sources', 'definition'):
+        for name in ('settings', 'sources', 'definition', 'evidence'):
             object.__setattr__(self, name, freeze_json(getattr(self, name)))
         object.__setattr__(self, 'dependencies', tuple(dict.fromkeys(self.dependencies)))
 
@@ -214,62 +206,77 @@ class ResolvedConfiguration:
         return json_document(self.definition)
 
 
-def _prepared(recipe, model, budget):
-    if (recipe.id != model.recipe_id or recipe.identity != model.recipe_identity or
-            recipe.pipeline != model.pipeline):
-        raise InvalidInput('Prepared model and recipe declaration/pipeline identities differ')
-    expected = {item.id: item for item in recipe.artifacts}
-    actual = {item.id: item for item in model.files}
-    if len(actual) != len(model.files) or not expected.keys() <= actual.keys():
-        raise InvalidInput('Prepared model artifact inventory differs from its recipe')
-    shards = tuple(item for item in model.files if item.role == 'weights-shard')
-    has_index = any(item.role == 'weights' and item.format == 'json' and
-                    item.logical_path.endswith('.safetensors.index.json') for item in model.files)
-    for item in model.files:
-        budget.remaining()
-        declared = expected.get(item.id)
-        imported = item.ownership in ('caller-reference', 'caller-owned')
-        index = (item.role == 'weights' and item.format == 'json' and shards
-                 and item.logical_path.endswith('.safetensors.index.json'))
-        if declared is None:
-            consistent = imported and has_index and item.role == 'weights-shard' and item.format == 'gguf'
-        else:
-            consistent = (item.role == declared.role and
-                          ((item.format, item.logical_path) == (declared.format, declared.path) or index))
-            if not imported:
-                consistent = consistent and item.ownership == (
-                    'hf-reference' if declared.source.kind == 'huggingface' and not index else 'generated-owned')
-        logical = Path(item.logical_path)
-        if (not consistent or logical.is_absolute() or not logical.parts or
-                '..' in logical.parts or '\\' in item.logical_path or
-                Path(item.path).absolute() != (Path(model.directory) / logical).absolute() or
-                not Path(item.path).is_file() or not os.access(item.path, os.R_OK)):
-            raise InvalidInput(f'Prepared artifact {item.id!r} is inconsistent, missing or unreadable')
+def _unchanged_files(paths, dependencies, evidence, budget):
+    """A stat race guard on inspected inputs, not another Registry qualification."""
+    if (not isinstance(paths, Mapping) or any(type(key) is not str for key in paths)
+            or any(not Path(path).is_absolute() for path in (*paths.values(), *dependencies))
+            or not set(map(Path, paths.values())) <= set(dependencies)):
+        raise InvalidInput('Inspected model paths/dependencies are inconsistent')
+    try:
+        expected = {item['path']: item for item in evidence}
+        if len(expected) != len(evidence) or set(expected) != set(map(str, dependencies)):
+            raise InvalidInput('Inspected evidence does not cover all dependencies')
+        for path in dependencies:
+            budget.remaining()
+            if not path.is_file() or not os.access(path, os.R_OK):
+                raise InvalidInput(f'Model asset is missing or unreadable: {path}')
+            st = path.stat()
+            current = dict(path=str(path), device=st.st_dev, inode=st.st_ino,
+                           size=st.st_size, mtime_ns=st.st_mtime_ns, ctime_ns=st.st_ctime_ns)
+            if current != expected[str(path)]:
+                raise InvalidInput('Model files changed after inspection; validate again')
+    except (OSError, KeyError, TypeError) as error:
+        raise InvalidInput('Cannot verify inspected model evidence') from error
 
 
-def resolve(recipe: Recipe, model: PreparedModel, overrides: Optional[Mapping] = None,
-            config_path: Optional[Path] = None, *, deadline: Optional[Deadline] = None) -> ResolvedConfiguration:
-    """Resolve the selected recipe through one shared merge and modality policy."""
-    from . import modalities
+def resolve(record, paths, dependencies, evidence, overrides=None, config_path=None,
+            *, deadline=None) -> ResolvedConfiguration:
+    """Consume the already-inspected record; no qualification, writes or helpers."""
     budget = deadline or Deadline.after()
     budget.remaining()
-    snapshots = _catalog_snapshots(recipe.pipeline, budget)
-    binding = pipelines.get(recipe.pipeline)
-    descriptor = binding.describe()
-    if descriptor.modality != recipe.modality:
-        raise InvalidInput('Recipe and selected pipeline modalities differ')
-    binding.validate_artifacts(recipe.artifacts)
-    _prepared(recipe, model, budget)
-    modality = modalities.get(recipe.modality)
-    settings, sources = effective_settings(recipe, descriptor, load_config(config_path), overrides)
-    modality.validate(settings, descriptor)
+    provenance = record['provenance']
+    snapshots = _catalog_snapshots(budget)
+    recipe, identity = recipes.load(provenance['recipe_id'])
+    reference = recipe['executable']
+    executable, catalog, executable_identity = pipelines.load(reference)
+    association = provenance.get('executable')
+    if (recipe['id'] != provenance['recipe_id'] or identity != provenance['recipe_identity']
+            or recipe != provenance['declaration'] or reference != provenance['pipeline']
+            or reference != record['pipeline'] or not isinstance(association, Mapping)
+            or association != {'reference':reference, 'id':executable['id'],
+                               'identity':executable_identity, 'declaration':executable}):
+        raise InvalidInput('Model recipe or executable association differs; reacquire under a new ID')
     budget.remaining()
-    catalog = _catalog(descriptor)
-    definition = modality.service_definition(settings, model, descriptor.programs)
-    identity = _checked_catalog_identity(recipe.pipeline, descriptor.id, catalog, snapshots, budget)
-    resolved = ResolvedConfiguration(model, recipe.pipeline, catalog, settings, sources, definition,
-                                     identity, tuple(Path(item.path) for item in model.files),
-                                     recipe.identity, recipe.modality)
+    operation = pipelines.validate_files(executable, recipe['files'])
+    preparation = ({'id':operation['id'], 'declaration':operation} if operation is not None else None)
+    if provenance.get('preparation') != preparation:
+        raise InvalidInput('Model preparation association differs; reacquire under a new ID')
+    if set(paths) != set(recipe['files']):
+        raise InvalidInput('Inspected model purposes differ from the selected recipe')
+    directory = Path(record['directory'])
+    if not directory.is_absolute():
+        raise InvalidInput('Inspected model directory must be absolute')
+    # Retained Registry assets determine actual imported paths, including the
+    # existing split-GGUF index. Recipe destinations are not substituted for them.
+    for purpose, path in paths.items():
+        assets = [asset for asset in record['assets'] if asset['role'] == purpose]
+        if len(assets) != 1 or Path(path) != directory / assets[0]['logical_path']:
+            raise InvalidInput(f'Inspected {purpose} differs from the recorded model mapping')
+    dependencies = tuple(dict.fromkeys(map(Path, dependencies)))
+    _unchanged_files(paths, dependencies, evidence, budget)
+    modality = modalities.get(executable['modality'])
+    settings, sources = effective_settings(recipe, executable['serving'], modality,
+                                           load_config(config_path), overrides)
+    programs = pipelines.programs(executable, catalog, budget)
+    definition = modality.definition(settings, paths, directory, programs)
+    _unchanged_files(paths, dependencies, evidence, budget)
+    budget.remaining()
+    if pipelines.validate_files(executable, recipe['files']) != operation:
+        raise InvalidInput('Preparation contract changed during serving resolution')
+    relative, digest = _checked_catalog(catalog, snapshots, budget)
+    resolved = ResolvedConfiguration(record['id'], reference, Path(catalog), settings, sources,
+                                     definition, relative, digest, dependencies, identity,
+                                     executable['modality'], evidence, executable['id'], executable_identity)
     budget.remaining()
     return resolved
 
@@ -277,11 +284,10 @@ def resolve(recipe: Recipe, model: PreparedModel, overrides: Optional[Mapping] =
 def _matching_catalog(resolved, catalog, deadline):
     """Verify the same checked root/relative program closure, without selecting."""
     from ..control.hem_process import tree_identity
-    identity = resolved.catalog_identity
-    relative = identity.relative_path
-    if (identity.pipeline != resolved.pipeline or relative.is_absolute()
+    relative = resolved.catalog_relative_path
+    if (relative.is_absolute()
             or not relative.parts or '..' in relative.parts):
-        raise InvalidInput('Checked pipeline catalog identity is inconsistent')
+        raise InvalidInput('Checked executable catalog identity is inconsistent')
     catalog = Path(catalog).absolute()
     root = catalog
     for _part in relative.parts:
@@ -291,7 +297,7 @@ def _matching_catalog(resolved, catalog, deadline):
         selected = catalog.resolve(strict=True)
         if not selected.is_dir() or selected.relative_to(root) != relative:
             raise ValueError('selected catalog location differs')
-        if tree_identity(root, deadline) != identity.tree_sha256:
+        if tree_identity(root, deadline) != resolved.catalog_tree_sha256:
             raise InvalidInput('Deployment catalog differs from the checked serving interpretation')
     except (OSError, ValueError) as error:
         raise InvalidInput('Deployment catalog is outside or missing from the checked root') from error
@@ -320,12 +326,12 @@ def deployment_document(resolved: ResolvedConfiguration, name: str, *,
             "base_directory": str(catalog), "definition": definition}
 
 
-def export_deployment(recipe: Recipe, model: PreparedModel, output: Path, name: str, *,
+def export_deployment(record, paths, dependencies, evidence, output: Path, name: str, *,
                       overrides: Optional[Mapping] = None, config_path: Optional[Path] = None,
                       deadline: Optional[Deadline] = None) -> dict:
     """Validate and atomically export, without registry access or native calls."""
     budget = deadline or Deadline.after()
-    resolved = resolve(recipe, model, overrides, config_path, deadline=budget)
+    resolved = resolve(record, paths, dependencies, evidence, overrides, config_path, deadline=budget)
     try:
         document = deployment_document(resolved, name, catalog=resolved.catalog, deadline=budget)
         output = Path(output).absolute()
@@ -355,4 +361,6 @@ def export_deployment(recipe: Recipe, model: PreparedModel, output: Path, name: 
         raise HemError(f"Cannot export deployment: {exc}") from exc
     print(EXPORT_RESPONSIBILITY, file=sys.stderr)
     return {"state": "exported", "completed": True, "instance": name,
-            "pipeline": resolved.pipeline, "output": str(output), "settings": resolved.settings_document()}
+            "pipeline": resolved.pipeline, "executable": resolved.pipeline,
+            "executable_id": resolved.executable_id, "modality": resolved.modality,
+            "output": str(output), "settings": resolved.settings_document()}

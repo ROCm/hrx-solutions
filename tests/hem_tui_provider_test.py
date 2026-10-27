@@ -57,13 +57,13 @@ class LocalServiceProviderTest(unittest.IsolatedAsyncioTestCase):
         weights = self.root.parent / 'weights.gguf'; write_gguf(weights, tensors=[('fixture', [1], 0, 0)])
         tokenizer = weights.with_suffix('.json'); tokenizer.write_text('{}')
         registry = Registry(self.root)
-        hem_models.import_model(registry, 'local', ggufs=[weights], tokenizer=tokenizer, pipeline='qwen-08b')
+        hem_models.import_model(registry, 'local', ggufs=[weights], tokenizer=tokenizer, recipe_id='qwen35-08b-q5-k-xl')
         self.running_server(registry, 'server', 'launch')
         registry.create_instance('server', 'launch', 'chat', model_id='local', incarnation=17)
         before = tree_state(self.root)
         with patch.object(Registry, '__init__', side_effect=AssertionError('passive Registry init')):
             _, row = _records(self.root, LogSelection('model', 'server', 'launch', 'chat', 17), Deadline.after())
-        self.assertEqual(row['pipeline'], 'qwen-08b')
+        self.assertEqual(row['pipeline'], 'llm/qwen/qwen_08b/executable.json')
         self.assertEqual(tree_state(self.root), before)
 
     async def test_absent_namespace_is_empty_and_remains_absent(self):

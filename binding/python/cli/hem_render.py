@@ -110,28 +110,32 @@ def model_state(data):
 def model(args, data, width):
     command = args.command
     if command == 'available':
-        rows = [(item.get('id'), item.get('name'), item.get('pipeline')) for item in data.get('items', [])]
+        rows = [(item.get('id'), item.get('name'), item.get('modality'),
+                 item.get('executable_id'), item.get('executable')) for item in data.get('items', [])]
         return ['Download recipes (external checkpoints; not local inventory).',
-                table(['Recipe', 'Name', 'Pipeline'], rows, width) if rows else 'No download recipes are packaged.',
+                table(['Recipe', 'Name', 'Modality', 'Executable ID', 'Executable reference'], rows, width) if rows else 'No download recipes are packaged.',
                 'For existing files: loom-control model import --help']
     if command == 'list':
         items = data.get('items', [])
-        return [table(['Model', 'Asset state', 'Pipeline'],
+        return [table(['Model', 'Asset state', 'Modality', 'Executable reference'],
                       [(item.get('model', item.get('id')), model_state(item),
-                        item.get('pipeline') or item.get('intended_pipeline')) for item in items], width)
+                        item.get('modality'), item.get('executable') or item.get('pipeline') or item.get('intended_pipeline')) for item in items], width)
                 if items else 'No local models are registered. Discover recipes: loom-control model available',
                 *[f'{item.get("model", item.get("id"))}: {warnings(item)}' for item in items if warnings(item)]]
     identifier = data.get('model', data.get('model_id', getattr(args, 'model', None)))
     if data.get('state') == 'preview':
         return [f'Preview for {identifier}: no files acquired and no model record created.',
-                details([('Recipe', data.get('recipe_id')), ('Pipeline', data.get('pipeline')),
+                details([('Recipe', data.get('recipe_id')), ('Modality', data.get('modality')),
+                         ('Executable ID', data.get('executable_id')),
+                         ('Executable reference', data.get('executable') or data.get('pipeline')),
                          ('Offline cache only', data.get('offline'))]),
                 *[details([('Artifact', item.get('id')), ('Destination', item.get('logical_path')),
                            ('Cached', item.get('cached')), ('Cache path', item.get('cache_path')),
                            ('Ownership', item.get('ownership'))]) for item in data.get('artifacts', [])]]
     provenance = data.get('provenance') or {}
     lines = [f'Model {identifier}: {model_state(data)}.', warnings(data),
-             details([('Pipeline', data.get('intended_pipeline', data.get('pipeline'))),
+             details([('Executable reference', data.get('executable') or data.get('intended_pipeline', data.get('pipeline'))),
+                      ('Executable ID', data.get('executable_id')), ('Modality', data.get('modality')),
                       ('Recipe', provenance.get('recipe_id')), ('Declaration SHA256', provenance.get('recipe_identity')),
                       ('Directory', data.get('directory')), ('Check', 'Acquisition completion and file presence'), ('Native readiness', 'Unprobed')])]
     for artifact in data.get('artifacts', []):
@@ -145,14 +149,38 @@ def model(args, data, width):
     return lines
 
 
-def pipeline(args, data, width):
+def modality(args, data, width):
     if args.command == 'list':
         items = data.get('items', [])
-        return [table(['Pipeline', 'Modality', 'Operation'],
-                      [(item.get('pipeline'), item.get('modality'),
-                        item.get('protocol', {}).get('operation')) for item in items], width)
-                if items else 'No pipelines are packaged.',
-                'Inspect parameters and limits: loom-control pipeline show PIPELINE']
+        return [table(['Modality', 'Native contract', 'Operation', 'Executable choices'],
+                      [(item.get('modality'), item.get('native_contract'),
+                        item.get('protocol', {}).get('operation'), len(item.get('executables', []))) for item in items], width)
+                if items else 'No modality contracts are available.',
+                'Inspect semantics: loom-control modality show chat or loom-control modality show asr',
+                'A modality does not select a model. Inspect concrete limits: loom-control executable list']
+    protocol = data.get('protocol', {})
+    choices = data.get('executables', [])
+    return [details([('Modality', data.get('modality')), ('Native contract', data.get('native_contract')),
+                     ('Operation', protocol.get('operation')), ('Endpoint', protocol.get('endpoint')),
+                     ('Request encoding', protocol.get('request_encoding'))]),
+            table(['Setting', 'Type', 'Modality semantics'],
+                  [(name, field.get('type'), json.dumps({key: value for key, value in field.items() if key != 'type'}, sort_keys=True))
+                   for name, field in data.get('vocabulary', {}).items()], width),
+            'Serving bounds and fallback defaults belong to each executable, not to the modality.',
+            table(['Executable ID', 'Executable reference'],
+                  [(item.get('executable_id'), item.get('executable')) for item in choices], width)
+            if choices else 'No concrete executables are packaged for this modality.',
+            'Inspect exact capabilities: loom-control executable show CATALOG/executable.json']
+
+
+def executable(args, data, width):
+    if args.command == 'list':
+        items = data.get('items', [])
+        return [table(['Executable ID', 'Modality', 'Native contract', 'Executable reference'],
+                      [(item.get('executable_id'), item.get('modality'), item.get('native_contract'),
+                        item.get('executable')) for item in items], width)
+                if items else 'No executable declarations match the selection.',
+                'Executable inventory is independent of recipe availability or acquired models.']
     rows = []
     for name, parameter in data.get('parameters', {}).items():
         state = parameter['state']
@@ -166,7 +194,8 @@ def pipeline(args, data, width):
         rows.append((name, state, parameter['type'],
                      'Absent' if state == 'unsupported' else json.dumps(value, sort_keys=True), restriction))
     protocol = data.get('protocol', {})
-    return [details([('Pipeline', data.get('pipeline')), ('Modality', data.get('modality')),
+    return [details([('Executable reference', data.get('executable')), ('Executable ID', data.get('executable_id')),
+                     ('Modality', data.get('modality')), ('Native contract', data.get('native_contract')),
                      ('Operation', protocol.get('operation')), ('Endpoint', protocol.get('endpoint')),
                      ('Request encoding', protocol.get('request_encoding')),
                      ('Raw log events', data.get('telemetry', {}).get('raw_events')), ('Catalog', data.get('catalog'))]),
@@ -274,7 +303,7 @@ def instance(args, data, width):
         ready = data.get('state') == 'running' and data.get('completed') is True
         return [f'Instance {name} is ready to accept requests.' if ready else
                 f'Instance {name}: {text(data.get("state"))}; readiness is not confirmed.', warnings(data),
-                details([('Model', data.get('model')), ('Pipeline', data.get('pipeline')),
+                details([('Model', data.get('model')), ('Executable reference', data.get('executable') or data.get('pipeline')),
                          ('Server', data.get('server')), ('Endpoint', data.get('endpoint', getattr(args, 'url', None)))]),
                 settings(data.get('settings') or {}, width), 'Inspect: ' + target(args, 'status', name or 'INSTANCE')]
     if command == 'stop':
@@ -287,9 +316,10 @@ def instance(args, data, width):
                 'Inspect: ' + target(args, 'status', name or 'INSTANCE')]
     # Export retains source/dependency lifetime responsibility in adapter stderr.
     return [f'Deployment exported for instance {name}.', details([
-        ('Output', data.get('output')), ('Model', data.get('model')), ('Pipeline', data.get('pipeline'))]),
+        ('Output', data.get('output')), ('Model', data.get('model')),
+        ('Executable reference', data.get('executable') or data.get('pipeline'))]),
         settings(data.get('settings') or {}, width),
-        'Preserve all referenced model assets and pipeline programs/policies through retirement.',
+        'Preserve all referenced model assets and executable programs/policies through retirement.',
         'Registration curl is printed on stderr. Replace SERVER:PORT with a compatible server endpoint.']
 
 
@@ -317,7 +347,8 @@ def openwebui(args, data, width):
             data.get('guidance')]
 
 
-RENDERERS = {'openwebui': openwebui, 'omp': omp, 'opencode': opencode, 'model': model, 'pipeline': pipeline, 'server': server, 'instance': instance, 'pi': pi}
+RENDERERS = {'openwebui': openwebui, 'omp': omp, 'opencode': opencode, 'model': model, 'modality': modality,
+             'executable': executable, 'server': server, 'instance': instance, 'pi': pi}
 
 
 def render(args, data, *, width=None):

@@ -9,15 +9,11 @@ from pathlib import PurePosixPath, PureWindowsPath
 import re
 
 from ..hem_common import HemError
-from . import pipelines
-from .recipe_types import Artifact, GeneratedSource, HFSource, Recipe
 
 MAX_BYTES = 1024 * 1024
 MAX_DEPTH = 64
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
-_FORMATS = ("gguf", "safetensors", "json")
-_MODALITIES = ("chat", "asr")
 
 
 def _fail(path, message):
@@ -67,8 +63,8 @@ def _finite(value, path, depth=0):
         _fail(path, "expected finite JSON")
 
 
-def parse(data: bytes) -> Recipe:
-    """Validate only the shared envelope/source/path grammar, never model policy."""
+def _decode(data: bytes):
+    """Bounded strict JSON shared by recipe and executable declarations."""
     if type(data) is not bytes or len(data) > MAX_BYTES:
         _fail("document", "expected at most 1 MiB of UTF-8 JSON bytes")
     try:
@@ -77,34 +73,34 @@ def parse(data: bytes) -> Recipe:
         _finite(value, "document")
     except (ValueError, UnicodeError, RecursionError) as error:
         raise HemError("Invalid recipe document: malformed UTF-8 JSON or excessive nesting") from error
-    _object(value, ("format", "id", "name", "modality", "pipeline", "artifacts", "configuration"), "document")
-    if type(value["format"]) is not int or value["format"] != 1:
-        _fail("format", "expected integer 1")
-    identifier = _name(value["id"], "id")
-    pipeline = _name(value["pipeline"], "pipeline")
+    return value, hashlib.sha256(data).hexdigest()
+
+
+def parse(data: bytes) -> tuple[dict, str]:
+    """Read authored format3 without imports, acquisition or implementation policy."""
+    value, identity = _decode(data)
+    _object(value, ("format", "id", "name", "executable", "files", "configuration"), "document")
+    if type(value["format"]) is not int or value["format"] != 3:
+        _fail("format", "expected integer 3")
+    _name(value["id"], "id")
+    _relative(value["executable"], "executable", locator=True)
+    if not value["executable"].endswith("/executable.json"):
+        _fail("executable", "expected a direct catalog-relative executable.json reference")
     if type(value["name"]) is not str or not value["name"].strip():
         _fail("name", "expected nonempty string")
-    if type(value["modality"]) is not str or value["modality"] not in _MODALITIES:
-        _fail("modality", "expected chat or asr")
     if type(value["configuration"]) is not dict:
         _fail("configuration", "expected an object")
-    if type(value["artifacts"]) is not builtins.list or not value["artifacts"]:
-        _fail("artifacts", "expected a nonempty ordered array")
-    artifacts, ids, paths, coordinates = [], set(), [], set()
-    for index, item in enumerate(value["artifacts"]):
-        where = f"artifacts[{index}]"
-        _object(item, ("id", "role", "format", "path", "source"), where)
-        aid = _name(item["id"], where + ".id")
-        role = _name(item["role"], where + ".role")
-        if aid in ids:
-            _fail(where + ".id", "duplicate artifact ID")
-        ids.add(aid)
-        if type(item["format"]) is not str or item["format"] not in _FORMATS:
-            _fail(where + ".format", "unsupported artifact format")
+    if type(value["files"]) is not dict or not value["files"]:
+        _fail("files", "expected a nonempty purpose-keyed object")
+    paths, coordinates = [], set()
+    for purpose, item in value["files"].items():
+        _name(purpose, "files purpose")
+        where = f"files.{purpose}"
+        _object(item, ("path", "source"), where)
         path = _relative(item["path"], where + ".path")
         parts = PurePosixPath(path)
         if any(parts == other or parts in other.parents or other in parts.parents for other in paths):
-            _fail(where + ".path", "duplicate or overlapping artifact destination")
+            _fail(where + ".path", "duplicate or overlapping file destination")
         paths.append(parts)
         source = item["source"]
         if type(source) is not dict:
@@ -120,74 +116,81 @@ def parse(data: bytes) -> Recipe:
             if coordinate in coordinates:
                 _fail(where + ".source", "duplicate HF coordinates")
             coordinates.add(coordinate)
-            selected_source = HFSource(repo, revision, filename)
         elif source.get("kind") == "generated":
             _object(source, ("kind",), where + ".source")
-            selected_source = GeneratedSource()
         else:
             _fail(where + ".source.kind", "expected huggingface or generated")
-        artifacts.append(Artifact(aid, role, item["format"], path, selected_source))
-    return Recipe(1, identifier, value["name"], value["modality"], pipeline,
-                  tuple(artifacts), value["configuration"], hashlib.sha256(data).hexdigest())
+    return value, identity
 
 
-def _paths(identifier=None):
-    for root in pipelines.catalog_roots():
-        if root.is_dir():
-            pattern = "**/recipes/*.json" if identifier is None else f"**/recipes/{identifier}.json"
-            paths = tuple(sorted(root.glob(pattern)))
-            for path in paths:
-                try:
-                    path.resolve(strict=True).relative_to(root.resolve(strict=True))
-                except (ValueError, OSError, RuntimeError) as error:
-                    raise HemError("Packaged recipe escapes its catalog root") from error
-            return paths
-    raise HemError("No packaged recipe catalog is available")
+def _paths(identifier=None, *, executable=None):
+    from . import pipelines
+    if executable is None:
+        root = pipelines._root()
+        pattern = "**/recipes/*.json" if identifier is None else f"**/recipes/{identifier}.json"
+    else:
+        manifest, _ = pipelines._manifest(executable)
+        root = manifest.parent
+        pattern = "recipes/*.json"
+    paths = tuple(sorted(root.glob(pattern)))
+    for path in paths:
+        pipelines._inside(path, root)
+    return paths
+
+
+def _read_bytes(path):
+    try:
+        if not path.is_file():
+            raise OSError("declaration must be a regular file")
+        with path.open("rb") as stream:
+            return stream.read(MAX_BYTES + 1)
+    except OSError as error:
+        raise HemError(f"Cannot read packaged declaration {path.name!r}") from error
 
 
 def _read(path):
-    try:
-        with path.open("rb") as stream:
-            return parse(stream.read(MAX_BYTES + 1))
-    except OSError as error:
-        raise HemError(f"Cannot read packaged recipe {path.name!r}") from error
+    return parse(_read_bytes(path))
 
 
-def _binding(recipe):
-    binding = pipelines.get(recipe.pipeline)
-    if binding.describe().modality != recipe.modality:
-        _fail(recipe.id, "recipe and selected pipeline modalities differ")
-    binding.validate_artifacts(recipe.artifacts)
+def _admit(document, path):
+    from . import pipelines
+    expected = (path.parent.parent.relative_to(pipelines._root()) / 'executable.json').as_posix()
+    if document['executable'] != expected:
+        _fail(document['id'], 'recipe location differs from its executable catalog')
+    executable, _, _ = pipelines.load(document["executable"])
+    pipelines.validate_files(executable, document["files"])
 
 
-def load(recipe_id: str) -> Recipe:
-    """Resolve only the selected declaration/binding, never unrelated recipes."""
+def load(recipe_id: str) -> tuple[dict, str]:
+    """Read/admit selected recipe and direct executable, never unrelated metadata."""
     _name(recipe_id, "id")
     paths = _paths(recipe_id)
     if not paths:
         raise HemError(f"Unknown recipe {recipe_id!r}")
     if len(paths) != 1:
         raise HemError(f"Duplicate packaged recipe ID {recipe_id!r}")
-    recipe = _read(paths[0])
-    if recipe.id != recipe_id:
+    document, identity = _read(paths[0])
+    if document["id"] != recipe_id:
         _fail(recipe_id, "filename and declared ID differ")
-    _binding(recipe)
-    return recipe
+    _admit(document, paths[0])
+    return document, identity
 
 
-def list(modality=None) -> tuple[Recipe, ...]:
-    """Discover authored recipes in ID order, rejecting broken support entries."""
-    if modality is not None and (type(modality) is not str or modality not in _MODALITIES):
-        _fail("modality", "expected chat, asr or omitted")
+def list(executable=None) -> tuple[tuple[dict, str], ...]:
+    """Selected catalog recipes or strict global inventory, sorted by recipe ID."""
+    if executable is not None:
+        from . import pipelines
+        pipelines.load(executable)
     result, ids = [], set()
-    for path in _paths():
-        recipe = _read(path)
-        if recipe.id in ids:
-            raise HemError(f"Duplicate packaged recipe ID {recipe.id!r}")
-        ids.add(recipe.id)
-        if path.name != recipe.id + ".json":
-            _fail(recipe.id, "filename and declared ID differ")
-        _binding(recipe)
-        if modality is None or recipe.modality == modality:
-            result.append(recipe)
-    return tuple(sorted(result, key=lambda recipe: recipe.id))
+    for path in _paths(executable=executable):
+        document, identity = _read(path)
+        if document["id"] in ids:
+            raise HemError(f"Duplicate packaged recipe ID {document['id']!r}")
+        ids.add(document["id"])
+        if path.name != document["id"] + ".json":
+            _fail(document["id"], "filename and declared ID differ")
+        if executable is not None and document["executable"] != executable:
+            _fail(document["id"], "declaration differs from selected catalog executable")
+        _admit(document, path)
+        result.append((document, identity))
+    return tuple(sorted(result, key=lambda item: item[0]["id"]))

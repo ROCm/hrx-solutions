@@ -37,12 +37,18 @@ CLI_FILES = (
     'cli/hem_instance_cli.py',
     'cli/hem_model_cli.py',
     'cli/hem_server_cli.py',
-    'cli/hem_pipeline_cli.py',
+    'cli/hem_modality_cli.py',
+    'cli/hem_executable_cli.py',
     'cli/hem_pi_cli.py',
     'cli/hem_omp_cli.py',
     'cli/hem_opencode_cli.py',
     'cli/hem_openwebui_cli.py',
 )
+
+RETIRED_MODULES = (
+    'models/moonshine_preparation.py', 'models/moonshine_preparer_identity.py',
+    'models/pipelines_qwen.py', 'models/pipelines_moonshine.py',
+                   'models/recipe_types.py', 'cli/hem_pipeline_cli.py')
 
 
 
@@ -97,13 +103,11 @@ MODEL_PYTHON_PATHS = (
     'models/hem_models.py',
     'models/model_download.py',
     'models/model_store.py',
-    'models/moonshine_preparation.py',
-    'models/moonshine_preparer_identity.py',
-    'models/recipe_types.py',
+    'models/preparation/__init__.py',
+    'models/preparation/moonshine.py',
+    'models/preparation/moonshine_contract.py',
     'models/recipes.py',
     'models/pipelines.py',
-    'models/pipelines_qwen.py',
-    'models/pipelines_moonshine.py',
     'models/modalities/__init__.py',
     'models/modalities/chat.py',
     'models/modalities/asr.py',
@@ -114,7 +118,11 @@ HELPERS = ('gguf_fixtures', 'hem_lifecycle_fixture', 'recipe_config_fixture')
 # Installer concurrency fixtures import source-only test helpers in children.
 # Keep those in source CPU discovery; installed CLI cases still exercise the
 # real installed installer through its public entry point.
-CONTRACTS = ('recipes_test', 'launcher_test', 'hem_operation_targets_test', 'hem_process_test', 'hem_model_cli_test', 'hem_server_cli_test',
+# generic_modality_onboarding_test is the separately required source/producer
+# gate: its child packages intentionally copy source and cannot qualify a wheel.
+CONTRACTS = ('recipes_test', 'generic_discovery_cli_test',
+             'trusted_preparation_test', 'preparation_boundary_test', 'moonshine_helper_test',
+             'launcher_test', 'hem_operation_targets_test', 'hem_process_test', 'hem_model_cli_test', 'hem_server_cli_test',
              'hem_instance_cli_test', 'hem_shutdown_test', 'hem_help_test',
              'hem_render_test', 'hem_contracts_test', 'hem_config_test', 'pipeline_catalog_test', 'hem_instances_test',
              'hem_pi_contracts_test',
@@ -137,13 +145,19 @@ def verify_wheel_payload(wheel, package):
     """Prove installed source, catalog and native bytes came from this exact wheel."""
     checked = {}
     with zipfile.ZipFile(wheel) as archive:
+        for relative in RETIRED_MODULES:
+            assert 'hrx_solutions/' + relative not in archive.namelist(), 'retired module in wheel: ' + relative
+            assert not (package / relative).exists(), 'retired installed module: ' + relative
         for relative in PI_PYTHON_PATHS:
             name = 'hrx_solutions/' + relative
             members = [info for info in archive.infolist() if info.filename == name]
             assert (len(members) == 1 and not members[0].is_dir()
                     and stat.S_IFMT(members[0].external_attr >> 16) in (0, stat.S_IFREG)), f'missing or malformed Pi payload: {name}'
             assert not (package / relative).is_symlink(), f'installed Pi payload is not regular: {name}'
-        for relative in (*MODEL_PYTHON_PATHS, *('loom-pipeline/' + p for p in recipe_inventory.EXPECTED_RECIPES)):
+        release = recipe_inventory.load_release()
+        for relative in (*MODEL_PYTHON_PATHS,
+                         *('loom-pipeline/' + path for path in recipe_inventory.catalog_paths(release)),
+                         *recipe_inventory.operation_paths(release)):
             name = 'hrx_solutions/' + relative
             members = [info for info in archive.infolist() if info.filename == name]
             assert (len(members) == 1 and not members[0].is_dir()
@@ -208,57 +222,28 @@ def source_parity(source_root, package):
         assert installed == (package / relative).resolve(), f'import escaped installed package: {module}'
         assert source.read_bytes() == installed.read_bytes(), f'stale installed module: {source}'
         checked[str(source.relative_to(source_root))] = digest(source)
-    authored_root = source_root / 'loom-pipeline/llm'
-    if authored_root.is_dir():
-        installed_root = package / 'loom-pipeline/llm'
-        build = json.loads((installed_root / 'catalog-build.json').read_text())
-        assert build.get('format') == 2, 'unsupported catalog build metadata'
-        architectures = {'qwen_27b', 'qwen_08b'}
-        assert set(build.get('variants', {})) == architectures, 'catalog build inventory mismatch'
-        allowed = {'catalog-build.json', 'LICENSE-APACHE-2.0'}
-        for architecture in sorted(architectures):
-            relative = Path('qwen') / architecture
-            authored_manifest = authored_root / relative / 'sources.txt'
-            entries = [line.strip() for line in authored_manifest.read_text().splitlines()
-                       if line.strip() and not line.strip().startswith('#')]
-            expected = {os.path.normpath((relative / entry).as_posix()) for entry in entries}
-            assert all(not p.startswith(('../', '/')) for p in expected), 'authored catalog path escapes root'
-            variant = build['variants'][architecture]
-            assert set(variant) == {'identifier', 'sources', 'bytecode_sha256'}, 'catalog variant metadata mismatch'
-            assert set(variant.get('sources', {})) == expected, 'catalog source inventory mismatch'
-            for identity in sorted(expected):
-                authored = authored_root / identity
-                authored.resolve(strict=True).relative_to(authored_root.resolve())
-                assert digest(authored) == variant['sources'][identity], f'stale installed catalog input: {identity}'
-                checked['loom-pipeline/llm/' + identity] = variant['sources'][identity]
-            identifier = {'qwen_08b': 'qwen35-08b-ud-q5-k-xl-v1',
-                          'qwen_27b': 'qwen38-27b-ud-q5-k-xl-v1'}[architecture]
-            assert variant['identifier'] == identifier, 'installed variant mismatch'
-            artifact = installed_root / relative / 'pipeline.loombc'
-            assert artifact.read_bytes().startswith(b'LOOM') and digest(artifact) == variant['bytecode_sha256'], f'installed bytecode mismatch: {architecture}'
-            descriptor = relative / 'pipeline.json'
-            assert json.loads((installed_root / descriptor).read_text()) == {
-                'format': 1, 'variant': identifier, 'module': 'pipeline.loombc',
-                'sha256': variant['bytecode_sha256']}, 'installed pipeline descriptor mismatch'
-            allowed.update({(relative / 'pipeline.loombc').as_posix(), descriptor.as_posix()})
-            for recipe in (authored_root / relative / 'recipes').glob('*.json'):
-                allowed.add(recipe.relative_to(authored_root).as_posix())
-
-        actual = {p.relative_to(installed_root).as_posix() for p in installed_root.rglob('*') if p.is_file()}
-        assert actual == allowed, 'installed catalog file inventory mismatch'
-        assert not list(package.rglob('*.loom')), 'installed wheel contains executable sources'
-        assert (authored_root / 'LICENSE-APACHE-2.0').read_bytes() == (installed_root / 'LICENSE-APACHE-2.0').read_bytes()
     catalog_root = source_root / 'loom-pipeline'
-    authored_recipes = {p.relative_to(catalog_root).as_posix(): p
-                        for p in catalog_root.glob('**/recipes/*.json')}
-    installed_recipes = {p.relative_to(package / 'loom-pipeline').as_posix(): p
-                         for p in (package / 'loom-pipeline').glob('**/recipes/*.json')}
     if catalog_root.is_dir():
-        assert authored_recipes.keys() == installed_recipes.keys(), 'installed recipe inventory mismatch'
-        for name, source in authored_recipes.items():
-            installed = installed_recipes[name]
-            assert not installed.is_symlink() and installed.read_bytes() == source.read_bytes(), 'installed authored recipe mismatch'
-            checked['loom-pipeline/' + name] = digest(source)
+        recipe_module = importlib.import_module('hrx_solutions.models.recipes')
+        executable_module = importlib.import_module('hrx_solutions.models.pipelines')
+        release = recipe_inventory.load_release()
+        recipe_inventory.validate_installed_catalogs(package, recipe_module.parse,
+            executable_module.parse, source_root, release=release)
+        references = [path.relative_to(catalog_root).as_posix()
+                      for path in catalog_root.glob('**/executable.json')]
+        documents = recipe_inventory.validate_executables(
+            lambda relative: (catalog_root / relative).read_bytes(), references,
+            executable_module.parse, release=release, encoding='source')
+        for reference, document in documents.items():
+            checked['loom-pipeline/' + reference] = digest(catalog_root / reference)
+            for relative, checksum in document['programs']['files'].items():
+                checked['loom-pipeline/' + document['programs']['root'] + '/' + relative] = checksum
+        for relative in release['recipes']:
+            checked['loom-pipeline/' + relative] = digest(catalog_root / relative)
+        notices = {relative for record in release['executables'].values() for relative in record['notices']}
+        for relative in notices:
+            assert (catalog_root / relative).read_bytes() == (package / 'loom-pipeline' / relative).read_bytes(), 'installed notice differs'
+        assert not list(package.rglob('*.loom')), 'installed wheel contains executable sources'
     assert checked, 'no source files checked'
     return checked
 

@@ -1,186 +1,83 @@
-"""Recipe bytes, independent archive oracles, and descriptor-selected bundles."""
-from dataclasses import replace
-import io
-import json
+"""Actual selected source catalogs staged through one generic producer."""
 from pathlib import Path
-import tarfile
+import json
 import tempfile
-import stat
 import unittest
 from unittest.mock import patch
-import zipfile
 
-from binding.python.hem_common import HemError
-from binding.python.models import recipes
-from binding.python.models.recipe_types import (
-    BundleFile, BundleManifest, PipelineDescriptor, ProtocolDescriptor, TextPrograms,
-)
-from build_tools.model_tools import package_families
-from build_tools.validation import recipe_inventory as inventory
-
-REPO = Path(__file__).resolve().parents[2]
+from binding.python.models import recipes, pipelines
+from build_tools.model_tools import package_families, loom_catalog
+from build_tools.model_tools.catalog_test_fixture import CatalogFixture
+from build_tools.validation import recipe_inventory
 
 
-class RecipePackagingTest(unittest.TestCase):
+class SelectedPackagingTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        self.authored = {path: (REPO / 'loom-pipeline' / path).read_bytes()
-                         for path in inventory.EXPECTED_RECIPES}
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        self.fixture=CatalogFixture(Path(temporary.name))
+        self.package=self.fixture.root/'package'
 
-    def wheel(self, members):
-        path = self.root / 'fixture.whl'
-        with zipfile.ZipFile(path, 'w') as archive:
-            for name, content in members:
-                archive.writestr('hrx_solutions/loom-pipeline/' + name, content)
-        return zipfile.ZipFile(path)
+    def test_each_selected_catalog_stages_own_programs_recipes_notices_and_helper_only(self):
+        for reference,build in self.fixture.builds.items():
+            package=self.package/Path(reference).parent
+            outputs=self.fixture.stage(package,selected=(reference,))
+            expected={'loom-pipeline/'+reference,
+                      'loom-pipeline/'+str(Path(reference).parent/'build.json'),
+                      *('loom-pipeline/'+name for name in build['notices']),
+                      *('loom-pipeline/'+build['root']+'/'+name for name in build['groups'])}
+            source=self.fixture.repository/'loom-pipeline'/Path(reference).parent
+            expected.update('loom-pipeline/'+p.relative_to(self.fixture.repository/'loom-pipeline').as_posix()
+                            for p in (source/'recipes').glob('*.json'))
+            if build['helper']:
+                expected.update(build['helper']['destination']+'/'+name for name in
+                                (*self.fixture.tools,'operation.json','LICENSE','provenance.json'))
+            self.assertEqual({p.relative_to(package).as_posix() for p in outputs},expected)
+            self.assertEqual(set(outputs),{p for p in package.rglob('*') if p.is_file()})
+            self.assertFalse(list(package.rglob('*.loom')))
+            if not build['helper']:self.assertFalse((package/'_native').exists())
 
-    def source(self, members, symlink=False):
-        path = self.root / 'fixture.tar'
-        with tarfile.open(path, 'w') as archive:
-            for name, content in members:
-                info = tarfile.TarInfo('package/loom-pipeline/' + name)
-                info.size = len(content)
-                if symlink:
-                    info.type = tarfile.SYMTYPE
-                    info.linkname = 'outside'
-                archive.addfile(info, io.BytesIO(content))
-        return tarfile.open(path)
+    def test_source_recipe_oracle_independently_requires_complete_release(self):
+        root=self.fixture.repository/'loom-pipeline'
+        paths=[p.relative_to(root).as_posix() for p in root.glob('**/recipes/*.json')]
+        read=lambda name:(root/name).read_bytes()
+        recipe_inventory.validate_values(read,paths,recipes.parse)
+        for invalid in (paths[:-1],paths+paths[:1]):
+            with self.assertRaisesRegex(RuntimeError,'recipe inventory'):
+                recipe_inventory.validate_values(read,invalid,recipes.parse)
+        changed=json.loads(read(paths[0]));changed['name']='unreviewed name'
+        with self.assertRaises(RuntimeError):recipe_inventory.validate_values(
+            lambda name:json.dumps(changed).encode() if name==paths[0] else read(name),paths,recipes.parse)
 
-    def test_real_three_recipes_have_independent_ids_coordinates_and_source_bytes(self):
-        with self.wheel(self.authored.items()) as archive:
-            inventory.validate_wheel(archive, REPO, recipes.parse)
-        with self.source(self.authored.items()) as archive:
-            inventory.validate_sdist(archive, REPO, recipes.parse)
-        package = self.root / 'installed'
-        for name, content in self.authored.items():
-            path = package / 'loom-pipeline' / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content)
-        inventory.validate_installed(package, recipes.parse, REPO)
-        selected = next(iter(self.authored))
-        (package / 'loom-pipeline' / selected).write_bytes(b'{}')
-        with self.assertRaises(HemError):
-            inventory.validate_installed(package, recipes.parse, REPO)
+    def test_unknown_or_duplicate_selected_catalog_and_recipe_fail_before_queries(self):
+        references=tuple(self.fixture.builds)
+        for selected in (('unknown/executable.json',),references+references[:1]):
+            with self.assertRaises(ValueError):package_families.prepare(self.fixture.query,self.fixture.repository,selected=selected)
+        self.assertEqual(self.fixture.queried,[])
+        path=next((self.fixture.repository/'loom-pipeline').glob('**/recipes/*.json'))
+        doc=json.loads(path.read_bytes());doc['executable']=next(ref for ref in references if ref!=doc['executable'])
+        path.write_text(json.dumps(doc))
+        with self.assertRaisesRegex(ValueError,'cross-catalog'):package_families.prepare(self.fixture.query,self.fixture.repository)
+        self.assertEqual(self.fixture.queried,[])
 
-    def test_archive_inventory_rejects_missing_duplicate_swapped_changed_and_unregistered(self):
-        original = list(self.authored.items())
-        changed = json.loads(original[0][1])
-        changed['artifacts'][0]['source']['revision'] = '0' * 40
-        mutations = {
-            'missing': original[1:],
-            'duplicate': original + original[:1],
-            'swapped': [(original[0][0], original[1][1]), (original[1][0], original[0][1]), original[2]],
-            'pin': [(original[0][0], json.dumps(changed).encode()), *original[1:]],
-            'unregistered': original + [('llm/other/recipes/unknown.json', original[0][1])],
-            'bytes': [(original[0][0], original[0][1] + b'\n'), *original[1:]],
-        }
-        for name, members in mutations.items():
-            for create, validate in ((self.wheel, inventory.validate_wheel), (self.source, inventory.validate_sdist)):
-                with self.subTest(case=name, archive=create.__name__), create(members) as archive:
-                    with self.assertRaises(RuntimeError):
-                        validate(archive, REPO, recipes.parse)
-        with self.source(original, symlink=True) as archive, self.assertRaisesRegex(RuntimeError, 'regular'):
-            inventory.validate_sdist(archive, REPO, recipes.parse)
+    def test_changed_recipe_or_source_after_prepare_is_rejected(self):
+        for mutation in ('recipe','source'):
+            with tempfile.TemporaryDirectory() as temporary:
+                fixture=CatalogFixture(Path(temporary))
+                prepared=package_families.prepare(fixture.query,fixture.repository)
+                if mutation=='recipe':path=next((fixture.repository/'loom-pipeline').glob('**/recipes/*.json'))
+                else:path=next((fixture.repository/'loom-pipeline').glob('**/prepare.loom'))
+                path.write_bytes(path.read_bytes()+b'\n')
+                with patch.object(loom_catalog.subprocess,'run',side_effect=fixture.decode),self.assertRaisesRegex(ValueError,'changed|hash mismatch'):
+                    package_families.stage(fixture.root/'package',prepared,fixture.repository)
 
-    def test_wheel_recipes_cannot_be_symlinks(self):
-        path = self.root / 'symlink.whl'
-        with zipfile.ZipFile(path, 'w') as archive:
-            for name, content in self.authored.items():
-                info = zipfile.ZipInfo('hrx_solutions/loom-pipeline/' + name)
-                info.external_attr = (stat.S_IFLNK | 0o777) << 16
-                archive.writestr(info, content)
-        with zipfile.ZipFile(path) as archive, self.assertRaisesRegex(RuntimeError, 'regular'):
-            inventory.validate_wheel(archive, REPO, recipes.parse)
-
-    def test_source_parity_compares_asr_recipe_bytes_and_inventory(self):
-        from build_tools.validation.check_installed_cpu import source_parity
-        name = 'recognition/moonshine/streaming_tiny/recipes/moonshine-streaming-tiny.json'
-        source = self.root / 'source/loom-pipeline' / name
-        target = self.root / 'package/loom-pipeline' / name
-        source.parent.mkdir(parents=True)
-        target.parent.mkdir(parents=True)
-        source.write_bytes(self.authored[name])
-        target.write_bytes(self.authored[name])
-        checked = source_parity(self.root / 'source', self.root / 'package')
-        self.assertIn('loom-pipeline/' + name, checked)
-        target.write_bytes(self.authored[name] + b'\n')
-        with self.assertRaisesRegex(AssertionError, 'installed authored recipe mismatch'):
-            source_parity(self.root / 'source', self.root / 'package')
-        target.unlink()
-        with self.assertRaisesRegex(AssertionError, 'installed recipe inventory mismatch'):
-            source_parity(self.root / 'source', self.root / 'package')
-
-    def bindings(self):
-        descriptors = {}
-        for path, content in self.authored.items():
-            recipe = recipes.parse(content)
-            catalog = str(Path(path).parent.parent)
-            files = [BundleFile('loom-pipeline/' + path, 'authored recipe'),
-                     BundleFile('loom-pipeline/' + catalog + '/pipeline.loombc', 'program')]
-            descriptors[recipe.pipeline] = PipelineDescriptor(
-                recipe.pipeline, recipe.modality, {},
-                ProtocolDescriptor('test', 'test', '/', 'json', (), ()), (), None,
-                TextPrograms('pipeline.loombc', 'pipeline.loombc', ('pipeline.loombc',)),
-                BundleManifest(catalog, tuple(files)))
-        class Binding:
-            def __init__(self, descriptor): self.descriptor = descriptor
-            def describe(self): return self.descriptor
-            def validate_artifacts(self, artifacts): self.artifacts = artifacts
-        return {key: Binding(value) for key, value in descriptors.items()}
-
-    def test_real_authored_selection_drives_bundle_union_and_exact_staging(self):
-        bindings = self.bindings()
-        with patch.object(package_families.pipelines, 'get', side_effect=bindings.__getitem__):
-            bundle = package_families.recipe_bundle(REPO)
-        self.assertEqual(len(bundle), 6)
-        def producer(root, outputs, repository, decoder):
-            result = []
-            for name in (*bundle, 'loom-pipeline/llm/catalog-build.json', 'loom-pipeline/unused.json'):
-                path = root / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b'fixture:' + name.encode())
-                result.append(path)
-            return result
-        prepared = (Path('decoder'), ((producer, {}, None),), bundle)
-        package = self.root / 'package'
-        outputs = package_families.stage(package, prepared, REPO)
-        self.assertEqual({p.relative_to(package).as_posix() for p in outputs},
-                         set(bundle) | {'loom-pipeline/llm/catalog-build.json'})
-        self.assertFalse((package / 'loom-pipeline/unused.json').exists())
-        package_families.validate_bundle(package, prepared)
-        (package / bundle[0]).unlink()
-        with self.assertRaises(FileNotFoundError):
-            package_families.validate_bundle(package, prepared)
-
-    def test_bundle_requires_each_product_and_rejects_duplicate_producer_files(self):
-        required = ('loom-pipeline/llm/required.loombc',)
-        def producer(root, outputs, repository, decoder):
-            path = root / 'loom-pipeline/llm/catalog-build.json'
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b'compiler metadata')
-            return [path]
-        products = ((producer, {}, None),)
-        with self.assertRaisesRegex(ValueError, 'missing compiled/catalog products'):
-            package_families.stage(self.root / 'package', (Path('decoder'), products, required), REPO)
-        with self.assertRaisesRegex(ValueError, 'Duplicate compiled/catalog product'):
-            package_families.stage(self.root / 'package', (Path('decoder'), products * 2, required), REPO)
-
-    def test_bundle_rejects_unsafe_duplicate_omitted_and_unregistered_files(self):
-        for mutation in ('unsafe', 'duplicate', 'omitted', 'unregistered'):
-            bindings = self.bindings()
-            binding = bindings['qwen-08b']
-            descriptor = binding.describe()
-            files = descriptor.bundle.files
-            if mutation == 'unsafe': files += (BundleFile('../escape', 'bad'),)
-            elif mutation == 'duplicate': files += files[:1]
-            elif mutation == 'omitted': files = files[1:]
-            else: files += (BundleFile('loom-pipeline/llm/recipes/other.json', 'bad'),)
-            binding.descriptor = replace(descriptor, bundle=replace(descriptor.bundle, files=files))
-            with self.subTest(mutation=mutation), patch.object(package_families.pipelines, 'get', side_effect=bindings.__getitem__):
-                with self.assertRaises(ValueError):
-                    package_families.recipe_bundle(REPO)
+    def test_normalized_current_catalogs_pass_actual_compiled_parser(self):
+        outputs=self.fixture.stage(self.package)
+        for path in outputs:
+            if path.name=='executable.json':
+                doc,_=pipelines.parse(path.read_bytes())
+                root=self.package/'loom-pipeline'/doc['programs']['root']
+                self.assertTrue(all((root/name).is_file() for name in doc['programs']['files']))
+            elif path.parent.name=='recipes':recipes.parse(path.read_bytes())
 
 
-if __name__ == '__main__': unittest.main()
+if __name__=='__main__':unittest.main()

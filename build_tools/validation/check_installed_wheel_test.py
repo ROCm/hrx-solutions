@@ -17,6 +17,81 @@ from binding.python.control.hem_shutdown import ShutdownManager
 from binding.python.control import hem_process
 
 
+class PublicCatalogOracleTest(unittest.TestCase):
+    """Real source CLI composition; this never substitutes for installed checks."""
+    def setUp(self):
+        from contextlib import redirect_stdout, redirect_stderr
+        from binding.python import hem_cli
+        from build_tools.validation import recipe_inventory
+        self.release = recipe_inventory.load_release()
+        self.cli = hem_cli
+        root = Path(__file__).resolve().parents[2]
+        checker = root / 'build_tools/validation/check_installed_wheel.py'
+        tree = ast.parse(checker.read_text())
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name == 'check_public_recipe_queries']
+        namespace = {}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(checker), 'exec'), namespace)
+        self.check = namespace['check_public_recipe_queries']
+
+    def invoke(self, *arguments):
+        output, diagnostic = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), redirect_stderr(diagnostic):
+            status = self.cli.main([*arguments, '--json'])
+        self.assertEqual(status, 0, diagnostic.getvalue() + output.getvalue())
+        return json.loads(output.getvalue()), diagnostic.getvalue()
+
+    def test_real_source_public_queries_match_reviewed_inventory_and_capabilities(self):
+        from unittest.mock import patch
+        import tempfile
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / 'must-not-exist'
+            with patch.dict(os.environ, {'LOOM_SERVE_DIR': str(state)}):
+                actual = self.check(self.invoke)
+            self.assertEqual(set(actual), {doc['id'] for doc in self.release['recipes'].values()})
+            self.assertFalse(state.exists())
+
+    def test_unseen_recipe_less_executable_is_expected_and_projection_drift_fails(self):
+        from build_tools.validation.recipe_inventory_test import fixture
+        from binding.python.models import pipelines
+        from unittest.mock import patch
+        import tempfile
+        release, source, _ = fixture()
+        # Data-only third executable with no recipe; public CLI and checker must
+        # include it without extending any Python inventory.
+        from copy import deepcopy
+        original = next(iter(release['executables']))
+        reference = 'independent/extra/executable.json'
+        entry = deepcopy(release['executables'][original])
+        entry['source']['id'] = 'additional-program'
+        entry['source']['programs']['root'] = 'independent/extra'
+        release['executables'][reference] = entry
+        source[reference] = json.dumps(entry['source']).encode()
+        source['independent/extra/main.loom'] = source['unseen/fresh-chat/main.loom']
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'catalogs'
+            for relative, content in source.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(content)
+            with patch.object(pipelines, 'catalog_roots', return_value=(root,)), \
+                 patch.dict(os.environ, {'LOOM_SERVE_DIR': str(Path(temporary) / 'state')}):
+                self.check(self.invoke, release=release)
+                for kind in ('missing', 'identity', 'limit', 'modality-default', 'recipe'):
+                    def corrupt(*arguments):
+                        result, diagnostic = self.invoke(*arguments)
+                        if arguments == ('executable', 'list'):
+                            if kind == 'missing': result['items'].pop()
+                            elif kind == 'identity': result['items'][0]['executable_id'] = 'wrong'
+                            elif kind == 'limit': result['items'][0]['parameters']['rows']['constraints']['maximum'] += 1
+                        if kind == 'modality-default' and arguments == ('modality', 'list'):
+                            result['items'][0]['defaults'] = {'rows': 1}
+                        if kind == 'recipe' and arguments == ('model', 'available'):
+                            result['items'].pop()
+                        return result, diagnostic
+                    with self.subTest(kind=kind), self.assertRaises(AssertionError):
+                        self.check(corrupt, release=release)
+
+
 class CheckerCleanupTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -1,6 +1,6 @@
 """Generated ownership and retry contracts through the common binding interface."""
-from dataclasses import replace
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,10 +11,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import unittest
-from tests.hem_models_test import AcquisitionFixture, Binding
+from tests.hem_models_test import AcquisitionFixture
 from binding.python.models import hem_models, model_download, recipes, pipelines
-from binding.python.models import moonshine_preparation as preparation
-from binding.python.models.recipe_types import GeneratedArtifact, PreparedModel
+from binding.python.models.preparation import moonshine as preparation
 from binding.python.hem_common import Deadline, HemError
 
 
@@ -23,7 +22,7 @@ class MoonshineAcquisitionTest(AcquisitionFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
         self.recipe = self.declarations['moonshine-streaming-tiny']
-        self.binding = self.bindings[self.recipe.pipeline]
+        self.binding = preparation
         self.cached()
 
     def acquire(self, name='speech', **kwargs):
@@ -32,24 +31,23 @@ class MoonshineAcquisitionTest(AcquisitionFixture, unittest.TestCase):
 
     def test_offline_mapping_generated_owned_and_completed_retry(self):
         result = self.acquire()
-        self.assertEqual(result.state, 'acquired')
-        files = hem_models.model_files(self.registry, 'speech')
-        self.assertIsInstance(files, PreparedModel)
-        self.assertEqual([a.ownership for a in files.files], ['hf-reference'] * 3 + ['generated-owned'])
-        final = files.directory / 'rotary.safetensors'; inode = final.stat().st_ino
+        self.assertEqual(result['state'], 'ready')
+        record, paths, _, _ = self.inspect('speech')
+        self.assertEqual([a['prepared_ownership'] for a in record['assets']], ['hf-reference']*3+['generated-owned'])
+        final = paths['rotary']; inode = final.stat().st_ino
         self.assertFalse(final.is_symlink())
-        self.assertTrue((files.directory / 'model.safetensors').is_symlink())
+        self.assertTrue(paths['weights'].is_symlink())
         self.acquire(); self.assertEqual(final.stat().st_ino, inode)
-        self.assertEqual(self.binding.events, ['preflight', 'prepare'])
+        self.assertEqual(self.events, ['preflight', 'prepare'])
         final.write_bytes(b'changed')
         with self.assertRaisesRegex(HemError, 'output changed'): self.acquire()
-        self.assertEqual(self.binding.events, ['preflight', 'prepare'])
+        self.assertEqual(self.events, ['preflight', 'prepare'])
 
     def test_missing_cache_and_failed_helper_remain_incomplete_retryable(self):
-        source = model_download._cache_path(self.recipe.artifacts[0].source); source.unlink()
+        source = model_download._cache_path(self.recipe['files']['weights']['source']); source.unlink()
         with self.assertRaisesRegex(HemError, 'Offline cache'): self.acquire()
         self.assertEqual(hem_models.show(self.registry, 'speech')['state'], 'incomplete')
-        self.assertNotIn('prepare', self.binding.events)
+        self.assertNotIn('prepare', self.events)
         source.write_bytes(b'restored')
         with patch.object(self.binding, 'prepare', side_effect=HemError('helper failed')):
             with self.assertRaisesRegex(HemError, 'helper failed'): self.acquire()
@@ -59,73 +57,73 @@ class MoonshineAcquisitionTest(AcquisitionFixture, unittest.TestCase):
         self.acquire(); self.assertEqual(hem_models.show(self.registry, 'speech')['state'], 'ready')
 
     def test_preflight_before_network_and_complete_import_bypasses_helper(self):
-        model_download._cache_path(self.recipe.artifacts[0].source).unlink()
+        model_download._cache_path(self.recipe['files']['weights']['source']).unlink()
         with patch.object(self.binding, 'preflight', side_effect=HemError('missing dependencies')):
             with self.assertRaisesRegex(HemError, 'missing dependencies'): self.acquire(offline=False)
             self.fetch.assert_not_called()
             root = self.root / 'prepared'; root.mkdir()
-            for item in self.recipe.artifacts: (root / item.path).write_bytes(b'local prepared')
-            row = hem_models.import_assets(self.registry, 'local', directory=root, pipeline=self.recipe.pipeline)
+            for item in self.recipe['files'].values(): (root / item['path']).write_bytes(b'local prepared')
+            row = hem_models.import_assets(self.registry, 'local', directory=root, recipe_id=self.recipe['id'])
         self.assertTrue(row['validation']['valid'])
-        self.assertEqual(self.binding.events, [])
-        prepared = hem_models.model_files(self.registry, 'local')
-        self.assertTrue(all(a.ownership == 'caller-owned' for a in prepared.files))
+        self.assertEqual(self.events, [])
+        record, _, _, _ = self.inspect('local')
+        self.assertTrue(all(a['prepared_ownership'] == 'caller-owned' for a in record['assets']))
 
     def test_preview_runs_no_preflight_process_network_or_registry(self):
         with patch.object(self.binding, 'preflight', side_effect=AssertionError('preflight')):
-            result = hem_models.download(None, self.recipe.id, model_id='preview', dry_run=True)
-        self.assertEqual(result.state, 'preview')
-        self.assertEqual(result.artifacts[-1].ownership, 'generated-owned')
-        self.assertIsNone(result.artifacts[-1].cache_path)
+            result = hem_models.download(None, self.recipe['id'], model_id='preview', dry_run=True)
+        self.assertEqual(result['state'], 'preview')
+        self.assertEqual(result['artifacts'][-1]['ownership'], 'generated-owned')
+        self.assertIsNone(result['artifacts'][-1]['cache_path'])
         self.assertEqual(self.registry.list_models(), [])
-        self.assertEqual(self.binding.events, []); self.fetch.assert_not_called()
+        self.assertEqual(self.events, []); self.fetch.assert_not_called()
 
     def test_slow_successful_obtain_does_not_consume_helper_allowance(self):
         clock, events = [0.0], []
-        for item in self.recipe.artifacts[:-1]: model_download._cache_path(item.source).unlink()
+        for item in self.recipe['files'].values():
+            if item['source']['kind'] == 'huggingface': model_download._cache_path(item['source']).unlink()
         prepare = self.binding.prepare
-        def preflight(plan, deadline):
+        def preflight(deadline):
             self.assertEqual(deadline.remaining(), 30); clock[0] += 25; events.append('preflight')
         def fetch(command):
             events.append('obtain'); clock[0] += 400
-            item = next(a for a in self.recipe.artifacts[:-1] if a.source.filename == command[3])
-            model_download._cache_path(item.source).write_bytes(b'input')
-        def generate(plan, inputs, attempt, deadline):
+            item = next(a for a in self.recipe['files'].values() if a['source'].get('filename') == command[3])
+            model_download._cache_path(item['source']).write_bytes(b'input')
+        def generate(inputs, attempt, deadline):
             events.append('prepare'); self.assertEqual(deadline.remaining(), 300)
-            return prepare(plan, inputs, attempt, deadline)
+            return prepare(inputs, attempt, deadline)
         with patch.object(hem_models, 'Deadline') as deadlines, \
              patch.object(self.binding, 'preflight', side_effect=preflight), \
              patch.object(self.binding, 'prepare', side_effect=generate):
-            deadlines.after.side_effect = lambda seconds: Deadline(clock[0] + seconds, clock=lambda: clock[0])
+            deadlines.after.side_effect = lambda seconds=300: Deadline(clock[0] + seconds, clock=lambda: clock[0])
             self.fetch.side_effect = fetch
             self.acquire(offline=False)
         self.assertEqual(events, ['preflight', 'obtain', 'obtain', 'obtain', 'prepare'])
 
     def test_incomplete_foreign_or_aliased_result_never_stages_or_publishes(self):
         prepare = self.binding.prepare
-        for kind in ('missing', 'extra', 'duplicate', 'foreign', 'symlink', 'wrong-format', 'list'):
-            def invalid(plan, inputs, attempt, deadline):
-                result = prepare(plan, inputs, attempt, deadline)
-                a = result[0]
-                if kind == 'missing': return ()
-                if kind == 'extra': return (*result, replace(a, path='extra'))
-                if kind == 'duplicate': return (*result, a)
-                if kind == 'foreign': return (replace(a, file=self.gguf),)
-                if kind == 'wrong-format': return (replace(a, format='gguf'),)
-                if kind == 'list': return list(result)
-                a.file.unlink(); a.file.symlink_to(self.gguf); return result
-            with self.subTest(kind=kind), patch.object(self.binding, 'prepare', side_effect=invalid):
-                with self.assertRaisesRegex(HemError, 'Incomplete preparation'): self.acquire(name=kind)
+        for kind in ('missing','extra','duplicate-sequence','foreign','symlink','wrong-destination','list'):
+            def invalid(inputs, attempt, deadline):
+                result = prepare(inputs, attempt, deadline); path = result['rotary.safetensors']
+                if kind == 'missing': return {}
+                if kind == 'extra': return dict(result, extra=path)
+                if kind == 'duplicate-sequence': return [('rotary.safetensors',path)]*2
+                if kind == 'foreign': return {'rotary.safetensors':self.gguf}
+                if kind == 'wrong-destination': return {'other.safetensors':path}
+                if kind == 'list': return list(result.items())
+                path.unlink(); path.symlink_to(self.gguf); return result
+            with self.subTest(kind=kind), patch.object(self.binding,'prepare',side_effect=invalid):
+                with self.assertRaisesRegex(HemError,'Incomplete preparation'): self.acquire(name=kind)
                 row = self.registry.get_model(kind)
                 self.assertFalse(Path(row['directory']).exists())
-                self.assertFalse((Path(row['pending']['path']) / 'rotary.safetensors').exists())
+                self.assertFalse((Path(row['pending']['path'])/'rotary.safetensors').exists())
 
     def test_output_appearing_during_preparation_is_not_adopted(self):
         prepare = self.binding.prepare
-        def raced(plan, inputs, attempt, deadline):
+        def raced(inputs, attempt, deadline):
             row = self.registry.get_model('speech')
             (Path(row['pending']['path']) / 'rotary.safetensors').write_bytes(b'foreign')
-            return prepare(plan, inputs, attempt, deadline)
+            return prepare(inputs, attempt, deadline)
         with patch.object(self.binding, 'prepare', side_effect=raced):
             with self.assertRaisesRegex(HemError, 'Conflicting staged generated'): self.acquire()
         row = self.registry.get_model('speech')
@@ -146,18 +144,18 @@ class MoonshineAcquisitionTest(AcquisitionFixture, unittest.TestCase):
         root = Path(self.registry.get_model('speech')['directory'])
         (root / 'rotary.safetensors').unlink()
         with self.assertRaisesRegex(HemError, 'identity is unproven'): self.acquire()
-        self.assertEqual(self.binding.events, ['preflight', 'prepare'])
+        self.assertEqual(self.events, ['preflight', 'prepare'])
 
     def test_original_receipt_guards_all_consumers(self):
         self.acquire(); row = self.registry.get_model('speech'); root = Path(row['directory'])
         receipt = root / hem_models._GENERATED_RECEIPT; original = receipt.read_bytes()
         (root / 'rotary.safetensors').write_bytes(b'drift')
         for consume in (lambda: hem_models.validate(self.registry, 'speech'),
-                        lambda: hem_models.model_files(self.registry, 'speech'), self.acquire):
+                        lambda: self.inspect('speech'), self.acquire):
             with self.assertRaisesRegex(HemError, 'identity is unproven'): consume()
         self.assertFalse(hem_models.show(self.registry, 'speech')['accessible'])
         self.assertEqual(receipt.read_bytes(), original)
-        self.assertEqual(self.binding.events, ['preflight', 'prepare'])
+        self.assertEqual(self.events, ['preflight', 'prepare'])
 
     def test_missing_published_receipt_never_recreated(self):
         self.acquire(); root = Path(self.registry.get_model('speech')['directory'])
@@ -176,7 +174,7 @@ class MoonshineAcquisitionTest(AcquisitionFixture, unittest.TestCase):
         receipt = (root / hem_models._GENERATED_RECEIPT).read_bytes()
         self.acquire()
         self.assertEqual((root / hem_models._GENERATED_RECEIPT).read_bytes(), receipt)
-        self.assertEqual(self.binding.events, ['preflight', 'prepare'])
+        self.assertEqual(self.events, ['preflight', 'prepare'])
 
     def test_rename_before_database_update_cannot_adopt_missing_receipt(self):
         update = self.registry.update_model
@@ -200,17 +198,26 @@ class MoonshineAcquisitionTest(AcquisitionFixture, unittest.TestCase):
         self.assertEqual(receipt.read_bytes(), original)
         self.assertFalse(Path(row['directory']).exists())
 
-    def test_repeated_generated_roles_match_complete_declarations(self):
-        data = hem_models._declaration(self.recipe)
-        data['artifacts'].append(dict(data['artifacts'][-1], id='rotary2', path='nested/second.safetensors'))
-        recipe = recipes.parse(json.dumps(data).encode())
-        binding = Binding(recipe.pipeline, recipe.modality, recipe.artifacts)
-        with patch.object(recipes, 'load', return_value=recipe), patch.object(pipelines, 'get', return_value=binding):
-            self.acquire()
-            files = hem_models.model_files(self.registry, 'speech')
-        generated = [a for a in files.files if a.ownership == 'generated-owned']
-        self.assertEqual(len(generated), 2)
-        self.assertNotEqual(generated[0].path.stat().st_ino, generated[1].path.stat().st_ino)
+    def test_extra_generated_purpose_is_rejected_before_effects(self):
+        from copy import deepcopy
+        data = deepcopy(self.recipe)
+        data['files']['rotary2'] = dict(path='nested/second.safetensors',source={'kind':'generated'})
+        source = next(root for root in pipelines.catalog_roots() if root.is_dir())
+        root = self.root/'catalog'; shutil.copytree(source, root)
+        selected = next(root.glob(f"**/recipes/{data['id']}.json"))
+        selected.write_text(json.dumps(data))
+        with patch.object(pipelines,'catalog_roots',return_value=(root,)):
+            with self.assertRaisesRegex(HemError,'asset'): self.acquire()
+        self.assertEqual(self.events,[]); self.fetch.assert_not_called()
+        self.assertEqual(self.registry.list_models(), [])
+
+    def test_generated_result_does_not_reuse_one_inode_for_two_destinations(self):
+        from binding.python.models.model_store import generated_outputs, ModelImportError
+        attempt = self.root/'attempt'; attempt.mkdir()
+        first = attempt/'first'; first.write_bytes(b'owned')
+        second = attempt/'second'; os.link(first,second)
+        with self.assertRaisesRegex(ModelImportError,'aliased'):
+            generated_outputs(attempt, {'one':first,'two':second}, ('one','two'))
 
 
 class PreparationProcessTest(unittest.TestCase):
@@ -268,8 +275,8 @@ class PreparationProcessTest(unittest.TestCase):
             prior = Path.cwd()
             try:
                 os.chdir(caller)
-                with patch.object(preparation, 'tool_directory', return_value=trusted), patch.object(preparation, 'TOOL_FILES', {}):
-                    preparation.preflight()
+                with patch.object(preparation, 'tool_directory', return_value=trusted), patch.object(preparation, 'load_operation', return_value={'tool_files': {}}):
+                    preparation.preflight(Deadline.after(30))
             finally:
                 os.chdir(prior)
             self.assertFalse(marker.exists())
@@ -285,4 +292,4 @@ class PreparationProcessTest(unittest.TestCase):
 
     def test_unsupported_interpreter_has_actionable_guidance(self):
         with patch.object(preparation.sys, 'version_info', (3, 11)), self.assertRaisesRegex(HemError, 'assets-dir'):
-            preparation.preflight()
+            preparation.preflight(Deadline.after(30))

@@ -18,7 +18,7 @@ from ..control.hem_state import _name
 from .hem_tui_provider import _read_snapshot
 from ..runtime_paths import state_root
 from ..models import pipelines
-from ..models.recipe_types import freeze_json
+from ..models.hem_config import freeze_json
 
 MAX_LOG_BATCH_BYTES = 256 * 1024
 MAX_NATIVE_LOG_BYTES = 1024 * 1024
@@ -292,7 +292,7 @@ class ServerLogSource(_TrackedLogSource):
 
 
 def _parse_native_batch(payload: bytes, selection: LogSelection,
-                        previous_cursor: Optional[str], *, descriptor=None):
+                        previous_cursor: Optional[str], *, executable=None):
     if not payload.endswith(b"\n"):
         raise HemError("native log response is incomplete")
     try:
@@ -341,12 +341,14 @@ def _parse_native_batch(payload: bytes, selection: LogSelection,
         if item["event"] == "gap":
             entries.append(LogEntry("gap", f"native log gap {item['from']}..{item['to']}"))
         else:
-            if descriptor is None:
+            if executable is None:
                 text = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             else:
                 from ..models import modalities
                 try:
-                    text = modalities.get(descriptor.modality).interpret(freeze_json(item), descriptor).text
+                    event = freeze_json(item)
+                    declaration, _catalog, _identity = pipelines.load(executable)
+                    text = modalities.get(declaration['modality']).interpret(event)
                 except (ValueError, TypeError) as error:
                     raise HemError('native log event has invalid JSON values') from error
             entries.append(LogEntry("data", text))
@@ -412,10 +414,9 @@ class NativeModelLogSource(_TrackedLogSource):
         except (HemError, KeyError, TypeError, ValueError, OSError):
             return self._unavailable_batch()
         try:
-            descriptor = (pipelines.get(instance['pipeline']).describe()
-                          if instance.get('pipeline') is not None else None)
+            executable = instance.get('pipeline')
             identity, cursor, entries = _parse_native_batch(
-                response.body, self.selection, self._cursor, descriptor=descriptor)
+                response.body, self.selection, self._cursor, executable=executable)
         except _StreamChanged:
             self._cursor = None
             self._reset_pending = True

@@ -1,14 +1,9 @@
 {
-  "format": 1,
+  "format": 3,
   "id": "qwen35-08b-q5-k-xl",
   "name": "Qwen3.5 0.8B · Q5_K_XL",
-  "modality": "chat",
-  "pipeline": "qwen-08b",
-  "artifacts": [
-    {
-      "id": "weights",
-      "role": "weights",
-      "format": "gguf",
+  "files": {
+    "weights": {
       "path": "model.gguf",
       "source": {
         "kind": "huggingface",
@@ -17,10 +12,7 @@
         "filename": "Qwen3.5-0.8B-UD-Q5_K_XL.gguf"
       }
     },
-    {
-      "id": "tokenizer",
-      "role": "tokenizer",
-      "format": "json",
+    "tokenizer": {
       "path": "tokenizer.json",
       "source": {
         "kind": "huggingface",
@@ -29,12 +21,13 @@
         "filename": "tokenizer.json"
       }
     }
-  ],
+  },
   "configuration": {
     "rows": 4,
     "context_capacity": 8192,
     "pool_capacity": 32768,
     "prefill_capacity": 128,
     "mtp": false
-  }
+  },
+  "executable": "llm/qwen/qwen_08b/executable.json"
 }

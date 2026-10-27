@@ -1,0 +1,33 @@
+{
+  "format": 3,
+  "id": "comet-first",
+  "name": "Generic onboarding comet-first",
+  "files": {
+    "weights": {
+      "path": "model.gguf",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "fixture/comet-first",
+        "revision": "1111111111111111111111111111111111111111",
+        "filename": "model.gguf"
+      }
+    },
+    "tokenizer": {
+      "path": "tokenizer.json",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "fixture/comet-first",
+        "revision": "1111111111111111111111111111111111111111",
+        "filename": "tokenizer.json"
+      }
+    }
+  },
+  "configuration": {
+    "rows": 4,
+    "context_capacity": 8192,
+    "pool_capacity": 32768,
+    "prefill_capacity": 128,
+    "mtp": false
+  },
+  "executable": "astronomy/comet/executable.json"
+}

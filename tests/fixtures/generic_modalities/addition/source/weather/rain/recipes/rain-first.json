@@ -1,0 +1,48 @@
+{
+  "format": 3,
+  "id": "rain-first",
+  "name": "Generic onboarding rain-first",
+  "files": {
+    "weights": {
+      "path": "model.safetensors",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "fixture/rain-first",
+        "revision": "1111111111111111111111111111111111111111",
+        "filename": "model.safetensors"
+      }
+    },
+    "tokenizer": {
+      "path": "tokenizer.json",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "fixture/rain-first",
+        "revision": "1111111111111111111111111111111111111111",
+        "filename": "tokenizer.json"
+      }
+    },
+    "configuration": {
+      "path": "config.json",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "fixture/rain-first",
+        "revision": "1111111111111111111111111111111111111111",
+        "filename": "config.json"
+      }
+    },
+    "rotary": {
+      "path": "rotary.safetensors",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "fixture/rain-first",
+        "revision": "1111111111111111111111111111111111111111",
+        "filename": "rotary.safetensors"
+      }
+    }
+  },
+  "configuration": {
+    "pending_requests": 4,
+    "options": {}
+  },
+  "executable": "weather/rain/executable.json"
+}

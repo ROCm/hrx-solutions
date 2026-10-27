@@ -15,7 +15,8 @@ from urllib.parse import urlsplit
 
 from ..hem_common import DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from .hem_http import primary_parameters, registration
-from ..models.recipe_types import ProtocolDescriptor
+from typing import Mapping
+from ..models.hem_config import freeze_json
 from .hem_process import ProcessManager, observe_server, require_build
 from .hem_state import _name
 
@@ -29,7 +30,7 @@ class OperationTarget:
     incarnation: int
     server_revision: int
     instance_revision: int
-    profile: ProtocolDescriptor
+    profile: Mapping
     build_identity: tuple[tuple[str, str], ...]
     registration: str
     parameter_operation: str
@@ -175,7 +176,7 @@ def _native(document, instance_name, incarnation, profile, *, revalidating):
             or not all(isinstance(value, list) and all(isinstance(item, str) for item in value)
                        for value in facts[2:])):
         raise _unknown('native operation profile evidence is incomplete')
-    if facts != (profile.native_kind, profile.endpoint, list(profile.input_modalities), list(profile.output_modalities)):
+    if facts != (profile['native_kind'], profile['endpoint'], list(profile['input_modalities']), list(profile['output_modalities'])):
         raise HemError('native registration is incompatible with the selected operation', reason='incompatible')
     primary = primary_parameters(loom)
     if (not isinstance(loom.get('registration'), str) or not isinstance(loom.get('parameter_operation'), str)
@@ -221,7 +222,7 @@ def resolve_operation_target(registry, server_id, instance_name, operation, dead
     _name(instance_name)
     try:
         from ..models import modalities
-        profile = modalities.get({"chat": "chat", "transcription": "asr"}[operation]).PROTOCOL
+        profile = freeze_json(modalities.get({"chat": "chat", "transcription": "asr"}[operation]).PROTOCOL)
     except (ValueError, KeyError) as error:
         raise InvalidInput('unsupported operation; select chat or transcription') from error
     with _budget(registry, deadline):

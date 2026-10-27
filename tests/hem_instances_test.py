@@ -4,7 +4,7 @@ Synthetic payloads prove orchestration, never model/GPU compatibility. The small
 process fixture additionally exercises real pin/accepted-socket ownership hooks.
 """
 from dataclasses import replace
-from contextlib import contextmanager, redirect_stderr
+from contextlib import ExitStack, contextmanager, redirect_stderr
 import io
 import json
 import os
@@ -20,6 +20,9 @@ from unittest.mock import patch
 
 from binding.python.control import hem_instances, hem_process, hem_state
 from binding.python.models import hem_config, hem_models, pipelines, recipes
+from tests.recipe_config_fixture import SOURCE
+
+EXECUTABLE = 'llm/qwen/qwen_08b/executable.json'
 from binding.python.hem_common import Deadline, DeadlineExpired, HemError, InvalidInput, UncertainOutcome
 from binding.python.control.hem_http import NativeClient
 from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
@@ -53,7 +56,7 @@ class LifecycleTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.registry = hem_state.Registry(self.root / 'state')
-        self.processes = Processes(Path(hem_config.pipeline_info('qwen-08b')['catalog']).parents[3])
+        self.processes = Processes(SOURCE.parent)
         self.manager = hem_instances.InstanceManager(self.registry, processes=self.processes)
         output = redirect_stderr(io.StringIO())
         output.__enter__()
@@ -61,7 +64,7 @@ class LifecycleTest(unittest.TestCase):
         gguf, tokenizer = self.root / 'tiny.gguf', self.root / 'tokenizer.json'
         write_gguf(gguf, tensors=[('fixture', [1], 0, 0)])
         tokenizer.write_text('{}')
-        hem_models.import_model(self.registry, 'tiny', ggufs=[gguf], tokenizer=tokenizer, pipeline='qwen-08b')
+        hem_models.import_model(self.registry, 'tiny', ggufs=[gguf], tokenizer=tokenizer, recipe_id='qwen35-08b-q5-k-xl')
         self.build = patch.object(hem_process, 'require_build', side_effect=lambda server, package, deadline: Path(server['build']['directory']) / 'loom-pipeline')
         self.build.start()
         self.addCleanup(self.build.stop)
@@ -292,8 +295,9 @@ class LifecycleTest(unittest.TestCase):
     def test_catalog_mapping_rejects_missing_or_escaping_paths_before_registration(self):
         with fixture(self.respond) as (endpoint, _):
             server = self.server(endpoint)
-            prepared = hem_models.model_files(self.registry, 'tiny')
-            resolved = hem_config.resolve(recipes.load(prepared.recipe_id), prepared)
+            with self.registry.lock('model', 'tiny'):
+                inspected = hem_models.qualify(self.registry, 'tiny')
+                resolved = hem_config.resolve(*inspected)
             retained_root = Path(server['build']['directory']) / 'loom-pipeline'
             retained = retained_root / resolved.catalog.relative_to(self.processes.package_root / 'loom-pipeline')
             original = retained.with_name('saved-catalog')
@@ -322,21 +326,37 @@ class LifecycleTest(unittest.TestCase):
             checked = []
             original_resolve = hem_config.resolve
             original_emit = hem_config.deployment_document
-            def resolve(*args, **kwargs):
-                self.assertIs(kwargs['deadline'], deadline)
-                answer = original_resolve(*args, **kwargs)
-                checked.append(answer)
-                return answer
-            def emit(value, *args, **kwargs):
-                self.assertIs(value, checked[0])
-                self.assertIs(kwargs['deadline'], deadline)
-                return original_emit(value, *args, **kwargs)
-            with patch.object(hem_config, 'resolve', side_effect=resolve), \
-                 patch.object(hem_config, 'deployment_document', side_effect=emit), \
-                 patch.object(hem_config, '_catalog', wraps=hem_config._catalog) as modules:
-                self.start(server, deadline, overrides={'rows': 2, 'context_capacity': 4096})
+            selected, _catalog, _identity = pipelines.load(EXECUTABLE)
+            modality = hem_config.modalities.get(selected['modality'])
+            original_programs = pipelines.programs
+            with patch.object(pipelines, 'programs', wraps=original_programs) as admission_programs, \
+                 ExitStack() as after_checked:
+                def resolve(*args, **kwargs):
+                    self.assertIs(kwargs['deadline'], deadline)
+                    with patch.object(pipelines, 'programs', wraps=original_programs) as programs, \
+                         patch.object(modality, 'definition', wraps=modality.definition) as definition:
+                        answer = original_resolve(*args, **kwargs)
+                    programs.assert_called_once()
+                    self.assertEqual(programs.call_args.args[0]['id'], answer.executable_id)
+                    self.assertEqual(programs.call_args.args[1], answer.catalog)
+                    self.assertIs(programs.call_args.args[2], deadline)
+                    definition.assert_called_once()
+                    checked.append(answer)
+                    for target, name in ((pipelines,'load'), (pipelines,'programs'),
+                                         (recipes,'load'), (modality,'definition')):
+                        after_checked.enter_context(patch.object(
+                            target, name, side_effect=AssertionError('reselected after checked resolution')))
+                    return answer
+                def emit(value, *args, **kwargs):
+                    self.assertIs(value, checked[0])
+                    self.assertIs(kwargs['deadline'], deadline)
+                    return original_emit(value, *args, **kwargs)
+                with patch.object(hem_config, 'resolve', side_effect=resolve), \
+                     patch.object(hem_config, 'deployment_document', side_effect=emit):
+                    self.start(server, deadline, overrides={'rows':2,'context_capacity':4096})
+                    admission_programs.assert_called_once()
+                    self.assertIs(admission_programs.call_args.args[2], deadline)
             self.assertEqual(len(checked), 1)
-            modules.assert_called_once()
             row = self.row()
             sent = [json.loads(body) for method, path, body, _ in requests
                     if method == 'POST' and path.endswith('/register')][0]
@@ -349,10 +369,11 @@ class LifecycleTest(unittest.TestCase):
         with fixture(self.respond) as (endpoint, _):
             server = self.server(endpoint)
             retained_root = Path(server['build']['directory']) / 'loom-pipeline'
-            selected = Path(hem_config.pipeline_info('qwen-08b')['catalog'])
+            selected = Path(hem_config.executable_info(EXECUTABLE)['catalog'])
             retained = retained_root / selected.relative_to(self.processes.package_root / 'loom-pipeline')
-            modules = pipelines.get('qwen-08b').describe().programs
-            provider = retained / modules.providers[-1]
+            selected_executable, program_root, _ = pipelines.load(EXECUTABLE)
+            modules = pipelines.programs(selected_executable, program_root, Deadline.after())
+            provider = retained / modules['sources'][-1]
             provider.write_bytes(provider.read_bytes() + b'\n')
             with self.assertRaisesRegex(InvalidInput, 'checked serving interpretation'):
                 self.start(server)
@@ -408,12 +429,12 @@ class LifecycleTest(unittest.TestCase):
     def test_one_deadline_includes_validation_and_no_native_after_expiry(self):
         with fixture(self.respond) as (endpoint, _):
             server = self.server(endpoint)
-            original = hem_models.model_files
+            original = hem_models.qualify
             def slow(*args, **kwargs):
                 result = original(*args, **kwargs)
                 time.sleep(.06)
                 return result
-            with patch.object(hem_models, 'model_files', side_effect=slow):
+            with patch.object(hem_models, 'qualify', side_effect=slow):
                 with self.assertRaises(DeadlineExpired):
                     self.start(server, Deadline.after(.03))
             self.assertEqual(self.calls, [])
@@ -527,13 +548,13 @@ class LifecycleTest(unittest.TestCase):
     def test_start_does_not_reenter_model_or_server_lock(self):
         with fixture(self.respond) as (endpoint, _):
             server = self.server(endpoint)
-            original = hem_models.model_files
+            original = hem_models.qualify
             def check_lock(*args, **kwargs):
                 with self.assertRaisesRegex(HemError, 'not reentrant'):
                     with self.registry.lock('model', 'tiny'):
                         pass
                 return original(*args, **kwargs)
-            with patch.object(hem_models, 'model_files', side_effect=check_lock):
+            with patch.object(hem_models, 'qualify', side_effect=check_lock):
                 self.start(server)
             with self.registry.lock('server', 'server'):
                 pass
@@ -642,9 +663,8 @@ class OwnedProcessLifecycleTest(unittest.TestCase):
             (package / '_native/lib').mkdir()
             shutil.copy2(self.binary, package / '_native/bin/loom-serve')
             (package / '_native/lib/libhsa-runtime64.so.1').write_bytes(b'CPU fixture only')
-            original_info = hem_config.pipeline_info
-            source_catalog = Path(original_info('qwen-08b')['catalog'])
-            shutil.copytree(source_catalog.parents[2], package / 'loom-pipeline')
+            source_catalog = Path(hem_config.executable_info(EXECUTABLE)['catalog'])
+            shutil.copytree(SOURCE, package / 'loom-pipeline')
             registry = hem_state.Registry(root / 'state')
             processes = hem_process.ProcessManager(registry, package_root=package, emit=lambda _: None)
             manager = hem_instances.InstanceManager(registry, processes=processes)
@@ -657,21 +677,22 @@ class OwnedProcessLifecycleTest(unittest.TestCase):
                 write_gguf(weights, tensors=[('fixture', [1], 0, 0)])
                 tokenizer.write_text('{}')
                 with patch.object(pipelines, '__file__', str(package / 'models/pipelines.py')):
-                    hem_models.import_model(registry, 'tiny', ggufs=[weights], tokenizer=tokenizer, pipeline='qwen-08b')
+                    hem_models.import_model(registry, 'tiny', ggufs=[weights], tokenizer=tokenizer, recipe_id='qwen35-08b-q5-k-xl')
                     answer = manager.start(server, 'tiny', Deadline.after(5), name='chat')
                 self.assertTrue(answer['completed'])
                 row = registry.get_instance('fixture', server['launch_token'], 'chat')
                 deployment = json.loads(Path(row['document']).read_text())
                 retained = Path(deployment['base_directory'])
-                modules = pipelines.get('qwen-08b').describe().programs
-                self.assertEqual((retained / modules.control).read_bytes(), (source_catalog / modules.control).read_bytes())
-                self.assertEqual(retained, Path(server['build']['directory']) / 'loom-pipeline' / source_catalog.relative_to(source_catalog.parents[2]))
+                selected_executable, program_root, _ = pipelines.load(EXECUTABLE)
+                modules = pipelines.programs(selected_executable, program_root, Deadline.after())
+                self.assertEqual((retained / modules['control']).read_bytes(), (source_catalog / modules['control']).read_bytes())
+                self.assertEqual(retained, Path(server['build']['directory']) / 'loom-pipeline' / source_catalog.relative_to(SOURCE))
                 self.assertFalse(list((Path(server['build']['directory']) / 'instances').glob('*/sources-*')))
                 self.assertIn(str(retained), row['dependencies'])
                 # Removing the package cannot invalidate the retained sources or
                 # prevent safe stop of the already observed original incarnation.
                 shutil.rmtree(package)
-                self.assertTrue((retained / modules.prepare).is_file())
+                self.assertTrue((retained / modules['prepare']).is_file())
                 with patch.object(pipelines, '__file__', str(package / 'models/pipelines.py')):
                     with self.assertRaises(HemError):
                         manager.start(server, 'tiny', Deadline.after(3), name='new-alias')

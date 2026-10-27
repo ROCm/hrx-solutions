@@ -6,9 +6,10 @@ run it first, then return here to change model policy, kernels, or integration.
 Loom Control generates model registration JSON for an already running native server,
 using the selected catalog, model assets, capacities, and MTP capability.
 
-The pipeline ID `qwen` selects `qwen/qwen_27b` for Qwen3.8-27B
-UD-Q5_K_XL. The ID `qwen-08b` selects `qwen/qwen_08b` for Qwen3.5-0.8B
-UD-Q5_K_XL, including its exact per-layer Q4_K/Q5_K/Q6_K mix and tied Q6 output.
+The recipe `qwen38-27b-q5-k-xl` references the executable declaration in
+`qwen/qwen_27b/` for Qwen3.8-27B UD-Q5_K_XL. The recipe
+`qwen35-08b-q5-k-xl` references `qwen/qwen_08b/` for Qwen3.5-0.8B UD-Q5_K_XL,
+including its exact per-layer Q4_K/Q5_K/Q6_K mix and tied Q6 output.
 Dimensions, tensor names, quantization layouts, layer order,
 and chat conventions are explicit in the source. Adapting it to another model
 requires reviewing those choices, even when the checkpoint has a similar name.
@@ -27,15 +28,18 @@ Three layers cooperate:
 | Python tools in this repository | Model inventory, validation, dynamic registration and owned processes | [`hem_cli.py`](../../binding/python/hem_cli.py), [`model_store.py`](../../binding/python/models/model_store.py), [`recipes.py`](../../binding/python/models/recipes.py) reads the authored
 [27B](qwen/qwen_27b/recipes/qwen38-27b-q5-k-xl.json) and
 [0.8B](qwen/qwen_08b/recipes/qwen35-08b-q5-k-xl.json) JSON recipes.
-[`pipelines.py`](../../binding/python/models/pipelines.py) selects the concrete
-binding; CHAT policy and native definition construction live in the modality
-owner. Acquisition, configuration and discovery consume these same declarations.
+[`pipelines.py`](../../binding/python/models/pipelines.py) reads the recipe's direct
+`executable.json` reference and checks its declared serving facts, assets and
+program closure. Shared CHAT policy constructs the native definition from those
+facts; it does not select a model by name. Acquisition, configuration and
+discovery consume these same declarations.
 
 The general [`gguf.py`](../../binding/python/models/gguf.py) reader bounds and
 checks GGUF header/storage and explicit fragment-index structure. Local imports
 retain these format checks and required-file/program integrity, without comparing
 model tensors or tokenizer fingerprints against a Python architecture profile.
-Select the intended packaged pipeline explicitly when recipes are ambiguous.
+Select the intended recipe explicitly with `--recipe`; `chat` identifies a
+modality and cannot choose between the two executables.
 Native preparation/loading reports actual model incompatibility. Local asset
 checks do not establish numerical correctness or native readiness.
 
@@ -44,15 +48,15 @@ For the 0.8B checkpoint, import its matching local files and select its catalog:
 ```sh
 loom-control model import qwen-small --alias \
   --gguf /path/to/Qwen3.5-0.8B-UD-Q5_K_XL.gguf \
-  --tokenizer /path/to/tokenizer.json --pipeline qwen-08b
-loom-control model validate qwen-small --pipeline qwen-08b
+  --tokenizer /path/to/tokenizer.json --recipe qwen35-08b-q5-k-xl
+loom-control model validate qwen-small --modality chat
 loom-control server start --name local --device amdgpu --listen 127.0.0.1:8080
 loom-control instance start qwen-small --server local
 ```
 
-Serving enables MTP at depth three automatically for `qwen`, and disables it
-for `qwen-08b`. `--mtp` or `--mtp-depth` explicitly requests MTP and fails before
-native execution for the 0.8B checkpoint. `--no-mtp` disables it for 27B.
+The current 27B executable declares MTP up to depth three and its recipe presets
+that depth; the 0.8B executable declares MTP unsupported. `--mtp` or `--mtp-depth`
+explicitly requests MTP and fails before native execution for the 0.8B checkpoint. `--no-mtp` disables it for 27B.
 The thin `loom-serve` launcher passes native deployment documents and options through.
 The native preparation policy also rejects nonzero draft depth for 0.8B with
 an unsupported-MTP diagnostic. Both catalogs accept empty model options only;
@@ -60,12 +64,16 @@ an unsupported-MTP diagnostic. Both catalogs accept empty model options only;
 
 Changes to geometry or encoding belong with the concrete pipeline sources and
 native validation. Update authored recipe coordinates/configuration and the
-selected binding when their supported contract changes; no Python shape profile
-is maintained as a separate qualification authority.
+selected executable declaration when their supported contract changes; no Python
+model selector or shape profile is maintained as a separate qualification authority.
 
-The **model ID** is the identity of an imported checkpoint. The **pipeline ID**
-selects its implementation. Keeping both lets multiple imports use the same
-catalog without inheriting the same public HTTP name.
+The **model ID** names a local import. The **recipe ID** selects pinned files and
+a configuration preset; its direct **executable reference** selects the program
+and asset contract. The **modality** is the shared CHAT or ASR interface. Multiple
+imports can use one catalog without inheriting the same public HTTP name.
+`loom-control modality show chat` describes that interface;
+`loom-control executable show llm/qwen/qwen_08b/executable.json` shows one concrete
+executable without treating its model name as modality dispatch.
 
 ## 2. Launch and materialize the model
 
@@ -75,7 +83,8 @@ process identity and waits for associated HTTP readiness. Model acquisition is
 separate from this server lifecycle.
 
 [`hem_instances.py`](../../binding/python/control/hem_instances.py) validates the assets
-and resolves flags over configuration-file settings over pipeline defaults.
+and resolves explicit flags over configuration-file settings over recipe presets
+over executable defaults.
 It retains the named source bundle and exact registration document, posts a
 drained registration, activates parameters, waits for ready/idle/active status
 without an error, then opens admission. Dependencies remain retained until
@@ -83,7 +92,7 @@ confirmed retirement; uncertain outcomes preserve evidence for inspection.
 The [operator walkthrough](../../docs/solutions/llm-serving.md) describes these
 commands, configuration and recovery behavior.
 
-The Qwen adapter uses the immutable catalog without rewriting its control
+Shared configuration uses the checked Qwen catalog without rewriting its control
 module. The deployment document’s `name` determines public HTTP routing and
 response identity, independently of the control policy’s static `model_name`.
 Managed launches retain their own catalog/build copies independently of package
@@ -103,20 +112,23 @@ for bundled native libraries. Linux binaries also receive a relative
 
 ### Authored sources and the installed bytecode catalog
 
-[`qwen/qwen_27b/sources.txt`](qwen/qwen_27b/sources.txt) lists the configuration, VM functions,
-command programs, and kernel providers needed for serving. Every path is
-relative to `qwen/qwen_27b/`; the `../../motifs/ggml/` entries are part of the package.
-Copy the whole `llm/` tree when moving a catalog so those paths still resolve.
+[`qwen/qwen_27b/executable.json`](qwen/qwen_27b/executable.json) declares
+serving bounds/defaults, asset requirements, program roles and the complete source
+hash closure. The 0.8B executable has its own declaration. Source program paths
+are relative to the declared `llm` root, including shared Qwen providers and
+`motifs/ggml/`. Preserve that root-relative layout when moving a source catalog.
 
-The repository and source archive keep these authored `.loom` files. Wheel
-builds merge each complete ordered manifest into one `pipeline.loombc`, with
-all preparation, control, configuration, weight-policy and provider definitions.
-Exactly two portable modules ship, one each for the declared 0.8B and 27B
-model/data-type specifications. Each installed catalog has a `pipeline.json`
-descriptor and authored recipe JSON; it has no source manifest or auxiliary
-executable modules. Preparation's checked policy locator references the same
-`pipeline.loombc`. Both native deployment builders select this module for
-prepare, control and the sole sources entry.
+The repository and source archive keep these authored `.loom` files. Build data
+in [`catalog_sources.bzl`](../catalog_sources.bzl) declares compiler groups and
+policy/root expectations. For each current Qwen executable, wheel builds merge
+its selected ordered source closure into one `pipeline.loombc`, with preparation,
+control, configuration, weight-policy and provider definitions. The normalized
+installed `executable.json` preserves serving/assets/preparation semantics and
+records compiled roles/hashes plus source provenance; `build.json` records checked
+compiler observations for independent validation. Authored recipe JSON ships
+beside it. For these Qwen declarations, prepare, control and the sole sources
+entry all reference the same `pipeline.loombc`, as does the checked preparation
+policy locator. No Python model table determines which catalog ships.
 
 No `.loom` files or linker CLI ship. The server loads the complete bytecode,
 then specializes device/capacity settings and compiles native code at runtime.
@@ -335,9 +347,9 @@ available at the current pin:
 * [Qwen implementation and checks](https://github.com/ROCm/hrx/blob/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve/models/qwen/README.md)
   for kernel differentials, packed execution, MTP, and replay witnesses.
 
-Keep `sources.txt` complete when introducing providers and retain the shared
-motif paths in packaged output. Rebuild and reinstall the wheel to evaluate
-the delivered solution; a running server retains its existing compiled code.
+Keep the executable declaration's source closure/hashes and compiler-group data
+complete when introducing providers, including the shared motif paths. Rebuild
+and reinstall the wheel to evaluate the delivered solution; a running server retains its existing compiled code.
 Record the checkpoint revisions, GPU, source changes, and runtime settings
 with results. Keep weights and generated serving outputs outside this repository.
 
@@ -430,9 +442,10 @@ The source files originate in the HRX repository at commit
 [`6f6176173bb543d0c330a35b78a1837582a76870`](https://github.com/ROCm/hrx/tree/6f6176173bb543d0c330a35b78a1837582a76870/experimental/loom_serve).
 Qwen sources originate in `experimental/loom_serve/models/qwen/`; shared
 quantization motifs originate in `experimental/loom_serve/motifs/ggml/`.
-`qwen/qwen_27b/sources.txt` selects architecture configuration and static
-preparation/weight policy beside shared Qwen programs and kernels. The explicit
-compiled shape is in `qwen/qwen_27b/config.loom`; shared providers consume that
+`qwen/qwen_27b/executable.json` declares the source configuration and static
+preparation/weight-policy closure beside shared Qwen programs and kernels;
+compiler groups in `catalog_sources.bzl` select the corresponding build inputs.
+The explicit compiled shape is in `qwen/qwen_27b/config.loom`; shared providers consume that
 configuration. Algorithms, quantization, prepared layouts and schedules retain
 the pinned implementation. The architecture catalog exposes the shared control
 source through `control.loom` for native cold loading.

@@ -1,23 +1,23 @@
-"""Shared artifact acquisition, immutable references and owned publication.
+"""Direct recipe files -> cache/owned publication -> inspected Registry records.
 
-Registry owns reservations and no-replace publication. Pipeline bindings own
-artifact admission and preparation; acquisition never selects a model family.
+Selected executable declarations admit files; Registry owns state and no-replace publication.
+There is no parallel acquisition plan, prepared-file or result object model.
 """
 from __future__ import annotations
 
+from copy import deepcopy
+from functools import partial
 import json
 import os
 from pathlib import Path
 import shutil
 import tempfile
 
-from . import model_download, pipelines, recipes
+from . import model_download, pipelines, recipes, preparation
 from .gguf import inspect_gguf_set
+from .preparation import validate_preparation
 from ..hem_common import Deadline, HemError, InvalidInput
 from .model_store import ModelImportError, generated_outputs, readable_file, validate_model_id
-from .recipe_types import (AcquisitionPlan, AcquisitionResult, ArtifactLocation,
-                           GeneratedSource, HFSource, PreparedArtifact, PreparedModel,
-                           json_document)
 
 _GENERATED_RECEIPT = '.loom-acquisition.json'
 _PREFLIGHT_TIMEOUT = 30
@@ -25,7 +25,6 @@ _PREPARATION_TIMEOUT = 300
 
 
 def _admit_paths(paths):
-    """Keep declared files disjoint from publication bookkeeping and partials."""
     members = [Path(item) for item in paths]
     reserved = [Path(_GENERATED_RECEIPT),
                 *(path.with_name('.' + path.name + '.partial') for path in members)]
@@ -34,81 +33,157 @@ def _admit_paths(paths):
         raise InvalidInput('Artifact destination conflicts with acquisition bookkeeping')
 
 
-def _plan(recipe, binding):
-    binding.validate_artifacts(recipe.artifacts)
-    _admit_paths(item.path for item in recipe.artifacts)
-    descriptor = binding.describe()
-    inputs = tuple(item for item in recipe.artifacts if isinstance(item.source, HFSource))
-    generated = tuple(item for item in recipe.artifacts if isinstance(item.source, GeneratedSource))
-    preparation = descriptor.preparation
-    expected = {(item.role, item.format, item.path) for item in generated}
-    declared = set() if preparation is None else {
-        (item.role, item.format, item.path) for item in preparation.outputs}
-    if (expected != declared or len(expected) != len(generated)
-            or preparation is not None and len(declared) != len(preparation.outputs)):
-        raise InvalidInput('Generated artifacts differ from selected preparation outputs')
-    return AcquisitionPlan(recipe.id, recipe.pipeline, inputs, generated, preparation)
+def _provenance(recipe, identity, kind, selected, executable_identity):
+    return dict(format=1, kind=kind, recipe_id=recipe['id'], recipe_identity=identity,
+                pipeline=recipe['executable'], declaration=deepcopy(recipe),
+                executable=dict(reference=recipe['executable'], id=selected['id'],
+                                identity=executable_identity, declaration=deepcopy(selected)),
+                preparation=_operation_association(selected, recipe))
 
 
-def _declaration(recipe):
-    return dict(format=recipe.format, id=recipe.id, name=recipe.name,
-                modality=recipe.modality, pipeline=recipe.pipeline,
-                artifacts=[dict(id=a.id, role=a.role, format=a.format, path=a.path,
-                                source=(dict(kind='huggingface', repo_id=a.source.repo_id,
-                                             revision=a.source.revision, filename=a.source.filename)
-                                        if isinstance(a.source, HFSource) else dict(kind='generated')))
-                           for a in recipe.artifacts],
-                configuration=json_document(recipe.configuration))
+def _operation_association(selected, recipe):
+    operation = validate_preparation(selected['preparation'], recipe['files'], selected['assets'])
+    return dict(id=operation['id'], declaration=operation) if operation is not None else None
 
 
-def _provenance(recipe, kind):
-    return dict(format=1, kind=kind, recipe_id=recipe.id, recipe_identity=recipe.identity,
-                pipeline=recipe.pipeline, declaration=_declaration(recipe))
-
-
-def _recipe(record, pipeline=None):
+def _recipe(record, executable=None, modality=None):
     provenance = record['provenance']
-    recipe = recipes.load(provenance['recipe_id'])
-    if (recipe.identity != provenance['recipe_identity'] or
-            _declaration(recipe) != provenance['declaration'] or
-            recipe.pipeline != provenance['pipeline'] or pipeline not in (None, recipe.pipeline)):
-        raise InvalidInput('Model recipe declaration or selected pipeline differs; acquire under a new ID')
-    return recipe
+    recipe, identity = recipes.load(provenance['recipe_id'])
+    selected, _, executable_identity = pipelines.load(recipe['executable'])
+    expected = dict(reference=recipe['executable'], id=selected['id'],
+                    identity=executable_identity, declaration=selected)
+    if (identity != provenance['recipe_identity'] or recipe != provenance['declaration'] or
+            recipe['executable'] != provenance['pipeline'] or
+            record['pipeline'] not in (None, recipe['executable']) or
+            provenance.get('executable') != expected or
+            provenance.get('preparation') != _operation_association(selected, recipe) or
+            executable not in (None, recipe['executable'])):
+        raise InvalidInput('Model recipe or executable association differs; acquire under a new ID')
+    if modality not in (None, selected['modality']):
+        raise InvalidInput('--modality differs from the selected executable modality')
+    pipelines.validate_files(selected, recipe['files'])
+    return recipe, selected
 
 
-def _files(record, directory=None):
-    root = Path(directory or record['directory'])
-    provenance = record['provenance']
-    if root.is_symlink():
-        raise InvalidInput('Published model directory cannot be an alias')
-    for asset in record['assets']:
-        path = root / asset['logical_path']
-        relative = path.relative_to(root)
-        if any((root / Path(*relative.parts[:i])).is_symlink() for i in range(1, len(relative.parts))):
-            raise InvalidInput('Model artifact parent cannot be an alias')
-        if asset['ownership'] == 'reference':
-            if not path.is_symlink() or os.readlink(path) != asset['source_path']:
-                raise InvalidInput(f'Model reference mapping changed or is missing: {path}')
-        elif path.is_symlink():
-            raise InvalidInput(f'Owned model artifact cannot be an alias: {path}')
-    evidence = _generated_receipt(record, directory)
-    _check_index(record, root)
-    return PreparedModel(record['id'], provenance['recipe_id'], provenance['recipe_identity'],
-                         provenance['pipeline'], root,
-                         tuple(PreparedArtifact(a['id'], a['role'], a['format'], a['logical_path'],
-                                                root / a['logical_path'], a['prepared_ownership'])
-                               for a in record['assets']), evidence)
-
-
-def _evidence(files):
+def _evidence(dependencies):
     result = []
-    for item in files.files:
-        if not readable_file(item.path):
-            raise InvalidInput(f'Model asset is missing or unreadable: {item.path}')
-        stat = item.path.stat()
-        result.append(dict(path=str(item.path), device=stat.st_dev, inode=stat.st_ino,
+    for path in dependencies:
+        if not readable_file(path):
+            raise InvalidInput(f'Model asset is missing or unreadable: {path}')
+        stat = path.stat()
+        result.append(dict(path=str(path), device=stat.st_dev, inode=stat.st_ino,
                            size=stat.st_size, mtime_ns=stat.st_mtime_ns, ctime_ns=stat.st_ctime_ns))
     return result
+
+
+def inspect_record(record, *, executable=None, modality=None):
+    """Inspect an existing record without Registry writes or saved-valid trust."""
+    try:
+        recipe, selected = _recipe(record, executable, modality)
+        root = Path(record['directory'])
+        dependencies = tuple(root / a['logical_path'] for a in record['assets'])
+        before = _evidence(dependencies)
+        if root.is_symlink():
+            raise InvalidInput('Published model directory cannot be an alias')
+        paths = {}
+        expected = recipe['files']
+        fragment_index = record['provenance'].get('fragment_index')
+        for asset, path in zip(record['assets'], dependencies):
+            purpose = asset['role']
+            declaration = expected.get(asset['id'])
+            is_shard = purpose == 'weights-shard' and fragment_index is not None
+            is_index = (fragment_index is not None and purpose == 'weights' and
+                        asset['logical_path'] == fragment_index['path'] and asset['format'] == 'json')
+            if not is_shard and (declaration is None or purpose != asset['id'] or
+                    not is_index and (asset['logical_path'] != declaration['path'] or
+                                      asset['format'] != selected['assets'][purpose]['format'])):
+                raise InvalidInput('Model mappings differ from the admitted recipe')
+            if is_shard and (asset['format'] != 'gguf' or
+                             asset['logical_path'] not in fragment_index['members']):
+                raise InvalidInput('Fragment mapping differs from its explicit index')
+            if not is_shard:
+                if purpose in paths:
+                    raise InvalidInput('Duplicate model purpose mapping')
+                paths[purpose] = path
+            relative = path.relative_to(root)
+            if any((root / Path(*relative.parts[:i])).is_symlink() for i in range(1, len(relative.parts))):
+                raise InvalidInput('Model artifact parent cannot be an alias')
+            if asset['ownership'] == 'reference':
+                if not path.is_symlink() or os.readlink(path) != asset['source_path']:
+                    raise InvalidInput(f'Model reference mapping changed or is missing: {path}')
+            elif path.is_symlink():
+                raise InvalidInput(f'Owned model artifact cannot be an alias: {path}')
+        if set(paths) != set(expected):
+            raise InvalidInput('Model file inventory differs from the admitted recipe')
+        _generated_receipt(record)
+        _check_index(record, root)
+        after = _evidence(dependencies)
+        if before != after:
+            raise InvalidInput('Model assets changed during presence checks; retry with stable inputs')
+        return paths, dependencies, after
+    except (OSError, ValueError) as error:
+        raise InvalidInput(f'Cannot inspect model {record["id"]}: {error}') from error
+
+
+def _admit_programs(reference, deadline):
+    """Fresh admission at an operation boundary, under the caller's budget."""
+    deadline.remaining()
+    selected, catalog, identity = pipelines.load(reference)
+    pipelines.programs(selected, catalog, deadline)
+    deadline.remaining()
+    return selected, identity
+
+
+def _select(recipe_id, *, executable=None, modality=None, deadline=None):
+    """Read and admit this operation's exact documents before Registry/effects."""
+    if recipe_id is None:
+        raise InvalidInput('Local import requires an explicit --recipe')
+    recipe, identity = recipes.load(recipe_id)
+    if executable not in (None, recipe['executable']):
+        raise InvalidInput('--executable differs from the selected recipe executable')
+    selected, executable_identity = _admit_programs(recipe['executable'], deadline or Deadline.after())
+    if modality not in (None, selected['modality']):
+        raise InvalidInput('--modality differs from the selected executable modality')
+    pipelines.validate_files(selected, recipe['files'])
+    _admit_paths(item['path'] for item in recipe['files'].values())
+    return recipe, identity, selected, executable_identity
+
+
+def _qualify_record(registry, record, executable=None, modality=None):
+    # Acquire/import already admitted programs before their effects. Reuse that
+    # operation's admission; independent qualify below performs a fresh one.
+    model_id = record['id']
+    if record['pending'] and record['pending']['stage'] == 'staging':
+        raise HemError('Acquisition is incomplete; repeat matching import/download before validation')
+    try:
+        paths, dependencies, evidence = inspect_record(record, executable=executable, modality=modality)
+    except HemError as error:
+        registry.record_validation(model_id, valid=False, evidence={'error': str(error)})
+        raise
+    record = registry.record_validation(model_id, valid=True,
+                                        pipeline=record['provenance']['pipeline'], evidence=evidence)
+    return record, paths, dependencies, evidence
+
+
+def qualify(registry, model_id, *, executable=None, modality=None):
+    """Caller holds model lock; freshly admit programs then persist inspection."""
+    record = registry.get_model(model_id)
+    if record['pending'] and record['pending']['stage'] == 'staging':
+        raise HemError('Acquisition is incomplete; repeat matching import/download before validation')
+    reference = record['provenance']['pipeline']
+    if executable not in (None, reference):
+        raise InvalidInput('Selected executable association differs from the model')
+    recorded_modality = record['provenance'].get('executable', {}).get('declaration', {}).get('modality')
+    if modality is not None and recorded_modality in ('chat', 'asr') and modality != recorded_modality:
+        raise InvalidInput('--modality differs from the recorded executable modality')
+    try:
+        _admit_programs(reference, registry.deadline or Deadline.after())
+    except HemError as error:
+        registry.record_validation(model_id, valid=False, evidence={'error': str(error)})
+        raise
+    # Live modality drift is an association failure, not a wrong caller assertion.
+    # Full association checks stay inside _qualify_record's failure persistence.
+    return _qualify_record(registry, record, executable, modality)
 
 
 def _atomic_file(destination, write):
@@ -212,26 +287,6 @@ def _populate(record, *, prepared=None, omit=()):
             _atomic_file(destination, copy)
 
 
-def _qualify(registry, model_id, pipeline=None):
-    record = registry.get_model(model_id)
-    try:
-        recipe = _recipe(record, pipeline)
-        files = _files(record)
-        before = _evidence(files)
-        # Resolving the selected binding retains its catalog/program integrity
-        # checks. No architecture or tensor-shape qualification occurs here.
-        pipelines.get(recipe.pipeline).describe()
-        after = _evidence(files)
-        if before != after:
-            raise InvalidInput('Model assets changed during presence checks; retry with stable inputs')
-    except (OSError, ValueError, HemError) as exc:
-        registry.record_validation(model_id, valid=False, evidence={'error': str(exc)})
-        if isinstance(exc, HemError):
-            raise
-        raise InvalidInput(f'Cannot inspect model {model_id}: {exc}') from exc
-    return registry.record_validation(model_id, valid=True, pipeline=recipe.pipeline, evidence=after)
-
-
 def _preparation_attempt(root, model_id):
     parent = Path(root) / 'preparation-attempts' / model_id
     try:
@@ -243,25 +298,24 @@ def _preparation_attempt(root, model_id):
         raise HemError(f'Could not reserve private preparation output: {error}') from error
 
 
-def _acquire(registry, model_id, assets, provenance, *, obtain=None, plan=None, binding=None, stage_prepare=None):
+def _acquire(registry, model_id, assets, provenance, *, obtain=None, generated=(),
+             prepare=None, preflight=None, inputs=None, stage_prepare=None):
     with registry.lock('model', model_id):
         record = registry.prepare_model(model_id, assets=assets, provenance=provenance)
         pending = record['pending']
         stage = Path(pending['path']) if pending and pending['stage'] == 'staging' else None
-        needs_preparation = (plan is not None and plan.preparation is not None and
-                             stage is not None and stage.exists() and any(
-                                 not os.path.lexists(stage / item.path) for item in plan.generated))
+        needs_preparation = (bool(generated) and stage is not None and stage.exists() and
+                             any(not os.path.lexists(stage / name) for name in generated))
         if needs_preparation:
-            binding.preflight(plan, Deadline.after(_PREFLIGHT_TIMEOUT))
+            preflight(Deadline.after(_PREFLIGHT_TIMEOUT))
         if obtain is not None:
             obtain()
         prepared = {}
         if needs_preparation:
             attempt = _preparation_attempt(registry.root, model_id)
-            inputs = {item.id: model_download._cache_path(item.source) for item in plan.inputs}
-            result = binding.prepare(plan, inputs, attempt, Deadline.after(_PREPARATION_TIMEOUT))
+            result = prepare(inputs, attempt, Deadline.after(_PREPARATION_TIMEOUT))
             try:
-                prepared = generated_outputs(attempt, result, plan.generated)
+                prepared = generated_outputs(attempt, result, generated)
             except ModelImportError as error:
                 raise InvalidInput(f'Incomplete preparation result; attempt retained at {attempt}: {error}') from error
         if stage is None or not stage.exists():
@@ -280,125 +334,121 @@ def _acquire(registry, model_id, assets, provenance, *, obtain=None, plan=None, 
             except OSError as exc:
                 raise HemError(f'Could not acquire model {model_id}; incomplete assets retained: {exc}') from exc
             registry.publish_model(model_id)
-        return _qualify(registry, model_id)
+        record, _, _, evidence = _qualify_record(registry, registry.get_model(model_id))
+        return _view(record, evidence)
 
 
-def _asset(item, source, ownership, prepared_ownership):
-    return dict(id=item.id, role=item.role, format=item.format, logical_path=item.path,
+def _asset(purpose, format, logical_path, source, ownership, prepared_ownership):
+    return dict(id=purpose, role=purpose, format=format, logical_path=logical_path,
                 source_path=str(source), ownership=ownership, prepared_ownership=prepared_ownership)
 
 
-def _locations(recipe):
-    return tuple(ArtifactLocation(a.id, a.path, a.source,
-                                  model_download._cache_path(a.source) if isinstance(a.source, HFSource) else None,
-                                  readable_file(model_download._cache_path(a.source)) if isinstance(a.source, HFSource) else False,
-                                  'hf-reference' if isinstance(a.source, HFSource) else 'generated-owned')
-                 for a in recipe.artifacts)
+def _preview(recipe):
+    artifacts = []
+    for purpose, item in recipe['files'].items():
+        source = item['source']
+        path = model_download._cache_path(source) if source['kind'] == 'huggingface' else None
+        artifacts.append(dict(id=purpose, logical_path=item['path'], source=source,
+                              cache_path=str(path) if path else None,
+                              cached=readable_file(path) if path else False,
+                              ownership='hf-reference' if path else 'generated-owned'))
+    return artifacts
 
 
-def available():
-    return [dict(id=recipe.id, name=recipe.name, modality=recipe.modality, pipeline=recipe.pipeline,
-                 files=[dict(id=item.id, logical_path=item.logical_path, cached=item.cached,
-                             cache_path=str(item.cache_path) if item.cache_path else None,
-                             ownership=item.ownership) for item in _locations(recipe)])
-            for recipe in recipes.list()]
+def available(*, deadline=None):
+    budget = deadline or Deadline.after()
+    admitted = {}
+    result = []
+    for recipe, _ in recipes.list():
+        reference = recipe['executable']
+        if reference not in admitted:
+            admitted[reference], _ = _admit_programs(reference, budget)
+        selected = admitted[reference]
+        pipelines.validate_files(selected, recipe['files'])
+        result.append(dict(id=recipe['id'], recipe_id=recipe['id'], name=recipe['name'],
+                           modality=selected['modality'], executable_id=selected['id'],
+                           executable=reference, pipeline=reference,
+                           files=[{k: v for k, v in item.items() if k != 'source'}
+                                  for item in _preview(recipe)]))
+    return result
 
 
-def download(registry, recipe_id, *, model_id, pipeline=None, offline=False, dry_run=False):
+def download(registry, recipe_id, *, model_id, executable=None, modality=None, offline=False, dry_run=False, deadline=None, _selection=None):
     try:
         validate_model_id(model_id)
     except ModelImportError as error:
         raise InvalidInput(str(error)) from error
-    recipe = recipes.load(recipe_id)
-    if pipeline not in (None, recipe.pipeline):
-        raise InvalidInput('Selected pipeline differs from recipe pipeline')
-    binding = pipelines.get(recipe.pipeline)
-    plan = _plan(recipe, binding)  # Pure admission precedes cache, state and helper work.
+    budget = deadline or (registry.deadline if registry is not None else None) or Deadline.after()
+    recipe, identity, selected, executable_identity = (_selection if _selection is not None else
+        _select(recipe_id, executable=executable, modality=modality, deadline=budget))
     if dry_run:
-        return AcquisitionResult(model_id, recipe.id, recipe.pipeline, 'preview', _locations(recipe))
+        return dict(model_id=model_id, recipe_id=recipe_id, pipeline=recipe['executable'],
+                    executable=recipe['executable'], executable_id=selected['id'], modality=selected['modality'],
+                    state='preview', artifacts=_preview(recipe))
     offline = offline or os.environ.get('HF_HUB_OFFLINE', '').upper() in ('1', 'ON', 'YES', 'TRUE')
-    assets = [_asset(item, model_download._cache_path(item.source), 'reference', 'hf-reference')
-              if isinstance(item.source, HFSource) else
-              _asset(item, registry.root / 'models' / model_id / item.path, 'owned', 'generated-owned')
-              for item in recipe.artifacts]
+    assets, inputs, generated = [], {}, []
+    for purpose, item in recipe['files'].items():
+        source, path = item['source'], item['path']
+        if source['kind'] == 'huggingface':
+            cache = model_download._cache_path(source)
+            assets.append(_asset(purpose, selected['assets'][purpose]['format'], path, cache, 'reference', 'hf-reference'))
+
+        else:
+            generated.append(path)
+            assets.append(_asset(purpose, selected['assets'][purpose]['format'], path,
+                                 registry.root / 'models' / model_id / path, 'owned', 'generated-owned'))
     def obtain():
-        for item in plan.inputs:
-            source = item.source
+        for item in recipe['files'].values():
+            source = item['source']
+            if source['kind'] != 'huggingface':
+                continue
             if not readable_file(model_download._cache_path(source)):
                 if offline:
-                    raise HemError(f'Offline cache is missing {source.repo_id}@{source.revision}/{source.filename}')
+                    raise HemError(f'Offline cache is missing {source["repo_id"]}@{source["revision"]}/{source["filename"]}')
                 try:
                     model_download._run_hf(model_download.command(source))
                 except ModelImportError as error:
                     raise HemError(str(error)) from error
                 if not readable_file(model_download._cache_path(source)):
                     raise HemError('hf did not populate the pinned snapshot; incomplete record retained')
-    _acquire(registry, model_id, assets, _provenance(recipe, 'download'),
-             obtain=obtain, plan=plan, binding=binding)
-    return AcquisitionResult(model_id, recipe.id, recipe.pipeline, 'acquired', _locations(recipe))
-
-
-def _import_recipe(pipeline, formats):
-    if pipeline is None:
-        declarations = recipes.list()
+    if generated:
+        binding = selected['preparation']
+        preflight = partial(preparation.preflight, binding['operation'])
+        prepare = partial(preparation.prepare, binding['operation'])
+        inputs = {name: model_download._cache_path(recipe['files'][purpose]['source'])
+                  for name, purpose in binding['inputs'].items()}
     else:
-        # The binding already owns its catalog location. Read that catalog's
-        # declaration metadata before resolving any other implementation; full
-        # support discovery deliberately keeps its stronger all-entry checks.
-        descriptor = pipelines.get(pipeline).describe()
-        declarations = []
-        for root in pipelines.catalog_roots():
-            if not root.is_dir():
-                continue
-            directory = root / descriptor.bundle.catalog_relative_path / 'recipes'
-            try:
-                directory.resolve().relative_to(root.resolve(strict=True))
-            except (ValueError, OSError, RuntimeError) as error:
-                raise InvalidInput('Selected recipe catalog escapes its packaged root') from error
-            for path in sorted(directory.glob('*.json')):
-                try:
-                    path.resolve(strict=True).relative_to(root.resolve(strict=True))
-                except (ValueError, OSError, RuntimeError) as error:
-                    raise InvalidInput('Selected recipe declaration escapes its packaged root') from error
-                try:
-                    with path.open('rb') as stream:
-                        metadata = recipes.parse(stream.read(recipes.MAX_BYTES + 1))
-                except OSError as error:
-                    raise InvalidInput(f'Cannot read selected recipe declaration {path.name!r}') from error
-                if metadata.pipeline == pipeline:
-                    if path.name != metadata.id + '.json':
-                        raise InvalidInput('Selected recipe filename and declared ID differ')
-                    declarations.append(recipes.load(metadata.id))
-            break
-    candidates = [recipe for recipe in declarations if
-                  all(any(a.format == fmt for a in recipe.artifacts) for fmt in formats)]
-    if len(candidates) != 1:
-        raise InvalidInput('Import requires an unambiguous packaged recipe; select an existing --pipeline')
-    return candidates[0]
+        preflight = prepare = None
+    return _acquire(registry, model_id, assets,
+                    _provenance(recipe, identity, 'download', selected, executable_identity),
+                    obtain=obtain, generated=tuple(generated), inputs=inputs,
+                    preflight=preflight, prepare=prepare)
 
 
-def import_model(registry, model_id, *, ggufs, tokenizer, alias=False, pipeline=None):
-    """Preserve the existing explicit GGUF import command without shape inference."""
+def import_model(registry, model_id, *, ggufs, tokenizer, recipe_id=None, alias=False,
+                 executable=None, modality=None, _selection=None):
     if isinstance(ggufs, (str, Path)):
         ggufs = [ggufs]
     paths = [Path(path).expanduser().absolute() for path in ggufs]
     token = Path(tokenizer).expanduser().absolute()
     if not paths or len(set(paths + [token])) != len(paths) + 1 or any(p.suffix.lower() != '.gguf' for p in paths):
         raise InvalidInput('GGUF members and tokenizer require distinct mappings and .gguf weight files')
-    recipe = _import_recipe(pipeline, ('gguf', 'json'))
-    weights = [a for a in recipe.artifacts if a.role == 'weights' and a.format == 'gguf']
-    tokens = [a for a in recipe.artifacts if a.role == 'tokenizer']
-    if len(weights) != 1 or len(tokens) != 1 or len(recipe.artifacts) != 2:
+    recipe, identity, selected, executable_identity = (_selection if _selection is not None else
+        _select(recipe_id, executable=executable, modality=modality, deadline=registry.deadline))
+    if (set(recipe['files']) != {'weights', 'tokenizer'} or
+            {purpose: item['format'] for purpose, item in selected['assets'].items()} !=
+            {'weights': 'gguf', 'tokenizer': 'json'}):
         raise InvalidInput('Selected recipe does not admit this GGUF/tokenizer import')
     if len(paths) > 1:
-        # Keep explicit split-file format/index support, never compare tensors
-        # with a model architecture or guess the selected pipeline from them.
-        return _import_fragments(registry, model_id, recipe, paths, token, alias)
-    selected = {weights[0].id: paths[0], tokens[0].id: token}
-    assets = [_asset(a, selected[a.id], 'reference' if alias else 'owned',
-                     'caller-reference' if alias else 'caller-owned') for a in recipe.artifacts]
+        return _import_fragments(registry, model_id, recipe, identity, selected, executable_identity,
+                                 paths, token, alias)
+    sources = {'weights': paths[0], 'tokenizer': token}
+    assets = [_asset(purpose, selected['assets'][purpose]['format'], item['path'], sources[purpose],
+                     'reference' if alias else 'owned', 'caller-reference' if alias else 'caller-owned')
+              for purpose, item in recipe['files'].items()]
     _admit_paths(a['logical_path'] for a in assets)
-    return _acquire(registry, model_id, assets, _provenance(recipe, 'import'))
+    return _acquire(registry, model_id, assets,
+                    _provenance(recipe, identity, 'import', selected, executable_identity))
 
 
 def _index_content(paths):
@@ -417,24 +467,20 @@ def _check_index(record, root):
         raise InvalidInput('Existing fragment index differs from inspected members; preserved for inspection')
 
 
-def _import_fragments(registry, model_id, recipe, paths, tokenizer, alias):
-    from .recipe_types import Artifact
-    weights = next(a for a in recipe.artifacts if a.role == 'weights')
-    token = next(a for a in recipe.artifacts if a.role == 'tokenizer')
-    # This existing local import command supplies explicit members. Only its
-    # format-derived index is generated; HF recipe destinations are never guessed.
+def _import_fragments(registry, model_id, recipe, identity, selected, executable_identity, paths, tokenizer, alias):
     names = [f'model-{i+1:05d}-of-{len(paths):05d}.gguf' for i in range(len(paths))]
     index_name = 'model.safetensors.index.json'
-    index = Artifact(weights.id, weights.role, 'json', index_name, GeneratedSource())
-    assets = [_asset(index, registry.root / 'models' / model_id / index_name, 'owned', 'generated-owned')]
+    assets = [_asset('weights', 'json', index_name, registry.root / 'models' / model_id / index_name,
+                     'owned', 'generated-owned')]
     for i, (name, path) in enumerate(zip(names, paths)):
-        item = Artifact(f'fragment-{i+1}', 'weights-shard', 'gguf', name, GeneratedSource())
-        assets.append(_asset(item, path, 'reference' if alias else 'owned',
-                             'caller-reference' if alias else 'caller-owned'))
-    assets.append(_asset(token, tokenizer, 'reference' if alias else 'owned',
-                         'caller-reference' if alias else 'caller-owned'))
+        item = _asset(f'fragment-{i+1}', 'gguf', name, path, 'reference' if alias else 'owned',
+                      'caller-reference' if alias else 'caller-owned')
+        item['role'] = 'weights-shard'
+        assets.append(item)
+    assets.append(_asset('tokenizer', 'json', recipe['files']['tokenizer']['path'], tokenizer,
+                         'reference' if alias else 'owned', 'caller-reference' if alias else 'caller-owned'))
     _admit_paths(a['logical_path'] for a in assets)
-    provenance = _provenance(recipe, 'import')
+    provenance = _provenance(recipe, identity, 'import', selected, executable_identity)
     provenance['fragment_index'] = dict(path=index_name, members=names)
     def prepare(stage):
         destination = stage / index_name
@@ -447,52 +493,74 @@ def _import_fragments(registry, model_id, recipe, paths, tokenizer, alias):
     return _acquire(registry, model_id, assets, provenance, stage_prepare=prepare)
 
 
-def import_assets(registry, model_id, *, directory, pipeline, alias=False):
-    """Import a complete caller-prepared set, without acquiring or preparing it."""
-    recipe = _import_recipe(pipeline, ())
+def import_assets(registry, model_id, *, directory, recipe_id=None, alias=False,
+                  executable=None, modality=None, _selection=None):
+    recipe, identity, selected, executable_identity = (_selection if _selection is not None else
+        _select(recipe_id, executable=executable, modality=modality, deadline=registry.deadline))
     root = Path(directory).expanduser().absolute()
-    _admit_paths(a.path for a in recipe.artifacts)
-    assets = [_asset(a, root / a.path, 'reference' if alias else 'owned',
-                     'caller-reference' if alias else 'caller-owned') for a in recipe.artifacts]
-    return _acquire(registry, model_id, assets, _provenance(recipe, 'import'))
+    _admit_paths(a['path'] for a in recipe['files'].values())
+    assets = [_asset(purpose, selected['assets'][purpose]['format'], item['path'], root / item['path'],
+                     'reference' if alias else 'owned', 'caller-reference' if alias else 'caller-owned')
+              for purpose, item in recipe['files'].items()]
+    return _acquire(registry, model_id, assets,
+                    _provenance(recipe, identity, 'import', selected, executable_identity))
 
 
-def validate(registry, model_id, *, pipeline=None):
+def validate(registry, model_id, *, executable=None, modality=None):
     with registry.lock('model', model_id):
-        record = registry.get_model(model_id)
-        if record['pending'] and record['pending']['stage'] == 'staging':
-            raise HemError('Acquisition is incomplete; repeat matching import/download before validation')
-        return _qualify(registry, model_id, pipeline)
+        record, _, _, evidence = qualify(registry, model_id, executable=executable, modality=modality)
+        return _view(record, evidence)
 
 
-def model_files(registry, model_id, *, pipeline=None):
-    """Caller keeps its model lock through dependency reservation/export."""
-    record = registry.get_model(model_id)
-    if record['pending'] and record['pending']['stage'] == 'staging':
-        raise HemError('Model acquisition is incomplete')
-    return _files(_qualify(registry, model_id, pipeline))
+def _view(record, evidence, error=None):
+    validation = record['validation']
+    accessible = error is None
+    state = ('incomplete' if record['pending'] and record['pending']['stage'] == 'staging' else
+             'missing' if not accessible else
+             'ready' if validation and validation['valid'] and validation['evidence'] == evidence else
+             'invalid' if validation and not validation['valid'] else 'unvalidated')
+    return dict(record, model=record['id'], state=state, accessible=accessible, error=error,
+                intended_pipeline=record['provenance']['pipeline'],
+                recipe_id=record['provenance']['recipe_id'],
+                executable=record['provenance']['pipeline'],
+                executable_id=record['provenance'].get('executable', {}).get('id'),
+                modality=record['provenance'].get('executable', {}).get('declaration', {}).get('modality'),
+                check_kind='acquisition-presence', native_readiness='unprobed',
+                artifacts=[dict(id=a['id'], role=a['role'], format=a['format'], logical_path=a['logical_path'],
+                                path=str(Path(record['directory']) / a['logical_path']),
+                                ownership=a['prepared_ownership']) for a in record['assets']] if accessible else [])
+
+
+def _show_record(record, admission_error=None):
+    if admission_error is not None:
+        return _view(record, None, error=admission_error)
+    try:
+        _, _, evidence = inspect_record(record)
+        return _view(record, evidence)
+    except HemError as error:
+        return _view(record, None, error=str(error))
 
 
 def show(registry, model_id):
     record = registry.get_model(model_id)
     try:
-        _recipe(record)
-        files = _files(record)
-        evidence = _evidence(files)
-        accessible, error = True, None
-    except (OSError, ValueError, HemError) as exc:
-        files, evidence, accessible, error = None, None, False, str(exc)
-    validation = record['validation']
-    state = ('incomplete' if record['pending'] and record['pending']['stage'] == 'staging' else
-             'missing' if not accessible else
-             'ready' if validation and validation['valid'] and validation['evidence'] == evidence else
-             'invalid' if validation and not validation['valid'] else 'unvalidated')
-    return dict(record, model=model_id, state=state, accessible=accessible, error=error,
-                intended_pipeline=record['provenance']['pipeline'],
-                check_kind='acquisition-presence', native_readiness='unprobed',
-                artifacts=[dict(id=a.id, role=a.role, format=a.format, logical_path=a.logical_path,
-                                path=str(a.path), ownership=a.ownership) for a in files.files] if files else [])
+        _admit_programs(record['provenance']['pipeline'], registry.deadline or Deadline.after())
+    except HemError as error:
+        return _show_record(record, str(error))
+    return _show_record(record)
 
 
 def inventory(registry):
-    return [show(registry, record['id']) for record in registry.list_models()]
+    budget = registry.deadline or Deadline.after()
+    admitted = {}
+    result = []
+    for record in registry.list_models():
+        pipeline = record['provenance']['pipeline']
+        if pipeline not in admitted:
+            try:
+                _admit_programs(pipeline, budget)
+                admitted[pipeline] = None
+            except HemError as error:
+                admitted[pipeline] = str(error)
+        result.append(_show_record(record, admitted[pipeline]))
+    return result

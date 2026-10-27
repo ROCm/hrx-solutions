@@ -117,11 +117,11 @@ class JoinFixture:
         write_gguf(weights, tensors=[('fixture', [1], 0, 0)])
         tokenizer.write_text('{"model":{"fixture":true}}')
         return self.cli('model', 'import', 'tiny', '--gguf', str(weights), '--tokenizer', str(tokenizer),
-                        '--alias', '--pipeline', 'qwen-08b')
+                        '--alias', '--recipe', 'qwen35-08b-q5-k-xl')
 
     def start_instance(self, name):
         return self.cli('instance', 'start', 'tiny', '--name', 'chat', '--server', name,
-                        '--pipeline', 'qwen-08b')
+                        '--executable', 'llm/qwen/qwen_08b/executable.json')
 
     def events(self, name):
         path = self.control(name) / 'events'

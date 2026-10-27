@@ -8,11 +8,12 @@ import shlex
 import sys
 import textwrap
 
-from .cli import hem_arguments, hem_help, hem_instance_cli, hem_model_cli, hem_pi_cli, hem_opencode_cli, hem_omp_cli, hem_openwebui_cli, hem_pipeline_cli, hem_server_cli, hem_render
+from .cli import hem_arguments, hem_help, hem_instance_cli, hem_model_cli, hem_pi_cli, hem_opencode_cli, hem_omp_cli, hem_openwebui_cli, hem_modality_cli, hem_executable_cli, hem_server_cli, hem_render
 from .hem_common import Deadline, HemError, InvalidInput, result
 
 
-DOMAINS = {"openwebui": hem_openwebui_cli, "omp": hem_omp_cli, "model": hem_model_cli, "pipeline": hem_pipeline_cli,
+DOMAINS = {"openwebui": hem_openwebui_cli, "omp": hem_omp_cli, "model": hem_model_cli, "modality": hem_modality_cli,
+           "executable": hem_executable_cli,
            "server": hem_server_cli, "instance": hem_instance_cli, "pi": hem_pi_cli, "opencode": hem_opencode_cli}
 
 

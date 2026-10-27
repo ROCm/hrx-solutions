@@ -171,7 +171,7 @@ class ConfigurationGate:
 
     def activate(self, namespace, name):
         answer = self.gate.command(namespace, 'instance', 'start', 'small-a', '--name', name,
-            '--server', self.gate.servers[namespace][0], '--pipeline', 'qwen-08b',
+            '--server', self.gate.servers[namespace][0], '--executable', 'llm/qwen/qwen_08b/executable.json',
             '--context-capacity', '32768', '--pool-capacity', '32768', '--rows', '4', '--prefill-capacity', '128')
         assert answer['completed'] and answer['accepted'], answer
         return provider(self.gate.servers[namespace][0]) + '/' + name, self.native(namespace, name)

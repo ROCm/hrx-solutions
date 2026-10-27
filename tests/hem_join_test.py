@@ -91,7 +91,7 @@ class JoinTest(unittest.TestCase):
         f.start_server('alpha')
         f.start_server('beta')
         f.barrier('alpha', 'register')
-        start = f.spawn('instance', 'start', 'tiny', '--name', 'chat', '--server', 'alpha', '--pipeline', 'qwen-08b')
+        start = f.spawn('instance', 'start', 'tiny', '--name', 'chat', '--server', 'alpha', '--executable', 'llm/qwen/qwen_08b/executable.json')
         f.wait_barrier('alpha', 'register', start)
         stop = f.spawn('server', 'shutdown', 'alpha')
         time.sleep(.08)
@@ -112,7 +112,7 @@ class JoinTest(unittest.TestCase):
         f.acquire()
         f.start_server('alpha')
         f.barrier('alpha', 'register')
-        caller = f.spawn('instance', 'start', 'tiny', '--name', 'chat', '--server', 'alpha', '--pipeline', 'qwen-08b')
+        caller = f.spawn('instance', 'start', 'tiny', '--name', 'chat', '--server', 'alpha', '--executable', 'llm/qwen/qwen_08b/executable.json')
         f.wait_barrier('alpha', 'register', caller)
         caller.kill()
         caller.communicate(timeout=3)
@@ -126,7 +126,7 @@ class JoinTest(unittest.TestCase):
             shown = f.cli('instance', 'show', 'chat', '--server', 'alpha')
             self.assertIsNotNone(shown.get('tracked_submission') or shown.get('pending'))
         self.assertEqual(f.registry.references('tiny'), [row])
-        f.cli('instance', 'start', 'tiny', '--name', 'chat', '--server', 'alpha', '--pipeline', 'qwen-08b', expected=1)
+        f.cli('instance', 'start', 'tiny', '--name', 'chat', '--server', 'alpha', '--executable', 'llm/qwen/qwen_08b/executable.json', expected=1)
         self.assertEqual(f.mutations('alpha'), before)
         f.cli('instance', 'stop', 'chat', '--server', 'alpha')
         self.assertEqual(f.registry.references('tiny'), [])
@@ -252,19 +252,25 @@ class JoinTest(unittest.TestCase):
         replacement = f.root / 'replacement-tokenizer.json'
         replacement.write_text('{"model":{"replacement":true}}')
         refused = f.cli('model', 'import', 'tiny', '--gguf', str(f.root / 'weights.gguf'),
-                        '--tokenizer', str(replacement), '--alias', '--pipeline', 'qwen-08b', expected=1)
+                        '--tokenizer', str(replacement), '--alias', '--recipe', 'qwen35-08b-q5-k-xl', expected=1)
         self.assertIn('different mappings', refused['error'])
         self.assertEqual(len(f.registry.references('tiny')), 2)
         beta = f.registry.references('tiny')[1]
         document = Path(beta['document'])
-        sources = Path(json.loads(document.read_text())['base_directory'])
+        submitted = json.loads(document.read_text())
+        sources = Path(submitted['base_directory'])
+        prepare = sources / submitted['definition']['prepare']
+        original_prepare = prepare.read_bytes()
         f.cli('server', 'shutdown', 'alpha')
         self.assertEqual(f.registry.references('tiny'), [beta])
         self.assertTrue(document.exists())
-        self.assertTrue((sources / 'prepare.loom').exists())
+        self.assertTrue(prepare.exists())
         # A future package source update must not affect an already submitted
         # server's executable or retained model source closure.
-        (f.package / 'loom-pipeline/llm/qwen/qwen_08b/prepare.loom').write_text('package changed')
+        declaration = f.registry.get_model('tiny')['provenance']['executable']['declaration']
+        package_prepare = f.package / 'loom-pipeline' / declaration['programs']['root'] / submitted['definition']['prepare']
+        package_prepare.write_text('package changed')
+        self.assertEqual(prepare.read_bytes(), original_prepare)
         self.assertEqual(f.cli('instance', 'status', 'chat', '--server', 'beta')['native']['loom']['parameters']['active'], True)
         f.cli('instance', 'stop', 'chat', '--server', 'beta')
         self.assertEqual(f.registry.references('tiny'), [])

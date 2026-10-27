@@ -1,14 +1,9 @@
 {
-  "format": 1,
+  "format": 3,
   "id": "moonshine-streaming-tiny",
   "name": "Moonshine Streaming Tiny",
-  "modality": "asr",
-  "pipeline": "moonshine-streaming-tiny",
-  "artifacts": [
-    {
-      "id": "weights",
-      "role": "weights",
-      "format": "safetensors",
+  "files": {
+    "weights": {
       "path": "model.safetensors",
       "source": {
         "kind": "huggingface",
@@ -17,10 +12,7 @@
         "filename": "model.safetensors"
       }
     },
-    {
-      "id": "tokenizer",
-      "role": "tokenizer",
-      "format": "json",
+    "tokenizer": {
       "path": "tokenizer.json",
       "source": {
         "kind": "huggingface",
@@ -29,10 +21,7 @@
         "filename": "tokenizer.json"
       }
     },
-    {
-      "id": "configuration",
-      "role": "configuration",
-      "format": "json",
+    "configuration": {
       "path": "config.json",
       "source": {
         "kind": "huggingface",
@@ -41,18 +30,16 @@
         "filename": "config.json"
       }
     },
-    {
-      "id": "rotary",
-      "role": "rotary",
-      "format": "safetensors",
+    "rotary": {
       "path": "rotary.safetensors",
       "source": {
         "kind": "generated"
       }
     }
-  ],
+  },
   "configuration": {
     "pending_requests": 4,
     "options": {}
-  }
+  },
+  "executable": "recognition/moonshine/streaming_tiny/executable.json"
 }

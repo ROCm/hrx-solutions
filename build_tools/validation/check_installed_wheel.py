@@ -44,12 +44,14 @@ for name in (
     'hem_models',
     'model_download',
     'model_store',
-    'moonshine_preparation',
-    'moonshine_preparer_identity',
-    'recipe_types', 'recipes', 'pipelines', 'pipelines_qwen', 'pipelines_moonshine',
+    'recipes', 'pipelines',
 ):
     module = importlib.import_module("hrx_solutions.models." + name)
     assert Path(module.__file__).resolve().parent == package_root / "models"
+for name in ('preparation', 'preparation.moonshine', 'preparation.moonshine_contract'):
+    module = importlib.import_module('hrx_solutions.models.' + name)
+    relative = name.replace('.', '/') + ('.py' if '.' in name else '/__init__.py')
+    assert Path(module.__file__).resolve() == (package_root / 'models' / relative).resolve()
 for name in (
     'cli',
     'cli.hem_arguments',
@@ -58,7 +60,8 @@ for name in (
     'cli.hem_instance_cli',
     'cli.hem_model_cli',
     'cli.hem_server_cli',
-    'cli.hem_pipeline_cli',
+    'cli.hem_modality_cli',
+    'cli.hem_executable_cli',
     'cli.hem_pi_cli',
     'cli.hem_omp_cli',
     'cli.hem_opencode_cli',
@@ -164,62 +167,65 @@ provenance = verify_wheel_payload(args.wheel.resolve(strict=True), package_root)
 assert (package_root / "_native/bin/loom-serve").is_file()
 assert (package_root / "_native/share/loom-serve/LICENSE").is_file()
 assert not (package_root / "_native/bin/loom-qwen-epoch-check").exists()
-from hrx_solutions.models import recipes as authored_recipes, pipelines as pipeline_bindings, modalities
-from hrx_solutions.models.hem_config import effective_settings
-from hrx_solutions.models.recipe_types import PreparedModel, PreparedArtifact
-from hrx_solutions.models.gguf import inspect_gguf
-from build_tools.validation.recipe_inventory import validate_installed, EXPECTED_RECIPES
-import tempfile
-import struct
 
-validate_installed(package_root, authored_recipes.parse)
-expected_ids = {value[0] for value in EXPECTED_RECIPES.values()}
-assert {recipe.id for recipe in authored_recipes.list()} == expected_ids
-assert {recipe.id for recipe in authored_recipes.list('chat')} == {'qwen35-08b-q5-k-xl', 'qwen38-27b-q5-k-xl'}
-assert {recipe.id for recipe in authored_recipes.list('asr')} == {'moonshine-streaming-tiny'}
-# Exercise the real parser -> binding -> effective settings -> modality definition
-# chain with typed prepared file references. This is pure setup, not acquisition
-# or a claim that these synthetic paths are usable for native inference.
-with tempfile.TemporaryDirectory() as temporary:
-    directory = Path(temporary)
-    for identifier in sorted(expected_ids):
-        recipe = authored_recipes.load(identifier)
-        binding = pipeline_bindings.get(recipe.pipeline)
-        descriptor = binding.describe()
-        assert descriptor.id == recipe.pipeline and descriptor.modality == recipe.modality
-        for entry in descriptor.bundle.files:
-            path = package_root / entry.path
-            path.resolve(strict=True).relative_to(package_root)
-            assert path.is_file() and not path.is_symlink(), entry.path
-        assert all(name.endswith('.loombc') for name in
-                   (descriptor.programs.prepare, descriptor.programs.control,
-                    *(descriptor.programs.providers if recipe.modality == 'chat' else descriptor.programs.sources)))
-        prepared = PreparedModel('wheel-setup', recipe.id, recipe.identity, recipe.pipeline, directory,
-            tuple(PreparedArtifact(a.id, a.role, a.format, a.path, directory / a.path,
-                                   'owned' if a.source.kind == 'generated' else 'hf-cache')
-                  for a in recipe.artifacts))
-        settings, sources = effective_settings(recipe, descriptor)
-        policy = modalities.get(recipe.modality)
-        policy.validate(settings, descriptor)
-        definition = policy.service_definition(settings, prepared, descriptor.programs)
-        assert definition['kind'] == descriptor.protocol.native_kind
-        assert definition['prepare'] == descriptor.programs.prepare
-        assert definition['control'] == descriptor.programs.control
-        if recipe.modality == 'chat':
-            assert definition['rows'] == 4 and definition['context_capacity'] == 8192
-            assert definition['pool_capacity'] == 32768 and definition['prefill_capacity'] == 128
-            assert definition['draft_depth'] == (3 if recipe.pipeline == 'qwen' else 0)
-            assert definition['weights'] == str(directory / 'model.gguf')
-            assert definition['tokenizer'] == str(directory / 'tokenizer.json')
-        else:
-            assert definition['pending_requests'] == 4 and definition['options'] == {}
-            assert definition['assets'] == str(directory)
-    weights = directory / 'minimal.gguf'
-    weights.write_bytes(b'GGUF' + struct.pack('<IQQ', 3, 0, 0) + bytes(8))
-    assert inspect_gguf(weights).version == 3  # generic format admission remains
-assert (package_root / 'loom-pipeline/llm/LICENSE-APACHE-2.0').is_file()
-assert not list(package_root.rglob('*.loom'))
-assert not list((package_root / 'loom-pipeline').rglob('compatibility.json'))
+
+def check_recipe_consumers(package_root, *, release=None):
+    """Exercise installed generic readers and finite CHAT/ASR policy against release DATA."""
+    from hrx_solutions.models import recipes, pipelines, modalities, hem_config
+    from hrx_solutions.hem_common import Deadline
+    from hrx_solutions.models.gguf import inspect_gguf
+    from build_tools.validation import recipe_inventory as inventory
+    import tempfile
+    import struct
+
+    release = inventory.load_release() if release is None else release
+    inventory.validate_installed_catalogs(package_root, recipes.parse, pipelines.parse, release=release)
+    expected_ids = {document['id'] for document in release['recipes'].values()}
+    assert {document['id'] for document, _ in recipes.list()} == expected_ids
+    for reference in release['executables']:
+        selected_ids = {document['id'] for document in release['recipes'].values()
+                        if document['executable'] == reference}
+        assert {document['id'] for document, _ in recipes.list(executable=reference)} == selected_ids
+    # Pure policy checks use synthetic paths; real import/checked resolution,
+    # preparation and inference belong to the composed installed gates.
+    with tempfile.TemporaryDirectory() as temporary:
+        directory = Path(temporary)
+        for wanted in release['recipes'].values():
+            document, identity = recipes.load(wanted['id'])
+            assert inventory._same(document, wanted)
+            reference = document['executable']
+            executable, catalog, _ = pipelines.load(reference)
+            catalog.resolve(strict=True).relative_to(package_root)
+            programs = pipelines.programs(executable, catalog, Deadline.after())
+            reviewed = release['executables'][reference]
+            assert programs == {key: reviewed['compiled'][key] for key in ('prepare', 'control', 'sources')}
+            policy = modalities.get(executable['modality'])
+            settings, _ = hem_config.effective_settings(document, executable['serving'], policy)
+            expected = dict(reviewed['source']['serving']['defaults'], **wanted['configuration'])
+            if executable['modality'] == 'chat' and expected['mtp'] is False:
+                expected.pop('mtp_depth', None)
+            assert inventory._same(hem_config.json_document(settings), expected)
+            paths = {purpose: directory / item['path'] for purpose, item in document['files'].items()}
+            definition = policy.definition(settings, paths, directory, programs)
+            if executable['modality'] == 'chat':
+                native = dict(kind='text', **programs, weights=str(paths['weights']),
+                    tokenizer=str(paths['tokenizer']),
+                    **{key: expected[key] for key in
+                       ('rows', 'context_capacity', 'pool_capacity', 'prefill_capacity')},
+                    draft_depth=expected['mtp_depth'] if expected['mtp'] else 0, options={})
+            else:
+                native = dict(kind='recognition', **programs, assets=str(directory),
+                              pending_requests=expected['pending_requests'], options=expected['options'])
+            assert inventory._same(definition, native)
+        weights = directory / 'minimal.gguf'
+        weights.write_bytes(b'GGUF' + struct.pack('<IQQ', 3, 0, 0) + bytes(8))
+        assert inspect_gguf(weights).version == 3
+    assert not list(package_root.rglob('*.loom'))
+    assert not list((package_root / 'loom-pipeline').rglob('compatibility.json'))
+    return tuple(sorted(expected_ids))
+
+
+check_recipe_consumers(package_root)
 # --help does not load HSA. Check the installed runtime API without
 # requiring a GPU or allowing host runtime overrides.
 import os
@@ -258,22 +264,75 @@ def invoke(*arguments, expected=0, timeout=15):
     assert "state" in answer and "completed" in answer
     return answer, process.stderr
 
-pipelines, _ = invoke("pipeline", "list")
-pipeline_entries = {item["pipeline"]:item for item in pipelines["items"]}
-assert set(pipeline_entries) == {"qwen", "qwen-08b", "moonshine-streaming-tiny"}
-for identifier in ('qwen', 'qwen-08b'):
-    entry = pipeline_entries[identifier]
-    assert entry['modality'] == 'chat' and entry['protocol']['operation'] == 'chat'
-    assert set(entry['parameters']) == {'rows', 'context_capacity', 'pool_capacity', 'prefill_capacity', 'mtp', 'mtp_depth'}
-recognition = pipeline_entries['moonshine-streaming-tiny']
-assert recognition['modality'] == 'asr' and recognition['protocol']['operation'] == 'transcription'
-assert recognition['parameters']['pending_requests']['value'] == 4
-assert recognition['parameters']['options']['value'] == {}
-assert set(recognition['parameters']) == {'pending_requests', 'options'}
-recipes, _ = invoke("model", "available")
-for recipe in recipes["items"]:
-    preview, diagnostic = invoke("model", "download", recipe["id"], "--id", "preview", "--dry-run")
-    assert preview["state"] == "preview" and "hf download" in diagnostic
+def check_public_recipe_queries(invoke, *, release=None):
+    """Public inventories and capability projections have independent DATA authority."""
+    from build_tools.validation import recipe_inventory as inventory
+    release = inventory.load_release() if release is None else release
+    modalities, _ = invoke('modality', 'list')
+    modality_rows = {row['modality']: row for row in modalities['items']}
+    assert len(modalities['items']) == len(modality_rows) == 2
+    assert set(modality_rows) == {'chat', 'asr'}
+    executables, _ = invoke('executable', 'list')
+    rows = {row['executable']: row for row in executables['items']}
+    assert len(rows) == len(executables['items'])
+    assert set(rows) == set(release['executables'])
+    for modality, row in modality_rows.items():
+        assert 'parameters' not in row and 'pipeline' not in row and 'defaults' not in row
+        assert row['native_contract'] == ('text-v1' if modality == 'chat' else 'recognition-v1')
+        assert row['protocol']['operation'] == ('chat' if modality == 'chat' else 'transcription')
+        assert {item['executable'] for item in row['executables']} == {
+            ref for ref, expected in release['executables'].items()
+            if expected['source']['modality'] == modality}
+    for reference, expected in release['executables'].items():
+        entry = rows[reference]
+        source = expected['source']
+        assert entry['executable_id'] == source['id']
+        assert entry['modality'] == source['modality']
+        assert entry['native_contract'] == source['native_contract']
+        assert 'bundle' not in entry
+        shown, _ = invoke('executable', 'show', reference)
+        assert all(inventory._same(shown[key], value) for key, value in entry.items())
+        serving = source['serving']
+        parameters = entry['parameters']
+        intervals = (serving['bounds'] if source['modality'] == 'chat'
+                     else {'pending_requests': serving['pending_requests']})
+        for key, (minimum, maximum) in intervals.items():
+            value = parameters[key]
+            assert value['type'] == 'integer'
+            assert value['state'] == ('fixed' if minimum == maximum else 'configurable')
+            if minimum == maximum:
+                assert type(value['value']) is int and value['value'] == minimum
+            else:
+                assert type(value['default']) is int and value['default'] == serving['defaults'][key]
+                assert value['constraints']['minimum'] == minimum and value['constraints']['maximum'] == maximum
+        if source['modality'] == 'chat':
+            assert set(parameters) == {*intervals, 'mtp', 'mtp_depth'}
+            maximum = serving['mtp_depth_max']
+            assert parameters['mtp']['state'] == ('configurable' if maximum else 'fixed')
+            assert parameters['mtp'].get('default', parameters['mtp'].get('value')) is serving['defaults']['mtp']
+            assert parameters['mtp_depth']['state'] == ('configurable' if maximum else 'unsupported')
+            if maximum:
+                assert parameters['mtp_depth']['constraints']['maximum'] == maximum
+                assert parameters['mtp_depth']['default'] == serving['defaults'].get('mtp_depth')
+        else:
+            assert set(parameters) == {'pending_requests', 'options'}
+            assert parameters['options'] == {'type': 'object', 'state': 'fixed', 'value': {}}
+    available, _ = invoke('model', 'available')
+    expected_recipes = {item['id']: item for item in release['recipes'].values()}
+    actual_recipes = {item['id']: item for item in available['items']}
+    assert len(actual_recipes) == len(available['items']) and set(actual_recipes) == set(expected_recipes)
+    for identifier, wanted in expected_recipes.items():
+        row = actual_recipes[identifier]
+        executable = release['executables'][wanted['executable']]['source']
+        assert row['recipe_id'] == identifier and row['executable'] == wanted['executable']
+        assert row['executable_id'] == executable['id'] and row['modality'] == executable['modality']
+        preview, diagnostic = invoke('model', 'download', identifier, '--id', 'preview', '--dry-run')
+        assert preview['state'] == 'preview' and 'hf download' in diagnostic
+        assert preview['recipe_id'] == identifier and preview['executable'] == wanted['executable']
+    return tuple(sorted(actual_recipes))
+
+
+check_public_recipe_queries(invoke)
 invoke("server", "start", "--name", "invalid", "--timeout", "0", expected=2)
 assert not state_root.exists(), "help, preview and invalid input must not create state"
 
@@ -310,7 +369,8 @@ def check_native_lifecycle():
             moved.append((source, backup))
         status, _ = invoke("server", "status", "wheel-check")
         assert status["native"]["data"] == []
-        assert (retained / "loom-pipeline/llm/qwen/qwen_08b/pipeline.loombc").is_file()
+        from build_tools.validation.recipe_inventory import catalog_paths
+        assert all((retained / 'loom-pipeline' / name).is_file() for name in catalog_paths())
         stopped, _ = invoke("server", "shutdown", "wheel-check")
         assert stopped["completed"]
         assert _confirmed_exit(record["process"])

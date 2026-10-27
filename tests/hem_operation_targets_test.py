@@ -25,8 +25,8 @@ DIGESTS = dict(native_sha256='a' * 64, payload_sha256='b' * 64, catalog_sha256='
 def status(operation='transcription', *, incarnation=7):
     profile = operation_profile(operation)
     return dict(object='list', server={}, data=[dict(id='narrator-west',
-        input_modalities=list(profile.input_modalities), output_modalities=list(profile.output_modalities),
-        loom=dict(kind=profile.native_kind, endpoint=profile.endpoint, incarnation=incarnation,
+        input_modalities=list(profile['input_modalities']), output_modalities=list(profile['output_modalities']),
+        loom=dict(kind=profile['native_kind'], endpoint=profile['endpoint'], incarnation=incarnation,
                   registration='ready', parameter_operation='idle', error=None,
                   parameters={'primary': {'active': True}}, status={'admission': 'open'}))])
 
@@ -82,7 +82,8 @@ class OperationTargetsTest(unittest.TestCase):
         code = "from binding.python.models import modalities; modalities.get('chat'); modalities.get('asr'); import sys; assert not any(name.endswith(('hem_state', 'hem_config', 'hem_models', 'hem_openwebui')) for name in sys.modules)"
         subprocess.run([sys.executable, '-c', code], check=True)
         with self.assertRaises(KeyError):operation_profile('synthesis')
-        with self.assertRaises(FrozenInstanceError):modalities.get("chat").PROTOCOL.endpoint = '/elsewhere'
+        target = self.resolve()
+        with self.assertRaises(TypeError):target.profile['endpoint'] = '/elsewhere'
 
     def test_current_operations_keep_exact_identity_and_original_deadline(self):
         for operation in ('chat', 'transcription'):

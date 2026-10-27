@@ -513,26 +513,23 @@ if __name__ == "__main__":
 class ModalityInterpretationTest(unittest.TestCase):
     def test_only_validated_events_reach_selected_modality_and_raw_unknown_survives(self):
         from binding.python.models import modalities
-        from binding.python.models.recipe_types import LogView
-        from tests.recipe_config_fixture import descriptor_for, recipe_for
-        descriptor = descriptor_for(recipe_for('qwen-08b'))
         selection = hem_tui_logs.LogSelection('model', 'server', 'launch', 'chat', 1)
         event = {'event': 'unknown', 'sequence': 0, 'payload': '<raw>'}
-        interpreter = unittest.mock.Mock(return_value=LogView('raw fallback'))
-        with patch.object(modalities, 'get', return_value=type('Modality', (), {'interpret': interpreter})()):
-            _, _, entries = hem_tui_logs._parse_native_batch(native_batch([event], position=1), selection, None, descriptor=descriptor)
+        interpreter = unittest.mock.Mock(return_value='raw fallback')
+        with patch.object(modalities, 'get', return_value=type('Modality', (), {'interpret': interpreter})()), \
+                patch.object(hem_tui_logs.pipelines, 'load', return_value=({'modality':'chat'},None,'b'*64), create=True):
+            _, _, entries = hem_tui_logs._parse_native_batch(native_batch([event], position=1), selection, None, executable='examples/chat/executable.json')
             self.assertEqual(entries[0].text, 'raw fallback')
             self.assertEqual(interpreter.call_args.args[0], event)
-            self.assertIs(interpreter.call_args.args[1], descriptor)
+            self.assertEqual(len(interpreter.call_args.args), 1)
             with self.assertRaises(TypeError): interpreter.call_args.args[0]['sequence'] = 99
             interpreter.reset_mock()
             with self.assertRaises(HemError):
-                hem_tui_logs._parse_native_batch(native_batch([event], position=5), selection, None, descriptor=descriptor)
+                hem_tui_logs._parse_native_batch(native_batch([event], position=5), selection, None, executable='examples/chat/executable.json')
             interpreter.assert_not_called()
 
     def test_nonfinite_event_is_a_controlled_error_before_interpretation(self):
-        from tests.recipe_config_fixture import descriptor_for, recipe_for
         selection = hem_tui_logs.LogSelection('model', 'server', 'launch', 'chat', 1)
         with self.assertRaises(HemError):
             hem_tui_logs._parse_native_batch(native_batch([{'event':'unknown','sequence':0,'value':float('nan')}], position=1),
-                                            selection, None, descriptor=descriptor_for(recipe_for('qwen-08b')))
+                                            selection, None, executable='examples/chat/executable.json')

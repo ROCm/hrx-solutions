@@ -31,7 +31,8 @@ class HelpTest(unittest.TestCase):
                 # The dispatcher is the boundary before all registry, model,
                 # download, network and native operations.
                 with patch.multiple(hem_cli.hem_model_cli, run=unittest.mock.DEFAULT), \
-                     patch.multiple(hem_cli.hem_pipeline_cli, run=unittest.mock.DEFAULT), \
+                     patch.multiple(hem_cli.hem_modality_cli, run=unittest.mock.DEFAULT), \
+                     patch.multiple(hem_cli.hem_executable_cli, run=unittest.mock.DEFAULT), \
                      patch.multiple(hem_cli.hem_server_cli, run=unittest.mock.DEFAULT), \
                      patch.multiple(hem_cli.hem_instance_cli, run=unittest.mock.DEFAULT), \
                      patch.multiple(hem_cli.hem_pi_cli, run=unittest.mock.DEFAULT), \
@@ -78,7 +79,7 @@ class HelpTest(unittest.TestCase):
                     self.assertIn(f'usage: loom-control {resource} {command}', output)
                     self.assertNotIn('loom-hem', output)
                     self.assertEqual(errors, '')
-        self.assertEqual(count, 26)
+        self.assertEqual(count, 28)
 
     def test_resource_and_action_lists_have_no_redundant_choice_heading(self):
         _, output, _ = self.invoke([])
@@ -108,7 +109,7 @@ class HelpTest(unittest.TestCase):
         for argv, context in ((['model', 'import'], 'loom-control model import'),
                               (['server', 'start'], 'loom-control server start'),
                               (['instance', 'list', '--server', 'a', '--url', 'http://localhost:8080'], 'loom-control instance list'),
-                              (['pipeline', 'unknown'], 'loom-control pipeline')):
+                              (['modality', 'unknown'], 'loom-control modality')):
             with self.subTest(argv=argv):
                 code, output, errors = self.invoke(argv)
                 self.assertEqual(code, 2)
@@ -125,41 +126,40 @@ class HelpTest(unittest.TestCase):
                     self.assertNotIn('For details:', errors)
 
     def test_argument_parsing_does_not_read_pipeline_or_recipe_files(self):
-        with patch.object(hem_config.pipelines, 'get', side_effect=AssertionError('parser selected pipeline')), \
+        with patch.object(hem_config.pipelines, 'load', side_effect=AssertionError('parser selected pipeline')), \
              patch.object(hem_config.recipes, 'load', side_effect=AssertionError('parser loaded recipe')):
             hem_cli.parse_args(['model', 'import', 'example', '--gguf', 'weights.gguf',
-                                '--tokenizer', 'tokenizer.json', '--pipeline', 'qwen-08b'])
-            hem_cli.parse_args(['model', 'download', 'example', '--id', 'local', '--pipeline', 'qwen-08b'])
+                                '--tokenizer', 'tokenizer.json', '--recipe', 'example-recipe', '--executable', 'new/catalog/executable.json', '--modality', 'chat'])
+            hem_cli.parse_args(['model', 'download', 'example', '--id', 'local', '--executable', 'new/catalog/executable.json', '--modality', 'chat'])
 
-    def test_reference_uses_selected_descriptor_and_four_layer_precedence(self):
+    def test_reference_uses_selected_modality_and_four_layer_precedence(self):
         for command in ('start', 'export'):
             _, output, _ = self.invoke(['instance', command, '--help'])
             for term in ('flat JSON', 'flags override file', 'recipe configuration',
-                         'descriptor defaults', 'Duplicate/unknown keys', 'null',
+                         'selected executable defaults', 'Duplicate/unknown keys', 'null',
                          'nonfinite', 'memory fit', 'final effective configuration'):
                 self.assertIn(term, output)
             self.assertNotIn('Qwen only', output)
             self.assertNotIn('curated entries reject', output)
-        for identifier in ('qwen', 'qwen-08b', 'moonshine-streaming-tiny'):
-            info = hem_config.pipeline_info(identifier)
+        for info in hem_config.executable_list():
             self.assertIn('parameters', info)
             self.assertIn('protocol', info)
             self.assertNotIn('compatibility', info)
             self.assertTrue(all('state' in parameter and 'type' in parameter
                                 for parameter in info['parameters'].values()))
 
-    def test_download_pipeline_defaults_to_recipe_instead_of_auto_selection(self):
-        _, output, _ = self.invoke(['model', 'download', '--help'])
-        output = ' '.join(output.split())
-        self.assertIn("recipe's declared pipeline", output)
-        self.assertNotIn('unique compatible pipeline', output)
-        for resource, command in (('model', 'import'), ('model', 'validate'),
+    def test_selection_help_distinguishes_recipe_modality_and_executable(self):
+        for resource, command in (('model', 'download'), ('model', 'import'),
                                   ('instance', 'start'), ('instance', 'export')):
-            with self.subTest(resource=resource, command=command):
-                _, output, _ = self.invoke([resource, command, '--help'])
-                output = ' '.join(output.split())
-                self.assertIn('must agree with the selected model recipe', output)
-                self.assertNotIn("recipe's declared pipeline", output)
+            _, output, _ = self.invoke([resource, command, '--help'])
+            output = ' '.join(output.split())
+            self.assertIn('--executable', output)
+            self.assertIn('--modality', output)
+            self.assertIn('no automatic recipe selection', output)
+            self.assertNotIn('--pipeline', output)
+        _, output, _ = self.invoke(['model', 'import', '--help'])
+        self.assertIn('--recipe', output)
+        self.assertIn('required to select an executable', ' '.join(output.split()))
 
 
 if __name__ == '__main__':

@@ -15,10 +15,17 @@ import time
 import unittest
 
 from binding.python.control import hem_process, hem_state
-from binding.python.models import hem_config
+from binding.python.models import hem_config, pipelines
+from binding.python.cli import hem_instance_cli
+from binding.python import hem_cli
+from unittest.mock import patch
+from binding.python.hem_common import HemError, InvalidInput
 from binding.python.hem_common import Deadline
 from binding.python.control.hem_http import NativeClient
 from tests.gguf_fixtures import write_gguf
+from tests.recipe_config_fixture import SOURCE
+
+EXECUTABLE = 'llm/qwen/qwen_08b/executable.json'
 from tests.hem_lifecycle_fixture import fixture, inventory, model, reply
 from tests.hem_lifecycle_fixture import INSTANCES_NATIVE as NATIVE
 from tests.hem_lifecycle_fixture import port, wait_exit
@@ -66,8 +73,7 @@ class InstanceCliTest(unittest.TestCase):
         (self.package / '_native/lib').mkdir()
         shutil.copy2(self.binary, self.package / '_native/bin/loom-serve')
         (self.package / '_native/lib/libhsa-runtime64.so.1').write_bytes(b'CPU fixture only')
-        catalog = Path(hem_config.pipeline_info('qwen-08b')['catalog'])
-        shutil.copytree(catalog.parents[2], self.package / 'loom-pipeline')
+        shutil.copytree(SOURCE, self.package / 'loom-pipeline')
         self.weights = self.root / 'weights.gguf'
         write_gguf(self.weights, tensors=[('fixture', [1], 0, 0)])
         self.tokenizer = self.root / 'tokenizer.json'
@@ -106,9 +112,32 @@ class InstanceCliTest(unittest.TestCase):
         self.assertNotIn('Traceback', completed.stderr)
         return json.loads(completed.stdout), completed.stderr
 
+    def test_explicit_executable_programs_reject_before_registry(self):
+        manifest = self.package / 'loom-pipeline' / EXECUTABLE
+        document = json.loads(manifest.read_text())
+        name = next(iter(document['programs']['files']))
+        path = self.package / 'loom-pipeline' / document['programs']['root'] / name
+        path.write_bytes(path.read_bytes() + b'changed')
+        with patch.object(pipelines, '__file__', str(self.package / 'models/pipelines.py')), \
+             patch.object(hem_instance_cli, 'Registry', side_effect=AssertionError('Registry created')):
+            for command in ('start', 'export'):
+                argv = ['instance', command, 'tiny', '--executable', EXECUTABLE]
+                if command == 'export': argv += ['--output', str(self.root/'out.json')]
+                with self.subTest(command=command), self.assertRaises(HemError):
+                    hem_instance_cli.run(hem_cli.parse_args(argv), Deadline.after())
+        self.assertFalse(self.state.exists())
+
+    def test_modality_assertion_mismatch_precedes_registry(self):
+        args = hem_cli.parse_args(['instance','export','tiny','--output',str(self.root/'out.json'),
+                                  '--executable',EXECUTABLE,'--modality','asr'])
+        with patch.object(hem_instance_cli,'Registry',side_effect=AssertionError('Registry created')):
+            with self.assertRaisesRegex(InvalidInput,'modality differs'):
+                hem_instance_cli.run(args,Deadline.after())
+        self.assertFalse(self.state.exists())
+
     def setup_model(self):
         return self.invoke('model', 'import', 'tiny', '--gguf', str(self.weights),
-                           '--tokenizer', str(self.tokenizer), '--alias', '--pipeline', 'qwen-08b')
+                           '--tokenizer', str(self.tokenizer), '--alias', '--recipe', 'qwen35-08b-q5-k-xl')
 
     def setup_server(self, name='one'):
         response, _ = self.invoke('server', 'start', '--name', name, '--device', 'CPU-fixture',
@@ -124,7 +153,7 @@ class InstanceCliTest(unittest.TestCase):
     def test_eager_start_show_retains_submission_and_stop(self):
         config = self.root / 'serving.json'
         config.write_text('{"context_capacity":4096,"rows":2}')
-        started, diagnostic = self.start('--config', str(config), '--rows', '3', '--pipeline', 'qwen-08b')
+        started, diagnostic = self.start('--config', str(config), '--rows', '3', '--executable', EXECUTABLE)
         self.assertTrue(started['accepted'])
         self.assertEqual(started['settings']['rows'], 3)
         self.assertEqual(started['settings']['context_capacity'], 4096)
@@ -191,13 +220,13 @@ class InstanceCliTest(unittest.TestCase):
         self.assertFalse(aborted['completed'])
         self.assertEqual(self.invoke('instance', 'show', 'chat')[0]['pending']['mode'], 'abort')
 
-    def test_config_conflicts_and_invalid_pipeline_fail_before_registration(self):
+    def test_config_conflicts_and_mismatched_executable_fail_before_registration(self):
         self.setup_model()
         self.setup_server()
         config = self.root / 'bad.json'
         config.write_text('{"mtp_depth":2}')
         self.invoke('instance', 'start', 'tiny', '--config', str(config), '--no-mtp', expected=2)
-        self.invoke('instance', 'start', 'tiny', '--pipeline', 'qwen', expected=2)
+        self.invoke('instance', 'start', 'tiny', '--executable', 'llm/qwen/qwen_27b/executable.json', expected=2)
         self.invoke('instance', 'start', 'tiny', '--rows', '17', expected=2)
         self.assertEqual(self.invoke('instance', 'list')[0]['items'], [])
         self.assertEqual(hem_state.Registry(self.state).list_instances(), [])

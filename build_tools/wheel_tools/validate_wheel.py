@@ -18,11 +18,9 @@ from packaging.requirements import Requirement
 try:
     from ..validation import recipe_inventory
     from ..versioning import read_package_version
-    from ..model_tools import loom_catalog, moonshine_catalog, moonshine_preparer
 except ImportError:
     from build_tools.validation import recipe_inventory
     from build_tools.versioning import read_package_version
-    from build_tools.model_tools import loom_catalog, moonshine_catalog, moonshine_preparer
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -49,17 +47,21 @@ MODEL_MODULES = (
     'hem_models',
     'model_download',
     'model_store',
-    'moonshine_preparation',
-    'moonshine_preparer_identity',
-    'recipe_types',
     'recipes',
     'pipelines',
-    'pipelines_qwen',
-    'pipelines_moonshine',
 )
 MODEL_PYTHON_PATHS = ('models/__init__.py',
+    'models/preparation/__init__.py', 'models/preparation/moonshine.py',
+    'models/preparation/moonshine_contract.py',
     *('models/' + name + '.py' for name in MODEL_MODULES),
     'models/modalities/__init__.py', 'models/modalities/chat.py', 'models/modalities/asr.py')
+
+RETIRED_MODEL_PYTHON_PATHS = (
+    'models/moonshine_preparation.py', 'models/moonshine_preparer_identity.py',
+    'models/pipelines_qwen.py', 'models/pipelines_moonshine.py',
+    'models/recipe_types.py', 'models/curated_catalog.py', 'models/hem_model_operations.py',
+    'models/qwen_validation.py', 'models/pipeline_validation.py', 'pipeline_validation.py',
+)
 
 CLI_FILES = (
     'cli/__init__.py',
@@ -69,7 +71,8 @@ CLI_FILES = (
     'cli/hem_instance_cli.py',
     'cli/hem_model_cli.py',
     'cli/hem_server_cli.py',
-    'cli/hem_pipeline_cli.py',
+    'cli/hem_modality_cli.py',
+    'cli/hem_executable_cli.py',
     'cli/hem_pi_cli.py',
     'cli/hem_omp_cli.py',
     'cli/hem_opencode_cli.py',
@@ -219,6 +222,11 @@ def validate_pi_python_sdist(path: Path) -> None:
 def validate_models_sdist(path: Path) -> None:
     """The shared model and modality packages ship exact regular Python sources."""
     with tarfile.open(path) as archive:
+        stale = [member.name for member in archive.getmembers()
+                 if any(member.name.endswith('/binding/python/' + name)
+                        for name in RETIRED_MODEL_PYTHON_PATHS)]
+        if stale:
+            raise RuntimeError('sdist contains retired model execution authorities: ' + repr(stale))
         for name in MODEL_PYTHON_PATHS:
             suffix = '/binding/python/' + name
             matches = [member for member in archive.getmembers() if member.name.endswith(suffix)]
@@ -356,12 +364,6 @@ def validate_wheel(path: Path) -> tuple[int, int]:
         required_files.update(PACKAGE_PREFIX + name for name in PI_PYTHON_FILES)
         required_files.update(target.split(":")[0].replace(".", "/") + ".py"
                               for target in REQUIRED_ENTRY_POINTS.values())
-        for architecture in ("qwen_27b", "qwen_08b"):
-            required_files.update(
-                PIPELINE_PREFIX + f"qwen/{architecture}/{filename}"
-                for filename in ("pipeline.loombc", "pipeline.json")
-            )
-        required_files.update(PACKAGE_PREFIX + "loom-pipeline/" + path for path in recipe_inventory.EXPECTED_RECIPES)
         missing = sorted(required_files - names)
         if missing:
             raise RuntimeError("wheel is missing setup assets: " + ", ".join(missing))
@@ -437,9 +439,8 @@ def validate_wheel(path: Path) -> tuple[int, int]:
             if wheel.namelist().count(member) != 1 or wheel.read(member) != expected:
                 raise RuntimeError("wheel client asset duplicates or differs from reviewed source: " + member)
 
-        retired_models = {'models/curated_catalog.py', 'models/hem_model_operations.py', 'models/qwen_validation.py',
-                          'models/pipeline_validation.py', 'pipeline_validation.py'}
-        stale = retired_models & {name[len(PACKAGE_PREFIX):] for name in names if name.startswith(PACKAGE_PREFIX)}
+        stale = set(RETIRED_MODEL_PYTHON_PATHS) & {
+            name[len(PACKAGE_PREFIX):] for name in names if name.startswith(PACKAGE_PREFIX)}
         if stale or any(name.endswith('/compatibility.json') and name.startswith(PIPELINE_PREFIX) for name in names):
             raise RuntimeError('wheel contains retired model execution authorities: ' + repr(sorted(stale)))
 
@@ -467,13 +468,9 @@ def validate_wheel(path: Path) -> tuple[int, int]:
 
         if any(name.endswith(".loom") for name in names):
             raise RuntimeError("wheel must not contain executable .loom sources")
-        # Required-family acceptance is independent of producer selection.
-        from binding.python.models.recipes import parse
-        recipe_inventory.validate_wheel(wheel, REPO_ROOT, parse)
-        loom_catalog.validate_archive(wheel, REPO_ROOT)
-
-        moonshine_catalog.validate_archive(wheel, REPO_ROOT)
-        moonshine_preparer.validate_archive(wheel)
+        # Catalog acceptance uses independent reviewed release DATA.
+        from binding.python.models import recipes, pipelines
+        recipe_inventory.validate_wheel_catalogs(wheel, REPO_ROOT, recipes.parse, pipelines.parse)
 
         weight_suffixes = {".gguf", ".safetensors", ".pt", ".pth", ".ckpt"}
         bundled_weights = sorted(
@@ -534,9 +531,8 @@ def main() -> int:
         validate_openwebui_sdist(args.sdist)
         validate_shared_integrations_sdist(args.sdist)
         with tarfile.open(args.sdist) as source_archive:
-            moonshine_catalog.validate_source_archive(source_archive, REPO_ROOT)
-            from binding.python.models.recipes import parse
-            recipe_inventory.validate_sdist(source_archive, REPO_ROOT, parse)
+            from binding.python.models import recipes, pipelines
+            recipe_inventory.validate_sdist_catalogs(source_archive, REPO_ROOT, recipes.parse, pipelines.parse)
     print(f"Validated {args.wheel}: {count} native libraries, {size} bytes")
     return 0
 

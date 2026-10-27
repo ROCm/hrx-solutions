@@ -19,7 +19,8 @@ RESOURCES = {
     'tui': 'Interactive, read-only terminal dashboard for Loom Serve.',
     'pi': 'Owned Pi coding-agent configuration for local managed servers.',
     'model': 'Checkpoint files acquired or imported locally; prepared-asset checks do not prove native readiness.',
-    'pipeline': 'Packaged modality parameters, protocol, artifact requirements and programs.',
+    'modality': 'CHAT/ASR modality contracts; capabilities belong to a selected executable.',
+    'executable': 'Packaged executable declarations, program contracts and serving capabilities.',
     'server': 'Saved device/listener settings and the managed native process.',
     'instance': 'A model loaded on a server, with its submitted serving configuration.',
 }
@@ -31,15 +32,19 @@ ACTIONS = {
     'pi': {'configure': ('Configure Pi, inspect configuration, or remove unchanged owned files.', 'pi configure\nloom-control pi configure --check')},
     'model': {
         'available': ('Discover downloadable recipes (not local inventory).', 'model available'),
-        'download': ('Acquire pinned assets; use recipe preparation and applicable local checks, not native readiness.', 'model download qwen35-08b-q5-k-xl --id qwen08'),
-        'import': ('Copy existing GGUF/tokenizer or prepared --assets-dir files; --alias keeps immutable references.', 'model import qwen08 --gguf weights.gguf --tokenizer tokenizer.json --alias --pipeline qwen-08b'),
-        'validate': ('Repeat selected recipe and prepared-asset checks; does not prove native readiness.', 'model validate qwen08 --pipeline qwen-08b'),
+        'download': ('Acquire a recipe\'s pinned assets; its executable owns preparation and serving capabilities.', 'model download RECIPE --id local-model'),
+        'import': ('Select --recipe explicitly; copy existing GGUF/tokenizer or prepared --assets-dir files, or --alias immutable references.', 'model import local-model --recipe RECIPE --gguf weights.gguf --tokenizer tokenizer.json --alias'),
+        'validate': ('Repeat associated recipe, executable and asset checks; does not prove native readiness.', 'model validate local-model'),
         'list': ('List registered local models and asset accessibility.', 'model list'),
-        'show': ('Inspect assets, validation and referencing instances.', 'model show qwen08'),
+        'show': ('Inspect assets, validation and referencing instances.', 'model show local-model'),
     },
-    'pipeline': {
-        'list': ('List packaged pipelines and their capabilities.', 'pipeline list'),
-        'show': ('Inspect parameter states, defaults, constraints and protocol; no GPU or local model required.', 'pipeline show qwen-08b\nloom-control pipeline show moonshine-streaming-tiny'),
+    'modality': {
+        'list': ('List CHAT/ASR modality contracts; no modality chooses a model or executable.', 'modality list'),
+        'show': ('Inspect modality semantics and per-executable capabilities; limits are not universal modality defaults.', 'modality show chat\nloom-control modality show asr'),
+    },
+    'executable': {
+        'list': ('List executable declarations independently of available recipes; optionally filter by modality.', 'executable list\nloom-control executable list --modality chat'),
+        'show': ('Inspect one direct executable reference, its serving limits, asset contract and programs.', 'executable show llm/example/executable.json'),
     },
     'server': {
         'start': ('Start a new named server, or reuse saved settings. New processes start empty; prior instances are not reloaded.', 'server start --name local --device amdgpu --listen 127.0.0.1:8080\nloom-control server start local'),
@@ -62,18 +67,19 @@ ACTIONS = {
 }
 ROOT_EXAMPLES = """Get started:
   loom-control model available
-  loom-control model download qwen35-08b-q5-k-xl --id qwen08
+  loom-control model download RECIPE --id local-model
   loom-control server start --name local --device amdgpu --listen 127.0.0.1:8080
-  loom-control instance start qwen08 --name chat-small --server local
+  loom-control instance start local-model --name chat-small --server local
   loom-control instance status chat-small --server local
 
 This sequence requires an installed wheel, a supported AMD device and the
 external download CLI required by the recipe. Downloads acquire external
 checkpoint files. For existing assets: loom-control model import --help
 Chat requests use the server's HTTP endpoint.
-For finite recognition, inspect: loom-control pipeline show moonshine-streaming-tiny
-Moonshine download requires Python>=3.12 and the wheel's [moonshine] extra;
-complete prepared --assets-dir imports do not run preparation.
+Inspect modality semantics: loom-control modality show asr
+Inspect concrete capabilities: loom-control executable list
+Choose RECIPE from model available. Preparation prerequisites belong to the
+selected executable; complete prepared --assets-dir imports do not run preparation.
 
 Use loom-control RESOURCE --help or loom-control RESOURCE ACTION --help for details.
 Bare root/resource commands show text guidance, even with --json.
@@ -82,11 +88,11 @@ Bare root/resource commands show text guidance, even with --json.
 
 def configuration_reference():
     return "\n".join([
-        'Configuration applies through the selected recipe and pipeline descriptor.',
+        'Configuration applies through the selected recipe and modality policy.',
         '  --config accepts a flat JSON object. Explicit flags override file values,',
-        '  then recipe configuration, then descriptor defaults.',
+        '  then recipe configuration, then selected executable defaults.',
         '  Inspect exact types, fixed/unsupported values, defaults and limits:',
-        '    loom-control pipeline show PIPELINE',
+        '    loom-control executable show CATALOG/executable.json',
         '  Duplicate/unknown keys, null, wrong types and nonfinite values fail.',
         '  Each supplied layer is checked; a later override cannot repair bad input.',
         '  Cross-setting rules apply to the final effective configuration.',
@@ -133,15 +139,16 @@ def _arguments(parser, resource, command):
         'json': 'Write one JSON action result to stdout; equivalents and diagnostics stay on stderr. Help remains text.',
         'model': 'Local model ID (letters/digits, dot, underscore or hyphen; starts with a letter/digit).',
         'instance': 'Instance name on the selected server, distinct from the local model ID.',
-        'pipeline': ('Packaged pipeline ID to inspect (see pipeline list).' if resource == 'pipeline' else
-                     "Packaged pipeline ID; omitted uses the recipe's declared pipeline (see model available)." if resource == 'model' and command == 'download' else
-                     'Packaged pipeline ID; must agree with the selected model recipe (see pipeline list).'),
-        'recipe': 'Download recipe ID from loom-control model available.',
+        'modality': ('CHAT/ASR semantic contract; never selects one executable or model.' if resource == 'modality' else
+                     'Optional declared modality assertion or executable-list filter; never selects a model.'),
+        'executable': ('Direct safe catalog-relative executable.json reference to inspect.' if resource == 'executable' else
+                       'Optional exact executable reference assertion on the selected recipe/model; no automatic recipe selection.'),
+        'recipe': 'Recipe ID from model available; required to select an executable for local import.',
         'id': 'Required local model ID for this download; distinct from the recipe ID.',
         'offline': 'Use only files already present in the download CLI cache; missing cached assets fail.',
         'dry_run': 'Preview declared destinations and cache presence; acquire no files and create no model record.',
         'gguf': 'One or more matching GGUF fragment paths; copied by default.',
-        'assets_dir': 'Complete caller-prepared files for an explicit --pipeline; copy by default or --alias. No preparation or fetch.',
+        'assets_dir': 'Complete caller-prepared files for explicit --recipe; copy by default or --alias. No preparation or fetch.',
         'tokenizer': 'Matching tokenizer.json path; copied by default.',
         'alias': 'Reference immutable external files instead of copying; they must remain available.',
         'name': ('Required name for a new saved server; use positional SERVER for a saved start.' if resource == 'server' else
@@ -157,11 +164,11 @@ def _arguments(parser, resource, command):
         'no_wait': 'Return after stop acceptance; retirement is not yet confirmed. Inspect instance status.',
         'follow': 'Follow logs until Ctrl-C; ends observation without stopping the service.',
         'output': 'Required deployment JSON output path; does not start a server. Retain referenced dependencies through retirement.',
-        'config': 'Flat JSON serving configuration; flags override file, recipe values and descriptor defaults. See reference below.',
-        'mtp': 'Enable multi-token prediction (propose tokens for verification), or disable it with --no-mtp; default depends on pipeline support.',
+        'config': 'Flat JSON serving configuration; flags override file, recipe values and selected executable defaults. See reference below.',
+        'mtp': 'Enable multi-token prediction (propose tokens for verification), or disable with --no-mtp; support/default come from the selected executable.',
     }
     for key in SERVING_OPTIONS:
-        helps[key] = f'Explicit {key.replace("_", " ")}; accepted values depend on the selected descriptor. JSON key: {key}.'
+        helps[key] = f'Explicit {key.replace("_", " ")}; accepted values depend on the selected executable. JSON key: {key}.'
     if resource == 'omp':
         helps.update(check='Inspect activation and runtime compatibility separately; no writes or client execution.',
                      disable='Remove unchanged owned files and native entries without OMP or Bun; preserve edits.',
@@ -187,6 +194,6 @@ def _arguments(parser, resource, command):
             continue
         group = ('Output' if action.dest in ('json', 'output', 'follow') else
                  'Lifecycle' if action.dest in ('timeout', 'abort', 'no_wait') else
-                 'Serving configuration' if action.dest in (*SERVING_OPTIONS, 'config', 'mtp', 'pipeline') else 'Targeting')
+                 'Serving configuration' if action.dest in (*SERVING_OPTIONS, 'config', 'mtp', 'executable', 'modality') else 'Targeting')
         parser._optionals._group_actions.remove(action)
         groups[group]._group_actions.append(action)

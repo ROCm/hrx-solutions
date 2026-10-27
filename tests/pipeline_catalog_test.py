@@ -22,37 +22,40 @@ class PipelineCatalogTest(ConfigurationFixture, unittest.TestCase):
         self.configure()
 
     def resolved(self, **kwargs):
-        return hem_config.resolve(self.recipe, self.model, **kwargs)
+        return hem_config.resolve(self.record, self.paths, self.dependencies, self.evidence, **kwargs)
 
     def test_checked_identity_covers_full_authoritative_source_and_installed_roots(self):
         other = self.catalog_root / 'other/policy.loom'
         other.parent.mkdir(); other.write_text('outside selected leaf')
         checked = self.resolved()
-        self.assertEqual(checked.catalog_identity.relative_path, Path(self.descriptor.bundle.catalog_relative_path))
-        self.assertEqual(checked.catalog_identity.tree_sha256, hem_process.tree_identity(self.catalog_root, Deadline.after()))
+        self.assertEqual(checked.catalog_relative_path, self.catalog.relative_to(self.catalog_root))
+        self.assertEqual(checked.catalog_tree_sha256, hem_process.tree_identity(self.catalog_root, Deadline.after()))
         installed = self.root / 'installed/loom-pipeline'
         shutil.copytree(self.catalog_root, installed)
         with patch.object(hem_config.pipelines, 'catalog_roots', return_value=(installed,)):
             repeated = self.resolved()
-        self.assertEqual(repeated.catalog_identity, checked.catalog_identity)
+        self.assertEqual((repeated.catalog_relative_path, repeated.catalog_tree_sha256),
+                         (checked.catalog_relative_path, checked.catalog_tree_sha256))
 
-    def test_catalog_identity_brackets_descriptor_artifact_and_definition_reads(self):
-        for stage in ('descriptor', 'artifacts', 'definition'):
-            with self.subTest(stage=stage):
+    def test_catalog_identity_brackets_recipe_program_and_definition_reads(self):
+        for target, name in ((hem_config.recipes, 'load'), (hem_config.pipelines, 'programs'),
+                             (self.modality, 'definition')):
+            with self.subTest(stage=name):
                 policy = self.catalog_root / 'outside-policy'
                 policy.write_text('before')
-                def drift(*args):
+                original = getattr(target, name)
+                def drift(*args, **kwargs):
+                    result = original(*args, **kwargs)
                     policy.write_text('after')
-                    return self.descriptor if stage == 'descriptor' else {'kind': 'text'} if stage == 'definition' else None
-                target, name = ((self.binding, 'describe') if stage == 'descriptor' else
-                                (self.binding, 'validate_artifacts') if stage == 'artifacts' else
-                                (self.modality, 'service_definition'))
+                    return result
                 with patch.object(target, name, side_effect=drift), self.assertRaisesRegex(InvalidInput, 'changed'):
                     self.resolved()
 
     def test_checked_value_refuses_catalog_without_authoritative_root(self):
-        foreign = self.root / 'foreign'; foreign.mkdir()
-        with patch.object(hem_config, '_catalog', return_value=foreign), self.assertRaisesRegex(InvalidInput, 'outside'):
+        foreign_root = self.root / 'foreign'
+        shutil.copytree(self.catalog_root, foreign_root)
+        foreign = foreign_root / self.catalog.relative_to(self.catalog_root)
+        with patch.object(hem_config.pipelines, 'load', return_value=(self.executable,foreign,self.executable_identity)), self.assertRaisesRegex(InvalidInput, 'outside'):
             self.resolved()
 
     def test_root_identity_and_definition_share_original_deadline(self):
@@ -63,16 +66,16 @@ class PipelineCatalogTest(ConfigurationFixture, unittest.TestCase):
         self.assertGreaterEqual(identity.call_count, 2)
         self.assertTrue(all(call.args[1] is budget for call in identity.call_args_list))
         clock = [0.0]; budget = Deadline(1.0, clock=lambda: clock[0])
-        def expire(*args): clock[0] = 2.0; return self.descriptor
-        with patch.object(self.binding, 'describe', side_effect=expire), self.assertRaises(DeadlineExpired):
+        def expire(*args): clock[0] = 2.0; return (self.executable,self.catalog,self.executable_identity)
+        with patch.object(hem_config.pipelines, 'load', side_effect=expire), self.assertRaises(DeadlineExpired):
             self.resolved(deadline=budget)
 
     def test_emission_only_rebases_checked_definition_without_reselecting(self):
         checked = self.resolved()
         retained = self.root / 'retained'; shutil.copytree(self.catalog_root, retained)
-        selected = retained / checked.catalog_identity.relative_path
-        with patch.object(hem_config.pipelines, 'get', side_effect=AssertionError('reselection')), \
-             patch.object(self.modality, 'validate', side_effect=AssertionError('revalidation')):
+        selected = retained / checked.catalog_relative_path
+        with patch.object(hem_config.pipelines, 'load', side_effect=AssertionError('reselection')), \
+             patch.object(self.modality, 'finalize', side_effect=AssertionError('revalidation')):
             emitted = hem_config.deployment_document(checked, 'other', catalog=selected, device=2)
         self.assertEqual(emitted['definition'], checked.definition_document())
         self.assertEqual(emitted['name'], 'other')
@@ -81,16 +84,16 @@ class PipelineCatalogTest(ConfigurationFixture, unittest.TestCase):
 
     def test_retained_complete_root_drift_and_different_program_form_are_refused(self):
         checked = self.resolved()
-        for where in ('outside-selected', str(checked.catalog_identity.relative_path / 'program.loom')):
+        for where in ('outside-selected', str(checked.catalog_relative_path / 'program.loom')):
             retained = self.root / 'retained'; shutil.copytree(self.catalog_root, retained)
             target = retained / where; target.write_text('changed')
             with self.assertRaisesRegex(InvalidInput, 'differs'):
-                hem_config.deployment_document(checked, 'alias', catalog=retained / checked.catalog_identity.relative_path)
+                hem_config.deployment_document(checked, 'alias', catalog=retained / checked.catalog_relative_path)
             shutil.rmtree(retained)
 
     def test_emission_requires_exact_relative_location_before_reading_root(self):
         checked = self.resolved()
-        forged = replace(checked, catalog_identity=replace(checked.catalog_identity, relative_path=Path('../bad')))
+        forged = replace(checked, catalog_relative_path=Path('../bad'))
         with patch.object(hem_process, 'tree_identity', side_effect=AssertionError('read foreign root')), self.assertRaises(InvalidInput):
             hem_config.deployment_document(forged, 'alias', catalog=self.catalog)
 
@@ -102,9 +105,9 @@ class PipelineCatalogTest(ConfigurationFixture, unittest.TestCase):
     def test_offline_exports_two_names_without_native_calls_or_named_catalogs(self):
         checked = self.resolved()
         with patch.object(hem_config, 'resolve', return_value=checked), \
-             patch.object(hem_config.pipelines, 'get', side_effect=AssertionError('selected binding again')), \
+             patch.object(hem_config.pipelines, 'load', side_effect=AssertionError('selected binding again')), \
              patch('binding.python.control.hem_state.Registry', side_effect=AssertionError('state')), \
              patch('subprocess.Popen', side_effect=AssertionError('native')), redirect_stderr(io.StringIO()):
             for name in ('first', 'second'):
-                result = hem_config.export_deployment(self.recipe, self.model, self.root / (name + '.json'), name)
+                result = hem_config.export_deployment(self.record, self.paths, self.dependencies, self.evidence, self.root / (name + '.json'), name)
                 self.assertTrue(result['completed'])
