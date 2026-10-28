@@ -179,7 +179,8 @@ class CoordinatorTest(unittest.TestCase):
                 dispatch('openwebui', self.root, deadline, mode=mode, url=TARGET, token=TOKEN,
                          stt_server=None, stt_instance=None)
                 entry.assert_called_once_with(self.root, TARGET, TOKEN, deadline,
-                    check=mode == 'check', disable=mode == 'disable', stt_server=None, stt_instance=None)
+                    check=mode == 'check', disable=mode == 'disable', stt_server=None, stt_instance=None,
+                    tts_server=None, tts_instance=None, disable_tts=False)
 
     def test_detected_remote_race_aborts_before_post_pending_survives(self):
         def race(client):

@@ -3,7 +3,7 @@ from ..hem_common import InvalidInput
 
 
 def configure_integration(integration, root, deadline, *, mode="configure", pi_dir=None, omp_dir=None, opencode_dir=None,
-                          url=None, token=None, stt_server=None, stt_instance=None):
+                          url=None, token=None, stt_server=None, stt_instance=None, tts_server=None, tts_instance=None, disable_tts=False):
     """Apply one explicit intent without inspecting unrelated integrations."""
     if mode not in ("configure", "check", "disable"):
         raise InvalidInput("unsupported integration configuration mode")
@@ -19,5 +19,5 @@ def configure_integration(integration, root, deadline, *, mode="configure", pi_d
     if integration == "openwebui":
         from .openwebui.hem_openwebui import configure_openwebui
         return configure_openwebui(root, url, token, deadline, check=mode == "check", disable=mode == "disable",
-                                   stt_server=stt_server, stt_instance=stt_instance)
+                                   stt_server=stt_server, stt_instance=stt_instance, tts_server=tts_server, tts_instance=tts_instance, disable_tts=disable_tts)
     raise InvalidInput("unsupported integration")

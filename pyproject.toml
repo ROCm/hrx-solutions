@@ -26,6 +26,15 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+pocket = [
+  "huggingface-hub==2.2.0; python_version == '3.12'",
+  "torch==2.9.1; python_version == '3.12'",
+  "numpy==2.5.4; python_version == '3.12'",
+  "scipy==1.18.1; python_version == '3.12'",
+  "soundfile==0.14.0; python_version == '3.12'",
+  "safetensors==0.8.0; python_version == '3.12'",
+  "pocket-tts @ git+https://github.com/kyutai-labs/pocket-tts@ec569b2dd3fec4a601b391aace185791e92b3785 ; python_version == '3.12'",
+]
 moonshine = ["huggingface-hub==2.2.0; python_version >= '3.12'", "safetensors==0.8.0; python_version >= '3.12'"]
 
 [project.scripts]

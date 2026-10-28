@@ -170,13 +170,14 @@ assert not (package_root / "_native/bin/loom-qwen-epoch-check").exists()
 
 
 def check_recipe_consumers(package_root, *, release=None):
-    """Exercise installed generic readers and finite CHAT/ASR policy against release DATA."""
+    """Exercise installed readers and finite CHAT/ASR/TTS policy against release DATA."""
     from hrx_solutions.models import recipes, pipelines, modalities, hem_config
     from hrx_solutions.hem_common import Deadline
     from hrx_solutions.models.gguf import inspect_gguf
     from build_tools.validation import recipe_inventory as inventory
     import tempfile
     import struct
+    import json
 
     release = inventory.load_release() if release is None else release
     inventory.validate_installed_catalogs(package_root, recipes.parse, pipelines.parse, release=release)
@@ -206,6 +207,12 @@ def check_recipe_consumers(package_root, *, release=None):
                 expected.pop('mtp_depth', None)
             assert inventory._same(hem_config.json_document(settings), expected)
             paths = {purpose: directory / item['path'] for purpose, item in document['files'].items()}
+            if executable['modality'] == 'tts':
+                # Synthetic measured geometry checks composition only, not real
+                # preparation, imported assets or native speech qualification.
+                geometry = dict(context_capacity=512, rotary_capacity=4096, chunk_tokens=50,
+                                voices=[dict(id='alba', frames=126)])
+                paths['prepared_metadata'].write_text(json.dumps({'definition': {'options': geometry}}))
             definition = policy.definition(settings, paths, directory, programs)
             if executable['modality'] == 'chat':
                 native = dict(kind='text', **programs, weights=str(paths['weights']),
@@ -213,9 +220,13 @@ def check_recipe_consumers(package_root, *, release=None):
                     **{key: expected[key] for key in
                        ('rows', 'context_capacity', 'pool_capacity', 'prefill_capacity')},
                     draft_depth=expected['mtp_depth'] if expected['mtp'] else 0, options={})
-            else:
+            elif executable['modality'] == 'asr':
                 native = dict(kind='recognition', **programs, assets=str(directory),
                               pending_requests=expected['pending_requests'], options=expected['options'])
+            else:
+                native = dict(kind='speech', **programs, assets=str(directory),
+                              pending_requests=expected['pending_requests'],
+                              options={**geometry, **expected['options']})
             assert inventory._same(definition, native)
         weights = directory / 'minimal.gguf'
         weights.write_bytes(b'GGUF' + struct.pack('<IQQ', 3, 0, 0) + bytes(8))
@@ -270,16 +281,16 @@ def check_public_recipe_queries(invoke, *, release=None):
     release = inventory.load_release() if release is None else release
     modalities, _ = invoke('modality', 'list')
     modality_rows = {row['modality']: row for row in modalities['items']}
-    assert len(modalities['items']) == len(modality_rows) == 2
-    assert set(modality_rows) == {'chat', 'asr'}
+    assert len(modalities['items']) == len(modality_rows) == 3
+    assert set(modality_rows) == {'chat', 'asr', 'tts'}
     executables, _ = invoke('executable', 'list')
     rows = {row['executable']: row for row in executables['items']}
     assert len(rows) == len(executables['items'])
     assert set(rows) == set(release['executables'])
     for modality, row in modality_rows.items():
         assert 'parameters' not in row and 'pipeline' not in row and 'defaults' not in row
-        assert row['native_contract'] == ('text-v1' if modality == 'chat' else 'recognition-v1')
-        assert row['protocol']['operation'] == ('chat' if modality == 'chat' else 'transcription')
+        assert row['native_contract'] == {'chat': 'text-v1', 'asr': 'recognition-v1', 'tts': 'speech-v1'}[modality]
+        assert row['protocol']['operation'] == {'chat': 'chat', 'asr': 'transcription', 'tts': 'speech'}[modality]
         assert {item['executable'] for item in row['executables']} == {
             ref for ref, expected in release['executables'].items()
             if expected['source']['modality'] == modality}
@@ -314,9 +325,16 @@ def check_public_recipe_queries(invoke, *, release=None):
             if maximum:
                 assert parameters['mtp_depth']['constraints']['maximum'] == maximum
                 assert parameters['mtp_depth']['default'] == serving['defaults'].get('mtp_depth')
-        else:
+        elif source['modality'] == 'asr':
             assert set(parameters) == {'pending_requests', 'options'}
             assert parameters['options'] == {'type': 'object', 'state': 'fixed', 'value': {}}
+        else:
+            assert set(parameters) == {'pending_requests', 'options'}
+            assert parameters['options']['type'] == 'object'
+            assert parameters['options']['state'] == 'configurable'
+            assert parameters['options']['default'] == serving['defaults']['options']
+            assert set(parameters['options']['constraints']['allowed_keys']) == {
+                'input_tokens', 'request_capacity', 'batch_capacity', 'threads'}
     available, _ = invoke('model', 'available')
     expected_recipes = {item['id']: item for item in release['recipes'].values()}
     actual_recipes = {item['id']: item for item in available['items']}

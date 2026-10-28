@@ -315,17 +315,33 @@ class HemModelsTest(AcquisitionFixture, unittest.TestCase):
             with self.assertRaisesRegex(HemError, 'changed during'):
                 models.validate(self.registry, 'tiny')
 
-    def test_all_three_authored_recipes_drive_the_same_acquisition(self):
-        for recipe in self.declarations.values():
-            self.cached(recipe)
-            result = models.download(self.registry, recipe['id'], model_id=recipe['id'], offline=True)
-            self.assertEqual(result['provenance']['recipe_id'], recipe['id'])
-            self.assertEqual(result['pipeline'], recipe['executable'])
-            record, paths, dependencies, evidence = self.inspect(recipe['id'])
-            self.assertEqual(record['provenance']['recipe_identity'], recipes.load(recipe['id'])[1])
-            self.assertEqual(set(paths), set(recipe['files']))
-            self.assertEqual([a['logical_path'] for a in record['assets']], [a['path'] for a in recipe['files'].values()])
-        self.assertEqual(self.events, ['preflight','prepare'])
+    def test_all_authored_recipes_drive_the_same_acquisition(self):
+        from binding.python.models.preparation import pocket
+        def prepare(inputs, attempt, deadline):
+            self.events.append('pocket-prepare'); deadline.remaining()
+            self.assertEqual(set(inputs), {'model.safetensors', 'tokenizer.json', 'alba.wav'})
+            output = attempt / 'output'; output.mkdir()
+            for name in ('rotary.safetensors', 'voices.safetensors'):
+                (output / name).write_bytes(b'generated')
+            (output / 'model.json').write_text(json.dumps({'definition': {'options': dict(
+                context_capacity=512, rotary_capacity=4096, chunk_tokens=50,
+                voices=[dict(id='alba', frames=126)])}}))
+            return {name: output / name for name in ('rotary.safetensors', 'voices.safetensors', 'model.json')}
+        with patch.object(pocket, 'preflight', side_effect=lambda deadline: self.events.append('pocket-preflight')), \
+             patch.object(pocket, 'prepare', side_effect=prepare):
+            for recipe in self.declarations.values():
+                self.cached(recipe)
+                for source in recipe.get('preparation_inputs', {}).values():
+                    path = model_download._cache_path(source)
+                    path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'voice fixture')
+                result = models.download(self.registry, recipe['id'], model_id=recipe['id'], offline=True)
+                self.assertEqual(result['provenance']['recipe_id'], recipe['id'])
+                self.assertEqual(result['pipeline'], recipe['executable'])
+                record, paths, dependencies, evidence = self.inspect(recipe['id'])
+                self.assertEqual(record['provenance']['recipe_identity'], recipes.load(recipe['id'])[1])
+                self.assertEqual(set(paths), set(recipe['files']))
+                self.assertEqual([a['logical_path'] for a in record['assets']], [a['path'] for a in recipe['files'].values()])
+        self.assertEqual(self.events, ['preflight','prepare','pocket-preflight','pocket-prepare'])
         self.fetch.assert_not_called()
 
     def test_offline_preserves_record_and_retry_uses_cache(self):

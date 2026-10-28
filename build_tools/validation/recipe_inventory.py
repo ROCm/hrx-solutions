@@ -273,7 +273,7 @@ def validate_source_proofs(read, *, release=None):
             if policy is not None:
                 if policy['source'] not in paths:
                     raise RuntimeError('Reviewed policy source is outside compiler group')
-                old = 'global.rodata.def @policy = bytes("' + policy['from'].encode().hex() + '")'
+                old = 'global.rodata.def @' + policy.get('symbol', 'policy') + ' = bytes("' + policy['from'].encode().hex() + '")'
                 if read(policy['source']).decode('utf-8').count(old) != 1:
                     raise RuntimeError('Reviewed source policy observation differs')
         if seen != closure:

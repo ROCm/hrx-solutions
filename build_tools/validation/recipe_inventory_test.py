@@ -300,15 +300,20 @@ class IndependentReleaseTest(unittest.TestCase):
         directory = reference.rsplit('/', 1)[0]
         # Fixed synthetic tool bytes exercise the independent oracle, never an
         # external preparation or model qualification claim.
-        contents = {directory + '/' + name: b'reviewed fixture tool ' + name.encode()
-                    for name in expected['declaration']['tool_files']}
-        hashes = {name: hashlib.sha256(contents[directory + '/' + name]).hexdigest()
-                  for name in expected['declaration']['tool_files']}
-        expected['declaration']['tool_files'] = hashes
-        expected['provenance']['files'] = deepcopy(hashes)
-        contents[reference] = encoded(expected['declaration'])
-        contents[directory + '/provenance.json'] = encoded(expected['provenance'])
-        contents[directory + '/LICENSE'] = b'reviewed license'
+        contents = {}
+        for helper_reference, helper in release['operations'].items():
+            helper_directory = helper_reference.rsplit('/', 1)[0]
+            hashes = {}
+            for name in helper['declaration']['tool_files']:
+                content = b'reviewed fixture tool ' + name.encode()
+                contents[helper_directory + '/' + name] = content
+                hashes[name] = hashlib.sha256(content).hexdigest()
+            helper['declaration']['tool_files'] = hashes
+            helper['provenance']['files'] = deepcopy(hashes)
+            contents[helper_reference] = encoded(helper['declaration'])
+            contents[helper_directory + '/provenance.json'] = encoded(helper['provenance'])
+            contents[helper_directory + '/LICENSE'] = b'reviewed license'
+        hashes = expected['declaration']['tool_files']
         contents['_native/share/loom-serve/LICENSE'] = b'reviewed license'
         paths = sorted(inventory.operation_paths(release))
         inventory.validate_operations(contents.__getitem__, paths, release=release)
@@ -339,17 +344,19 @@ class IndependentReleaseTest(unittest.TestCase):
         directory = reference.rsplit('/', 1)[0]
         with tempfile.TemporaryDirectory() as temporary:
             package = Path(temporary)
-            hashes = {}
-            for name in expected['declaration']['tool_files']:
-                content = b'"""Independent helper cache fixture."""\nassert True\nx = 42\n' if name.endswith('.py') else b'fixture data'
-                path = package / directory / name
-                path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(content)
-                hashes[name] = hashlib.sha256(content).hexdigest()
-            expected['declaration']['tool_files'] = hashes
-            expected['provenance']['files'] = deepcopy(hashes)
-            (package / reference).write_bytes(encoded(expected['declaration']))
-            (package / directory / 'provenance.json').write_bytes(encoded(expected['provenance']))
-            (package / directory / 'LICENSE').write_bytes(b'license')
+            for helper_reference, helper in release['operations'].items():
+                helper_directory = helper_reference.rsplit('/', 1)[0]
+                hashes = {}
+                for name in helper['declaration']['tool_files']:
+                    content = b'"""Independent helper cache fixture."""\nassert True\nx = 42\n' if name.endswith('.py') else b'fixture data'
+                    path = package / helper_directory / name
+                    path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(content)
+                    hashes[name] = hashlib.sha256(content).hexdigest()
+                helper['declaration']['tool_files'] = hashes
+                helper['provenance']['files'] = deepcopy(hashes)
+                (package / helper_reference).write_bytes(encoded(helper['declaration']))
+                (package / helper_directory / 'provenance.json').write_bytes(encoded(helper['provenance']))
+                (package / helper_directory / 'LICENSE').write_bytes(b'license')
             (package / '_native/share/loom-serve/LICENSE').write_bytes(b'license')
             inventory.validate_installed_operations(package, release=release)
             source = next((package / directory).glob('*.py'))

@@ -20,7 +20,18 @@ def _moonshine_executor():
     return moonshine
 
 
-_IMPLEMENTATIONS = {'moonshine-assets-v1': (_moonshine_contract, _moonshine_executor)}
+def _pocket_contract():
+    from .pocket_contract import load_operation
+    return load_operation()
+
+
+def _pocket_executor():
+    from . import pocket
+    return pocket
+
+
+_IMPLEMENTATIONS = {'moonshine-assets-v1': (_moonshine_contract, _moonshine_executor),
+                    'pocket-alba-assets-v1': (_pocket_contract, _pocket_executor)}
 
 
 def _implementation(operation):
@@ -45,7 +56,7 @@ def validate_binding(preparation, assets):
     """Admit executable bindings without a recipe or conversion dependencies."""
     if preparation is None:
         return None
-    if (type(preparation) is not dict or set(preparation) != {'operation', 'inputs', 'outputs'}
+    if (type(preparation) is not dict or set(preparation) != {'operation', 'inputs', 'outputs'} | ({'preparation_inputs'} if 'preparation_inputs' in preparation else set())
             or any(type(preparation[role]) is not dict or not preparation[role]
                    for role in ('inputs', 'outputs'))):
         raise HemError('Invalid preparation binding; expected operation, inputs and outputs')
@@ -57,7 +68,11 @@ def validate_binding(preparation, assets):
                 raise HemError('Preparation bindings require distinct known asset purposes')
             purposes.add(purpose)
     operation = load_operation(preparation['operation'])
-    if (set(preparation['inputs']) != set(operation['inputs']) or
+    extra = preparation.get('preparation_inputs', {})
+    if (type(extra) is not dict or set(extra) & set(preparation['inputs'])
+            or any(name not in operation['inputs'] or source != operation['inputs'][name] for name, source in extra.items())):
+        raise HemError('Preparation-only inputs differ from reviewed pinned operation')
+    if (set(preparation['inputs']) | set(extra) != set(operation['inputs']) or
             set(preparation['outputs']) != set(operation['outputs'])):
         raise HemError('Preparation bindings differ from trusted operation inventory')
     for name, expected in operation['outputs'].items():
@@ -68,10 +83,12 @@ def validate_binding(preparation, assets):
     return operation
 
 
-def validate_preparation(preparation, files, assets):
+def validate_preparation(preparation, files, assets, preparation_inputs=None):
     """Associate recipe sources and all generated assets with the selected contract."""
     generated = {purpose for purpose, item in files.items() if item['source']['kind'] == 'generated'}
     operation = validate_binding(preparation, assets)
+    if (preparation_inputs or {}) != (preparation or {}).get('preparation_inputs', {}):
+        raise HemError('Recipe preparation-only inputs differ from executable binding')
     if operation is None:
         if generated:
             raise HemError('Generated recipe assets require a trusted preparation operation')

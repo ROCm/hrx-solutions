@@ -30,7 +30,7 @@ class WebUICliTest(unittest.TestCase):
         self.coordinator = Mock(side_effect=self.coordinate)
         patch.object(owner, '_configure_owned', self.coordinator).start()
 
-    def coordinate(self, root, target, token, deadline, *, check=False, disable=False, display=None, stt_server=None, stt_instance=None, client_factory=None):
+    def coordinate(self, root, target, token, deadline, *, check=False, disable=False, display=None, stt_server=None, stt_instance=None, tts_server=None, tts_instance=None, disable_tts=False, client_factory=None):
         self.assertEqual(root, self.root)
         self.assertEqual(token, self.token)
         self.assertLessEqual(deadline.remaining(), 10)

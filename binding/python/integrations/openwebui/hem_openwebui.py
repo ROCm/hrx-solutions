@@ -26,6 +26,7 @@ from ..pi.hem_pi_contracts import provider_id
 from ... import hem_display
 from ...control import hem_operation_targets as operation_targets
 from . import hem_openwebui_stt as stt_policy
+from . import hem_openwebui_tts as tts_policy
 from . import hem_openwebui_state as state
 from .hem_openwebui_wire import validate_audio, strict_equal as same
 from .hem_openwebui_receipts import (CLEAR, fail, projection, desired, create_body, comparable, created_row)
@@ -212,17 +213,22 @@ def _configure_chat(root, target, deadline, *, check, disable, client, request,
 
 def _configure_audio(root, target, deadline, *, check, disable, client, request,
                      stt_server, stt_instance, previous, document, endpoints, chat_operation,
-                     registry, operation_target, qualification_error):
+                     registry, operation_target, qualification_error, section="stt", whole_disable=None):
     """Sole audio/picker effect and recovery participant under the entry's lock.
 
-    STT policy supplies desired/CLEAR projections and picker ownership rules.
-    Future reviewed TTS policy belongs here in this same merge/write/readback
-    sequence; no second audio writer or new operation is introduced now.
+    Finite STT/TTS policies supply projections and picker ownership rules;
+    both reuse this one merge/write/readback and recovery implementation.
     """
+    whole_disable = disable if whole_disable is None else whole_disable
+    policy = stt_policy if section == 'stt' else tts_policy
+    selection_get = state.stt_selection if section == 'stt' else state.tts_selection
+    selection_set = state.with_stt_selection if section == 'stt' else state.with_tts_selection
+    projection, desired, CLEAR = policy.projection, policy.desired, policy.CLEAR
+    create_body, created_row, comparable = policy.create_body, policy.created_row, policy.comparable
     path = ownership_path(root, target)
-    record = deepcopy(document.get('stt'))
+    record = deepcopy(document.get(section))
     saved_record = deepcopy(record)
-    selection = state.stt_selection(document)
+    selection = selection_get(document)
     saved_selection = deepcopy(selection)
     stt_changed = False
     confirmed_effects = []
@@ -308,12 +314,12 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
         try:
             current = files.read_owned(path)
             document = state.decode_document(current, root, target)
-            if (not same(document.get('stt'), saved_record)
-                    or not same(state.stt_selection(document), saved_selection)):
+            if (not same(document.get(section), saved_record)
+                    or not same(selection_get(document), saved_selection)):
                 fail('WebUI local STT ownership changed before update')
             # The existing chat coordinator may just have finalized its own receipt.
-            document = state.with_stt_selection(document, selection)
-            document.update(stt=deepcopy(receipt), deployment_id=version['deployment_id'])
+            document = selection_set(document, selection)
+            document.update({section: deepcopy(receipt), 'deployment_id': version['deployment_id']})
             state._validate_document(document, root, target)
         except HemError as error:
             raise partial_failure(error)
@@ -346,7 +352,7 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
     def save_selection():
         # Names confer no live authority. Preserve the prior receipt until an
         # actual effect's own intent/readback changes it.
-        if document['schema_version'] != 3 or not same(saved_selection, selection):
+        if document['schema_version'] != (3 if section == 'stt' else 4) or not same(saved_selection, selection):
             persist(saved_record)
 
     def deferred(error):
@@ -358,11 +364,11 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
             chat = chat_operation(check=False, disable=False, version=None)
         except HemError as error:
             raise partial_failure(error)
-        chat['stt'] = dict(selection=deepcopy(selection),
+        chat[section] = dict(selection=deepcopy(selection),
             configuration='deferred' if chat.exit_code == 0 else 'unknown',
             reason=reason if chat.exit_code == 0 else 'configuration_failed')
         if saved_record is not None:
-            chat['stt']['target'] = deepcopy(saved_record['target'])
+            chat[section]['target'] = deepcopy(saved_record['target'])
         chat['changed'] = chat['changed'] or stt_changed
         if confirmed_effects:
             chat['accepted'] = True
@@ -372,12 +378,19 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
         if check:
             chat = chat_operation(check=True, disable=False, version=version)
             if selection is not None:
-                chat['stt'] = dict(selection=deepcopy(selection), configuration='deferred', reason='routing_not_applied')
+                chat[section] = dict(selection=deepcopy(selection), configuration='deferred', reason='routing_not_applied')
                 chat.update(configuration='partial', state='partial', completed=False)
                 chat.exit_code = max(chat.exit_code, 1)
             return chat
         if disable:
-            return chat_operation(check=False, disable=True, version=version)
+            if section == 'tts' and not whole_disable:
+                if selection is not None:
+                    selection = None
+                    persist(None)
+                result = _result(target, 'configure', configuration='absent', changed=stt_changed)
+                result['tts'] = dict(configuration='absent', selection=None, disconnect='browser-speech')
+                return result
+            return chat_operation(check=False, disable=whole_disable, version=version)
         chat_preflight()
         save_selection()
         if qualification_error is not None:
@@ -386,6 +399,8 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
 
     try:
         audio = audio_get()
+        if section == 'tts' and not disable:
+            policy.upload_prerequisites(audio)
         model_id = record['target']['prefixed_id']
         row = model_get(model_id)
     except HemError as error:
@@ -401,7 +416,7 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
             return True
         op = pending['operation']
         if op == 'create_overlay' and row is not None:
-            nonce = pending['intent']['meta']['loom_control_stt']['token']
+            nonce = pending['intent']['meta']['loom_control_' + section]['token']
             receipt = created_row(row, record['target'], nonce)
             record['overlay'] = dict(ownership='created', nonce=nonce, row=receipt)
         elif op in ('configure_audio', 'clear_audio') and same(projection(audio), pending['intent']):
@@ -443,7 +458,7 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
     if check:
         chat = chat_operation(check=True, disable=False, version=version)
         configured = routing_matches and record['overlay'] is not None and record['pending'] is None
-        chat['stt'] = dict(configuration='configured' if configured else 'partial',
+        chat[section] = dict(configuration='configured' if configured else 'partial',
             selection=deepcopy(selection), reason=None,
             target=deepcopy(record['target']), overlay_ownership=(record['overlay'] or {}).get('ownership'))
         if not configured:
@@ -455,9 +470,9 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
     chat_preflight()
     if not disable:
         try:
-            if record['routing'] is None and not stt_policy.pristine(audio):
+            if record['routing'] is None and not policy.pristine(audio):
                 fail('Foreign STT provider/configuration conflicts; no automatic replacement')
-            stt_policy.upload_prerequisites(audio)
+            policy.upload_prerequisites(audio)
             if record['overlay'] is None and row is not None and (
                     row.get('write_access', True) is not True or row.get('base_model_id') is not None
                     or row.get('is_active') is not False):
@@ -495,7 +510,7 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
                 raise UncertainOutcome('WebUI overlay create readback incomplete/conflicting; retain intent') from None
             record['pending'] = None; persist(record, confirmed=True)
             confirmed_effects.append('overlay creation')
-        elif document.get('stt') is None:
+        elif document.get(section) is None:
             persist(record)
         # Overlay creation/finalization is a mutation transition: requalify the
         # deployment before the chat participant can write its own receipt.
@@ -522,7 +537,8 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
             fail('WebUI audio changed before submission; pending intent retained')
         if not disable:
             qualify()
-        body = dict(tts=deepcopy(audio['tts']), stt=dict(deepcopy(audio['stt']), **wanted))
+        body = dict(tts=deepcopy(audio['tts']), stt=deepcopy(audio['stt']))
+        body[section].update(deepcopy(wanted))
         try:
             request('POST', '/api/v1/audio/config/update', lambda: client.update_audio(body),
                     dict(operation=record['pending']['operation'], routing=wanted))
@@ -532,7 +548,8 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
             actual = audio_get()
         except HemError:
             raise UncertainOutcome('WebUI audio update readback incomplete; retain intent') from None
-        expected = dict(deepcopy(audio), stt=body['stt'])
+        expected = dict(deepcopy(audio))
+        expected[section] = body[section]
         if not same(actual, expected):
             raise UncertainOutcome('WebUI audio update unconfirmed/conflicting; no replay; inspect') from None
         audio = actual
@@ -556,34 +573,42 @@ def _configure_audio(root, target, deadline, *, check, disable, client, request,
                 raise UncertainOutcome('WebUI model deletion unconfirmed; no automatic replay')
             record['overlay'] = None; record['pending'] = None; persist(record, confirmed=True)
         # External prerequisite is never deleted/adopted; no remaining authority.
+        if section == 'tts' and not whole_disable:
+            selection = None
         record = None; persist(record, confirmed=True)
         # Audio/overlay effects may cross a deployment transition; observe again.
         try:
-            chat = chat_operation(check=False, disable=True, version=None)
+            chat = chat_operation(check=False, disable=whole_disable, version=None)
         except HemError as error:
             raise partial_failure(error)
-    chat['stt'] = dict(configuration='absent' if disable else 'configured',
+    chat[section] = dict(configuration='absent' if disable else 'configured',
         selection=None if disable and chat.exit_code == 0 and chat['completed'] else deepcopy(selection), reason=None,
         target=None if disable else deepcopy(record['target']), backend_reachability='operator-required/unverified',
-        disconnect='inert-openai/blank-origin-no-provider-fallback' if disable else None)
+        disconnect=('browser-speech' if section == 'tts' else 'inert-openai/blank-origin-no-provider-fallback') if disable else None)
     chat['changed'] = chat['changed'] or stt_changed
     return chat
 
 
 def configure_openwebui(root, target, token, deadline, *, check=False, disable=False,
                         client_factory=WebUIClient, display=None,
-                        stt_server=None, stt_instance=None) -> OpenWebUIResult:
+                        stt_server=None, stt_instance=None, tts_server=None, tts_instance=None, disable_tts=False) -> OpenWebUIResult:
     """Own complete bounded WebUI setup for CLI and direct Python callers.
 
     Explicit target/token override their environment defaults. Display callbacks
     receive only fixed routes and owned intent, never whole remote configuration.
     """
-    if check and disable:
+    if check and (disable or disable_tts):
         raise InvalidInput("check and disable are mutually exclusive")
     if (stt_server is None) != (stt_instance is None) or disable and stt_server is not None:
         raise InvalidInput('Supply both --stt-server and --stt-instance; omit selectors with --disable')
     if stt_server is not None:
         _name(stt_server); _name(stt_instance)
+    if (tts_server is None) != (tts_instance is None) or (disable or disable_tts) and tts_server is not None:
+        raise InvalidInput('Supply both --tts-server and --tts-instance; omit TTS selectors with disconnect')
+    if disable and disable_tts:
+        raise InvalidInput('--disable and --disable-tts are mutually exclusive')
+    if tts_server is not None:
+        _name(tts_server); _name(tts_instance)
     target = resolve_target(target)
     token = token if token is not None else os.environ.get('OPENWEBUI_TOKEN')
     if not token:
@@ -599,7 +624,7 @@ def configure_openwebui(root, target, token, deadline, *, check=False, disable=F
     try:
         response = _configure_owned(root, target, token, deadline, check=check, disable=disable,
             client_factory=client_factory, display=display if display is not None else display_request(target),
-            stt_server=stt_server, stt_instance=stt_instance)
+            stt_server=stt_server, stt_instance=stt_instance, tts_server=tts_server, tts_instance=tts_instance, disable_tts=disable_tts)
     except HemError as error:
         # Direct callers receive the same credential-safe diagnostics as the CLI.
         error.args = (str(error).replace(token, '<redacted>'),)
@@ -610,7 +635,7 @@ def configure_openwebui(root, target, token, deadline, *, check=False, disable=F
 
 
 def _configure_owned(root, target, token, deadline, *, check, disable,
-                     client_factory, display, stt_server, stt_instance):
+                     client_factory, display, stt_server, stt_instance, tts_server, tts_instance, disable_tts):
     path = ownership_path(root, target)
     previous = files.read_owned(path)
     document = decode_document(previous, root, target)
@@ -619,6 +644,10 @@ def _configure_owned(root, target, token, deadline, *, check, disable,
                       else None if disable else prior_selection)
     if not check and selected_names is not None:
         stt_server, stt_instance = selected_names['server'], selected_names['instance']
+    prior_tts = state.tts_selection(document)
+    selected_tts = dict(server=tts_server, instance=tts_instance) if tts_server is not None else prior_tts
+    if not check and selected_tts is not None:
+        tts_server, tts_instance = selected_tts['server'], selected_tts['instance']
     client = client_factory(target, token, deadline)
     def request(method, route, operation, intent=None):
         try:
@@ -639,7 +668,7 @@ def _configure_owned(root, target, token, deadline, *, check, disable,
         # Publication and initial server-locked selection precede integration.
         registry = Registry(root, deadline=deadline)
         ensure_endpoints(registry, deadline)
-        if stt_server is not None:
+        if stt_server is not None and not disable_tts:
             if (not same(selected_names, prior_selection)
                     and not any(row['id'] == stt_server for row in registry.list_servers())):
                 raise InvalidInput('Selected STT server must already be saved')
@@ -652,6 +681,16 @@ def _configure_owned(root, target, token, deadline, *, check, disable,
                 # Native proof is independent of names-only intent. The owner
                 # admits selection only after applicable preflight/recovery.
                 qualification_error = error
+    tts_target = tts_error = None
+    if not check and not (disable or disable_tts) and tts_server is not None:
+        if not any(row['id'] == tts_server for row in registry.list_servers()):
+            raise InvalidInput('Selected TTS server must already be saved')
+        try:
+            tts_target = operation_targets.resolve_operation_target(registry, tts_server, tts_instance, 'speech', deadline)
+        except InvalidInput:
+            raise
+        except HemError as error:
+            tts_error = error
     try:
         with nullcontext() if check else integration_lock(root, deadline):
             if not check:
@@ -672,20 +711,41 @@ def _configure_owned(root, target, token, deadline, *, check, disable,
                 # Audio/picker effects may have finalized their receipt since entry.
                 current = files.read_owned(path)
                 owned = decode_document(current, root, target)
-                return _configure_chat(root, target, deadline, check=check, disable=disable,
+                return _configure_chat(root, target, deadline, check=check or disable_tts, disable=disable,
                     client=client, request=request, expected=expected, projection=projection,
                     previous=current, document=owned, version=version)
 
-            if stt_server is not None or document.get('stt') is not None or state.stt_selection(document) is not None:
-                return _configure_audio(root, target, deadline, check=check, disable=disable,
+            audio_result = None
+            if not disable_tts and (stt_server is not None or document.get('stt') is not None or state.stt_selection(document) is not None):
+                audio_result = _configure_audio(root, target, deadline, check=check, disable=disable,
                     client=client, request=request, stt_server=stt_server, stt_instance=stt_instance,
                     previous=previous, document=document, endpoints=expected, chat_operation=chat_operation,
                     registry=registry, operation_target=operation_target, qualification_error=qualification_error)
+            if audio_result is not None and audio_result.exit_code:
+                return audio_result
+            if selected_tts is not None or document.get('tts') is not None or disable_tts:
+                previous = files.read_owned(path) if not check else previous
+                document = decode_document(previous, root, target)
+                if not same(state.tts_selection(document), prior_tts):
+                    fail('WebUI local TTS selection changed before update')
+                result = _configure_audio(root, target, deadline, check=check, disable=disable or disable_tts,
+                    client=client, request=request, stt_server=tts_server, stt_instance=tts_instance,
+                    previous=previous, document=document, endpoints=expected, chat_operation=chat_operation,
+                    registry=registry, operation_target=tts_target, qualification_error=tts_error,
+                    section='tts', whole_disable=disable)
+                if audio_result is not None and 'stt' in audio_result:
+                    result['stt'] = audio_result['stt']
+                    result['changed'] = result['changed'] or audio_result['changed']
+                return result
+            if audio_result is not None:
+                return audio_result
             return _configure_chat(root, target, deadline, check=check, disable=disable,
                 client=client, request=request, expected=expected, projection=projection,
                 previous=previous, document=document)
     except DeadlineExpired as error:
-        pending = (document.get('stt') or {}).get('pending') or document.get('pending')
-        if stt_server is not None and pending is not None and error.accepted is not True:
+        pending = ((document.get('stt') or {}).get('pending') or
+                   (document.get('tts') or {}).get('pending') or document.get('pending'))
+        selected_audio = stt_server is not None or tts_server is not None or disable_tts
+        if selected_audio and pending is not None and error.accepted is not True:
             raise UncertainOutcome('WebUI pending outcome remains unresolved within the original deadline; retain intent') from None
         raise

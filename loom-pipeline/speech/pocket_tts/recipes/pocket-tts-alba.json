@@ -1,0 +1,53 @@
+{
+  "format": 3,
+  "id": "pocket-tts-alba",
+  "name": "Pocket TTS Alba",
+  "executable": "speech/pocket_tts/executable.json",
+  "files": {
+    "checkpoint": {
+      "path": "model.safetensors",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "kyutai/pocket-tts",
+        "revision": "7f364c05d1be3faf2b234cdbe4cbb68a026d4218",
+        "filename": "languages/english/model.safetensors"
+      }
+    },
+    "tokenizer": {
+      "path": "tokenizer.json",
+      "source": {
+        "kind": "huggingface",
+        "repo_id": "kyutai/pocket-tts-without-voice-cloning",
+        "revision": "00eac05ed3d16bdc3f6b5d598874019c34a89214",
+        "filename": "languages/english/tokenizer.json"
+      }
+    },
+    "rotary": {
+      "path": "rotary.safetensors",
+      "source": {
+        "kind": "generated"
+      }
+    },
+    "voices": {
+      "path": "voices.safetensors",
+      "source": {
+        "kind": "generated"
+      }
+    },
+    "prepared_metadata": {
+      "path": "model.json",
+      "source": {
+        "kind": "generated"
+      }
+    }
+  },
+  "configuration": {},
+  "preparation_inputs": {
+    "alba.wav": {
+      "kind": "huggingface",
+      "repo_id": "kyutai/tts-voices",
+      "revision": "323332d33f997de8394f24a193e1a76df720e01a",
+      "filename": "alba-mackenna/casual.wav"
+    }
+  }
+}

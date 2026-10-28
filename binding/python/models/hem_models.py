@@ -42,7 +42,7 @@ def _provenance(recipe, identity, kind, selected, executable_identity):
 
 
 def _operation_association(selected, recipe):
-    operation = validate_preparation(selected['preparation'], recipe['files'], selected['assets'])
+    operation = validate_preparation(selected['preparation'], recipe['files'], selected['assets'], recipe.get('preparation_inputs'))
     return dict(id=operation['id'], declaration=operation) if operation is not None else None
 
 
@@ -61,7 +61,7 @@ def _recipe(record, executable=None, modality=None):
         raise InvalidInput('Model recipe or executable association differs; acquire under a new ID')
     if modality not in (None, selected['modality']):
         raise InvalidInput('--modality differs from the selected executable modality')
-    pipelines.validate_files(selected, recipe['files'])
+    pipelines.validate_files(selected, recipe['files'], recipe.get('preparation_inputs'))
     return recipe, selected
 
 
@@ -144,7 +144,7 @@ def _select(recipe_id, *, executable=None, modality=None, deadline=None):
     selected, executable_identity = _admit_programs(recipe['executable'], deadline or Deadline.after())
     if modality not in (None, selected['modality']):
         raise InvalidInput('--modality differs from the selected executable modality')
-    pipelines.validate_files(selected, recipe['files'])
+    pipelines.validate_files(selected, recipe['files'], recipe.get('preparation_inputs'))
     _admit_paths(item['path'] for item in recipe['files'].values())
     return recipe, identity, selected, executable_identity
 
@@ -174,7 +174,7 @@ def qualify(registry, model_id, *, executable=None, modality=None):
     if executable not in (None, reference):
         raise InvalidInput('Selected executable association differs from the model')
     recorded_modality = record['provenance'].get('executable', {}).get('declaration', {}).get('modality')
-    if modality is not None and recorded_modality in ('chat', 'asr') and modality != recorded_modality:
+    if modality is not None and recorded_modality in ('chat', 'asr', 'tts') and modality != recorded_modality:
         raise InvalidInput('--modality differs from the recorded executable modality')
     try:
         _admit_programs(reference, registry.deadline or Deadline.after())
@@ -299,7 +299,7 @@ def _preparation_attempt(root, model_id):
 
 
 def _acquire(registry, model_id, assets, provenance, *, obtain=None, generated=(),
-             prepare=None, preflight=None, inputs=None, stage_prepare=None):
+             prepare=None, preflight=None, inputs=None, stage_prepare=None, stage_outputs=()):
     with registry.lock('model', model_id):
         record = registry.prepare_model(model_id, assets=assets, provenance=provenance)
         pending = record['pending']
@@ -309,7 +309,7 @@ def _acquire(registry, model_id, assets, provenance, *, obtain=None, generated=(
         if needs_preparation:
             preflight(Deadline.after(_PREFLIGHT_TIMEOUT))
         if obtain is not None:
-            obtain()
+            obtain(needs_preparation)
         prepared = {}
         if needs_preparation:
             attempt = _preparation_attempt(registry.root, model_id)
@@ -323,7 +323,7 @@ def _acquire(registry, model_id, assets, provenance, *, obtain=None, generated=(
         if stage is not None:
             try:
                 if stage.exists() and stage_prepare is not None:
-                    _populate(record, omit=(provenance['fragment_index']['path'],))
+                    _populate(record, omit=stage_outputs)
                     try:
                         stage_prepare(stage)
                     except ValueError as error:
@@ -364,7 +364,7 @@ def available(*, deadline=None):
         if reference not in admitted:
             admitted[reference], _ = _admit_programs(reference, budget)
         selected = admitted[reference]
-        pipelines.validate_files(selected, recipe['files'])
+        pipelines.validate_files(selected, recipe['files'], recipe.get('preparation_inputs'))
         result.append(dict(id=recipe['id'], recipe_id=recipe['id'], name=recipe['name'],
                            modality=selected['modality'], executable_id=selected['id'],
                            executable=reference, pipeline=reference,
@@ -397,9 +397,10 @@ def download(registry, recipe_id, *, model_id, executable=None, modality=None, o
             generated.append(path)
             assets.append(_asset(purpose, selected['assets'][purpose]['format'], path,
                                  registry.root / 'models' / model_id / path, 'owned', 'generated-owned'))
-    def obtain():
-        for item in recipe['files'].values():
-            source = item['source']
+    sources = [item['source'] for item in recipe['files'].values()]
+    def obtain(needs_preparation):
+        required = sources + (list(recipe.get('preparation_inputs', {}).values()) if needs_preparation else [])
+        for source in required:
             if source['kind'] != 'huggingface':
                 continue
             if not readable_file(model_download._cache_path(source)):
@@ -417,6 +418,8 @@ def download(registry, recipe_id, *, model_id, executable=None, modality=None, o
         prepare = partial(preparation.prepare, binding['operation'])
         inputs = {name: model_download._cache_path(recipe['files'][purpose]['source'])
                   for name, purpose in binding['inputs'].items()}
+        inputs.update({name: model_download._cache_path(source)
+                       for name, source in binding.get('preparation_inputs', {}).items()})
     else:
         preflight = prepare = None
     return _acquire(registry, model_id, assets,
@@ -490,7 +493,7 @@ def _import_fragments(registry, model_id, recipe, identity, selected, executable
                 raise InvalidInput('Existing fragment index differs from inspected members; preserved for inspection')
         else:
             _atomic_file(destination, lambda stream: stream.write(content))
-    return _acquire(registry, model_id, assets, provenance, stage_prepare=prepare)
+    return _acquire(registry, model_id, assets, provenance, stage_prepare=prepare, stage_outputs=(index_name,))
 
 
 def import_assets(registry, model_id, *, directory, recipe_id=None, alias=False,
@@ -499,11 +502,26 @@ def import_assets(registry, model_id, *, directory, recipe_id=None, alias=False,
         _select(recipe_id, executable=executable, modality=modality, deadline=registry.deadline))
     root = Path(directory).expanduser().absolute()
     _admit_paths(a['path'] for a in recipe['files'].values())
+    operation = selected['preparation']
+    metadata = None
+    if operation is not None and operation['operation'] == 'pocket-alba-assets-v1':
+        from .pocket import import_metadata
+        metadata = import_metadata(root)
     assets = [_asset(purpose, selected['assets'][purpose]['format'], item['path'], root / item['path'],
-                     'reference' if alias else 'owned', 'caller-reference' if alias else 'caller-owned')
+                     'owned' if metadata is not None and purpose == 'prepared_metadata' else 'reference' if alias else 'owned',
+                     'generated-owned' if metadata is not None and purpose == 'prepared_metadata' else 'caller-reference' if alias else 'caller-owned')
               for purpose, item in recipe['files'].items()]
+    def snapshot(stage):
+        destination = stage / 'model.json'
+        if os.path.lexists(destination):
+            if destination.is_symlink() or destination.read_bytes() != metadata:
+                raise InvalidInput('Existing Pocket metadata differs; incomplete import preserved')
+        else:
+            _atomic_file(destination, lambda stream: stream.write(metadata))
     return _acquire(registry, model_id, assets,
-                    _provenance(recipe, identity, 'import', selected, executable_identity))
+                    _provenance(recipe, identity, 'import', selected, executable_identity),
+                    stage_prepare=snapshot if metadata is not None else None,
+                    stage_outputs=('model.json',) if metadata is not None else ())
 
 
 def validate(registry, model_id, *, executable=None, modality=None):

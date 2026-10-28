@@ -49,7 +49,7 @@ class ModelCliTest(unittest.TestCase):
 
     def test_observational_packaged_inventory_and_preview_do_not_create_registry(self):
         support, _ = self.invoke('modality', 'list')
-        self.assertEqual({item['modality'] for item in support['items']}, {'chat', 'asr'})
+        self.assertEqual({item['modality'] for item in support['items']}, {'chat', 'asr', 'tts'})
         info, _ = self.invoke('modality', 'show', 'chat')
         self.assertEqual(info['modality'], 'chat')
         self.assertNotIn('compatibility', info)

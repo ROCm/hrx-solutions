@@ -79,7 +79,9 @@ def _decode(data: bytes):
 def parse(data: bytes) -> tuple[dict, str]:
     """Read authored format3 without imports, acquisition or implementation policy."""
     value, identity = _decode(data)
-    _object(value, ("format", "id", "name", "executable", "files", "configuration"), "document")
+    _object(value, ("format", "id", "name", "executable", "files", "configuration", *( ("preparation_inputs",) if type(value) is dict and "preparation_inputs" in value else ())), "document")
+    if "preparation_inputs" in value and type(value["preparation_inputs"]) is not dict:
+        _fail("preparation_inputs", "expected pinned source object")
     if type(value["format"]) is not int or value["format"] != 3:
         _fail("format", "expected integer 3")
     _name(value["id"], "id")
@@ -158,7 +160,7 @@ def _admit(document, path):
     if document['executable'] != expected:
         _fail(document['id'], 'recipe location differs from its executable catalog')
     executable, _, _ = pipelines.load(document["executable"])
-    pipelines.validate_files(executable, document["files"])
+    pipelines.validate_files(executable, document["files"], document.get("preparation_inputs"))
 
 
 def load(recipe_id: str) -> tuple[dict, str]:

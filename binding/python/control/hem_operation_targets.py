@@ -222,9 +222,9 @@ def resolve_operation_target(registry, server_id, instance_name, operation, dead
     _name(instance_name)
     try:
         from ..models import modalities
-        profile = freeze_json(modalities.get({"chat": "chat", "transcription": "asr"}[operation]).PROTOCOL)
+        profile = freeze_json(modalities.get({"chat": "chat", "transcription": "asr", "speech": "tts"}[operation]).PROTOCOL)
     except (ValueError, KeyError) as error:
-        raise InvalidInput('unsupported operation; select chat or transcription') from error
+        raise InvalidInput('unsupported operation; select chat, transcription or speech') from error
     with _budget(registry, deadline):
         try:
             with registry.lock('server', server_id, deadline=deadline):

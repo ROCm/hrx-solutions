@@ -25,6 +25,14 @@ class CatalogFixture:
         destination.write_text(json.dumps(self.operation, indent=2) + '\n')
         shutil.copyfile(REPOSITORY / '.bazelversion', self.repository / '.bazelversion')
         self.builds = loom_catalog.load_builds(self.repository / 'loom-pipeline/catalog_sources.bzl')
+        self.operations = {self.operation['id']: self.operation}
+        for build in self.builds.values():
+            helper = build['helper']
+            if helper and not (self.repository / helper['contract']).exists():
+                declaration = json.loads((REPOSITORY / helper['contract']).read_bytes())
+                declaration['tool_files'] = dict(self.operation['tool_files'])
+                (self.repository / helper['contract']).write_text(json.dumps(declaration, indent=2) + '\n')
+                self.operations[declaration['id']] = declaration
         self.products, self.decoded, self.queried = {}, {}, []
         self.hrx = root / 'hrx'
         self.hrx.mkdir()
@@ -47,7 +55,7 @@ class CatalogFixture:
                 for source in group['sources']:
                     text = (self.repository / 'loom-pipeline' / source).read_text()
                     if group['policy'] and source == group['policy']['source']:
-                        text = loom_catalog.preparation_bytecode_source(text, group['policy']['from'], group['policy']['to'])
+                        text = loom_catalog.preparation_bytecode_source(text, group['policy']['from'], group['policy']['to'], group['policy'].get('symbol', 'policy'))
                     texts.append(text)
                 self.decoded[path] = '\n'.join(texts)
 
@@ -70,6 +78,7 @@ class CatalogFixture:
         # it is never learned from staged output or read by production compilation.
         result = deepcopy(reviewed)
         for operation in result['operations'].values():
-            operation['declaration'] = deepcopy(self.operation)
-            operation['provenance']['files'] = deepcopy(self.operation['tool_files'])
+            selected = self.operations[operation['declaration']['id']]
+            operation['declaration'] = deepcopy(selected)
+            operation['provenance']['files'] = deepcopy(selected['tool_files'])
         return result

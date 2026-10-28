@@ -110,7 +110,7 @@ class RendererTest(unittest.TestCase):
 
     def test_available_displays_actual_authored_recipe_names(self):
         items = hem_models.available()
-        self.assertEqual(len(items), 3)
+        self.assertEqual(len(items), 4)
         args = hem_cli.parse_args(['model', 'available'])
         for width in (80, 240):
             with self.subTest(width=width):

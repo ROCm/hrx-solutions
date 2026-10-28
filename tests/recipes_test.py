@@ -150,9 +150,9 @@ def executable_document():
 class ActualDiscoveryTest(unittest.TestCase):
     def test_all_current_recipes_executables_and_program_hash_closures(self):
         found = recipes.list()
-        self.assertEqual([r['id'] for r, _ in found], sorted(p.stem for p in EXAMPLES))
+        self.assertEqual([r['id'] for r, _ in found], sorted([*(p.stem for p in EXAMPLES), 'pocket-tts-alba']))
         inventory = pipelines.list()
-        self.assertEqual(len(inventory), 4)
+        self.assertEqual(len(inventory), 5)
         for path in EXAMPLES:
             recipe, identity = recipes.load(path.stem)
             self.assertEqual(recipe, json.loads(path.read_bytes()))
@@ -182,8 +182,9 @@ class ActualDiscoveryTest(unittest.TestCase):
             self.assertEqual(native['sources'], executable['programs']['sources'])
         self.assertEqual(len(pipelines.list(modality='chat')), 3)
         self.assertEqual(len(pipelines.list(modality='asr')), 1)
+        self.assertEqual(len(pipelines.list(modality='tts')), 1)
         with self.assertRaises(HemError):
-            pipelines.list(modality='tts')
+            pipelines.list(modality='unsupported')
 
     def test_validate_files_returns_fresh_selected_operation_data_or_none(self):
         from binding.python.models.preparation.moonshine_contract import load_operation

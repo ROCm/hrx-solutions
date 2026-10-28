@@ -1,0 +1,152 @@
+{
+  "format": 1,
+  "id": "pocket-tts-alba",
+  "modality": "tts",
+  "native_contract": "speech-v1",
+  "serving": {
+    "pending_requests": [
+      1,
+      65536
+    ],
+    "defaults": {
+      "pending_requests": 4,
+      "options": {
+        "input_tokens": 4096,
+        "request_capacity": 4,
+        "batch_capacity": 4,
+        "threads": 128
+      }
+    }
+  },
+  "assets": {
+    "checkpoint": {
+      "format": "safetensors",
+      "path": "model.safetensors"
+    },
+    "tokenizer": {
+      "format": "json",
+      "path": "tokenizer.json"
+    },
+    "rotary": {
+      "format": "safetensors",
+      "path": "rotary.safetensors"
+    },
+    "voices": {
+      "format": "safetensors",
+      "path": "voices.safetensors"
+    },
+    "prepared_metadata": {
+      "format": "json",
+      "path": "model.json"
+    }
+  },
+  "programs": {
+    "root": "speech/pocket_tts",
+    "encoding": "source",
+    "prepare": "prepare.loom",
+    "control": "control.loom",
+    "sources": [
+      "attention.loom",
+      "batch_attention.loom",
+      "batch_conditioning.loom",
+      "batch_convolution.loom",
+      "batch_decode.loom",
+      "batch_flow_layers.loom",
+      "batch_flow_state.loom",
+      "batch_mimi_layers.loom",
+      "batch_normalization.loom",
+      "batch_pointwise.loom",
+      "batch_prefill.loom",
+      "batch_projection.loom",
+      "batch_request.loom",
+      "batch_sampling.loom",
+      "batch_voice.loom",
+      "batching.loom",
+      "convolution.loom",
+      "decode.loom",
+      "dispatch.loom",
+      "flow_layers.loom",
+      "flow_state.loom",
+      "layout.loom",
+      "mimi_layers.loom",
+      "normalization.loom",
+      "options.loom",
+      "pointwise.loom",
+      "prefill.loom",
+      "projection.loom",
+      "request_layout.loom",
+      "sampling.loom",
+      "text_chunking.loom",
+      "text_normalization.loom",
+      "voice.loom",
+      "motifs/tensor/random.loom",
+      "motifs/text/unicode.loom",
+      "motifs/text/utf8.loom"
+    ],
+    "support": [
+      "weights.loom"
+    ],
+    "files": {
+      "attention.loom": "480bad006d7f2cc826f15844d1b387f0b563e29c1037cfff4d4f9f04a988fec0",
+      "batch_attention.loom": "11e67b3373bfa963d510c8d9d5c2cfcf073521366253e0ab1868e83e1dc43f8b",
+      "batch_conditioning.loom": "3656b46776253ab77f6e7a4cea4cf595b2574e38d1703d915f5d1c087c615755",
+      "batch_convolution.loom": "351c0beac2c2d3a8ad35fe156d8b04da25cda0fdc447193a34de8f9514f40616",
+      "batch_decode.loom": "7c4de1e948c7fc3592340fa56ce6602c2148b5da588435c7ea62171e5680a02b",
+      "batch_flow_layers.loom": "3f09b2204707944ab971341a1661a81eab2bfcdca0089e0c476ac4689d463e60",
+      "batch_flow_state.loom": "a22a4074f6dd94e45569049ddda37cf3a3bc2443f666b5d861ae42994fe7c0e2",
+      "batch_mimi_layers.loom": "5789508043ff5566b1d6dbb7782994462d9f377c9035b3bc0d7a797f064c2f55",
+      "batch_normalization.loom": "8bf39b60ffd5a712c44937be801c23008733ae05068a103e5ea82449e2852815",
+      "batch_pointwise.loom": "2d771c0e6214405eb712e2e5e820b21c047ca3e135efa025175309d6a00144d0",
+      "batch_prefill.loom": "5a735973f16ea632b40c18738dfbc58879e23a04a03d2a12d93a64354912a6ae",
+      "batch_projection.loom": "93bea62b716fd55f83ba72381a045f30514361b5ffb2ece28d243b70dcd9fc02",
+      "batch_request.loom": "c52ef88333d0ff9a417b9f469be2dc0221bf2564f15885394e2636a646eea3b6",
+      "batch_sampling.loom": "c61ea39755543f674858ce5a2a3e376fd554dbb90faf203130b0c56940dcd485",
+      "batch_voice.loom": "3df59a02b2f65db5a14b8d2e86ceb8c09049b8dce4e4f1359e857030ea36956b",
+      "batching.loom": "d88217ef77dbeadefdbf373fd802e8b43796372d2e21176e0f512a4173ac82a2",
+      "control.loom": "37c64b7fb8df161d6770e21b13f16fd0f3a50fae87e8286163c6cf663a5c7561",
+      "convolution.loom": "2426a9822141b97f0cdbc66811a2cd2962fd8c1fae228e9cd4724b41a4608c0a",
+      "decode.loom": "5b60dabc305aa13051205979591bcf4dd4805f5fb9c314ceb0fd3840fd6512c3",
+      "dispatch.loom": "7da1b2b0c013987dbba488c14a5f495ba8a57e17872207ab7b72a94c8a7d5d2b",
+      "flow_layers.loom": "df8c8e5ed252a385e3ee353435611c9c7a435a8fab715115616582a086075cac",
+      "flow_state.loom": "cd2a9b5b4919c2dc8da3cd89be8d3ba1f39166ee843e04d6e31819409c663620",
+      "layout.loom": "b301203b7c5796010ed8ff2342b77094aebc5fbbd6898568f7f1c9a4887b333c",
+      "mimi_layers.loom": "5e9b62724642b37ab13d698da1789a8be6dba2aeb43d79d5f6e42a64830cde91",
+      "normalization.loom": "998ac69823ccf5bce8a6cef28834e1374af378c6708d1253bd4e640f29091bba",
+      "options.loom": "68595e824537168144707fa37971b1cf82f7c6ec846b4b1516ffe3cb2241d485",
+      "pointwise.loom": "e4aa9c2d3fa12cd01cc0bcf44e58ae456396706047cb277f131b0a7471c3b42e",
+      "prefill.loom": "e167ab17fb025d0c9f21090202940032131365801212cd5b769280c804550199",
+      "prepare.loom": "4649433a2718cc53d59ada6c7becf287b533abf0465e506a498eb01cbff452ef",
+      "projection.loom": "287dee8fe48ed977e2a3561144a47c7fca9b7ac8e308a00783daaa8cb8d22751",
+      "request_layout.loom": "feaf0b4e34c15689be4172d9a680139bda510af4454755f88bcadd8e9fd30da6",
+      "sampling.loom": "baf6c5cf98f743dca347232254ff0091f478b983addfd5a123ef5835dc8eede7",
+      "text_chunking.loom": "8d008887cf56a430e082711246a32ab59c4f3d65bd4dee752fe855631e55b977",
+      "text_normalization.loom": "d70ae20d00188dbff6c1a9fc3b6c6a127640a441ceead1f32b8c2045bb24638d",
+      "voice.loom": "1eba9990542e953658185f125ce0f4f8acc4f2a64a17414057c6dc437d00c41a",
+      "weights.loom": "37e3fa1c1cafa8230212847d4aed5b57ae711d24420d9988036b3373a302e3af",
+      "motifs/tensor/random.loom": "754b052c13ef870ac9808dfe906565d5f5f728a4864c4d175ad2b9bafde904e5",
+      "motifs/text/unicode.loom": "c941c0f4413b7b2a179e8032c6a56e07753fbf08c2e2728cfef0ba9d3158370a",
+      "motifs/text/utf8.loom": "5b895a8c276bae0f34e18cf686a4c210b87c976ffb410485509b725373ad306d"
+    }
+  },
+  "preparation": {
+    "operation": "pocket-alba-assets-v1",
+    "inputs": {
+      "model.safetensors": "checkpoint",
+      "tokenizer.json": "tokenizer"
+    },
+    "preparation_inputs": {
+      "alba.wav": {
+        "kind": "huggingface",
+        "repo_id": "kyutai/tts-voices",
+        "revision": "323332d33f997de8394f24a193e1a76df720e01a",
+        "filename": "alba-mackenna/casual.wav"
+      }
+    },
+    "outputs": {
+      "rotary.safetensors": "rotary",
+      "voices.safetensors": "voices",
+      "model.json": "prepared_metadata"
+    }
+  },
+  "provenance": null
+}

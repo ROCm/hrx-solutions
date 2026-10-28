@@ -72,9 +72,9 @@ def parse(data: bytes) -> tuple[dict, str]:
         recipes._fail('executable.format', 'expected integer 1')
     recipes._name(value['id'], 'executable.id')
     modality = value['modality']
-    if type(modality) is not str or modality not in ('chat', 'asr'):
-        recipes._fail('executable.modality', 'expected chat or asr')
-    contract = 'text-v1' if modality == 'chat' else 'recognition-v1'
+    if type(modality) is not str or modality not in ('chat', 'asr', 'tts'):
+        recipes._fail('executable.modality', 'expected chat, asr or tts')
+    contract = {'chat': 'text-v1', 'asr': 'recognition-v1', 'tts': 'speech-v1'}[modality]
     if value['native_contract'] != contract:
         recipes._fail('executable.native_contract', 'unsupported modality/native contract pair')
     modalities.get(modality).validate_contract(value['serving'])
@@ -95,7 +95,7 @@ def parse(data: bytes) -> tuple[dict, str]:
             if any(path == other or path in other.parents or other in path.parents for other in fixed):
                 recipes._fail('executable.assets', 'overlapping fixed destinations')
             fixed.append(path)
-        elif modality == 'asr':
+        elif modality in ('asr', 'tts'):
             recipes._fail('executable.assets.' + purpose, 'recognition requires a fixed destination')
     if modality == 'chat' and (set(assets) != {'weights', 'tokenizer'} or
             assets['weights']['format'] != 'gguf' or assets['tokenizer']['format'] != 'json'):
@@ -151,7 +151,7 @@ def load(reference):
     return value, program_root, identity
 
 
-def validate_files(executable, files):
+def validate_files(executable, files, preparation_inputs=None):
     """Associate admitted recipe files with data-owned assets and trusted operation."""
     assets = executable['assets']
     if type(files) is not dict or set(files) != set(assets):
@@ -161,7 +161,7 @@ def validate_files(executable, files):
         if not item['path'].endswith('.' + asset['format']) or asset['path'] not in (None, item['path']):
             raise InvalidInput(f'files.{purpose}: destination differs from executable format/path')
     from .preparation import validate_preparation
-    return validate_preparation(executable['preparation'], files, assets)
+    return validate_preparation(executable['preparation'], files, assets, preparation_inputs)
 
 
 def programs(executable, catalog_path, deadline):

@@ -34,7 +34,7 @@ def prepare(query, repository, *, selected=None):
             if (document['executable'] != reference or path.name != document['id'] + '.json'
                     or document['id'] in recipe_ids):
                 raise ValueError('Duplicate, misplaced or cross-catalog recipe')
-            pipelines.validate_files(source, document['files'])
+            pipelines.validate_files(source, document['files'], document.get('preparation_inputs'))
             recipe_ids.add(document['id'])
             recipe_paths.append((path.relative_to(root).as_posix(), recipe_identity))
         catalogs[reference] = (source, identity, tuple(recipe_paths))

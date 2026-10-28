@@ -247,7 +247,7 @@ def resolve(record, paths, dependencies, evidence, overrides=None, config_path=N
                                'identity':executable_identity, 'declaration':executable}):
         raise InvalidInput('Model recipe or executable association differs; reacquire under a new ID')
     budget.remaining()
-    operation = pipelines.validate_files(executable, recipe['files'])
+    operation = pipelines.validate_files(executable, recipe['files'], recipe.get('preparation_inputs'))
     preparation = ({'id':operation['id'], 'declaration':operation} if operation is not None else None)
     if provenance.get('preparation') != preparation:
         raise InvalidInput('Model preparation association differs; reacquire under a new ID')
@@ -271,7 +271,7 @@ def resolve(record, paths, dependencies, evidence, overrides=None, config_path=N
     definition = modality.definition(settings, paths, directory, programs)
     _unchanged_files(paths, dependencies, evidence, budget)
     budget.remaining()
-    if pipelines.validate_files(executable, recipe['files']) != operation:
+    if pipelines.validate_files(executable, recipe['files'], recipe.get('preparation_inputs')) != operation:
         raise InvalidInput('Preparation contract changed during serving resolution')
     relative, digest = _checked_catalog(catalog, snapshots, budget)
     resolved = ResolvedConfiguration(record['id'], reference, Path(catalog), settings, sources,

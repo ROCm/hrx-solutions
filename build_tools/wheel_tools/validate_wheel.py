@@ -49,12 +49,13 @@ MODEL_MODULES = (
     'model_store',
     'recipes',
     'pipelines',
+    'pocket',
 )
 MODEL_PYTHON_PATHS = ('models/__init__.py',
-    'models/preparation/__init__.py', 'models/preparation/moonshine.py',
-    'models/preparation/moonshine_contract.py',
+    'models/preparation/__init__.py', 'models/preparation/moonshine.py', 'models/preparation/pocket.py',
+    'models/preparation/moonshine_contract.py', 'models/preparation/pocket_contract.py',
     *('models/' + name + '.py' for name in MODEL_MODULES),
-    'models/modalities/__init__.py', 'models/modalities/chat.py', 'models/modalities/asr.py')
+    'models/modalities/__init__.py', 'models/modalities/chat.py', 'models/modalities/asr.py', 'models/modalities/tts.py')
 
 RETIRED_MODEL_PYTHON_PATHS = (
     'models/moonshine_preparation.py', 'models/moonshine_preparer_identity.py',
@@ -111,6 +112,7 @@ OPENWEBUI_PYTHON_PATHS = (
     'integrations/openwebui/hem_openwebui_http.py',
     'integrations/openwebui/hem_openwebui_state.py',
     'integrations/openwebui/hem_openwebui_stt.py',
+    'integrations/openwebui/hem_openwebui_tts.py',
     'integrations/openwebui/hem_openwebui_receipts.py',
     'integrations/openwebui/hem_openwebui_wire.py',
 )
@@ -151,7 +153,7 @@ OBSOLETE_MODULES = (
     'hem_openwebui',
     'hem_openwebui_http',
     'hem_openwebui_state',
-    'hem_openwebui_stt',
+    'hem_openwebui_stt', 'hem_openwebui_tts',
     'hem_openwebui_receipts',
     'hem_openwebui_wire',
 

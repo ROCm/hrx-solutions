@@ -7,7 +7,7 @@ def configure(parser):
     commands = parser.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list")
     arguments.output(listing)
-    listing.add_argument("--modality", choices=("chat", "asr"))
+    listing.add_argument("--modality", choices=("chat", "asr", "tts"))
     show = commands.add_parser("show")
     arguments.output(show)
     show.add_argument("executable", metavar="REF")

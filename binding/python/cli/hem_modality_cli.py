@@ -10,7 +10,7 @@ def configure(parser):
         child = commands.add_parser(command)
         arguments.output(child)
         if command == "show":
-            child.add_argument("modality", choices=("chat", "asr"))
+            child.add_argument("modality", choices=("chat", "asr", "tts"))
 
 
 def run(args, deadline):

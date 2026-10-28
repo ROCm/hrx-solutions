@@ -36,8 +36,12 @@ class PackagingTest(unittest.TestCase):
         self.root=Path(temporary.name)
         self.fixture=CatalogFixture(self.root/'catalog-fixture')
         shutil.copytree(packaging.REPO_ROOT/'binding',self.fixture.repository/'binding',dirs_exist_ok=True)
-        (self.fixture.repository/'binding/python/models/preparation/moonshine-operation.json').write_text(
-            json.dumps(self.fixture.operation,indent=2)+'\n')
+        for build in self.fixture.builds.values():
+            if build['helper']:
+                identifier = json.loads((packaging.REPO_ROOT/build['helper']['contract']).read_bytes())['id']
+                operation = self.fixture.operations[identifier]
+                (self.fixture.repository/build['helper']['contract']).write_text(
+                    json.dumps(operation,indent=2)+'\n')
         patch.object(wheel_validation,'REPO_ROOT',self.fixture.repository).start()
         reviewed=recipe_inventory.load_release()
         self.release=self.fixture.release(reviewed)
@@ -136,7 +140,7 @@ class PackagingTest(unittest.TestCase):
         self.assertIs(contexts[0],contexts[1]);self.assertIs(contexts[2],contexts[3])
         self.assertEqual(set(first),set(final));self.assertEqual(len(final),len(set(final)))
         self.assertEqual({str(p) for p in package.rglob('*') if p.is_file()},set(final))
-        self.assertEqual(sum(p.suffix=='.loombc' for p in command._catalog_outputs),7)
+        self.assertEqual(sum(p.suffix=='.loombc' for p in command._catalog_outputs),46)
         from binding.python.models import recipes,pipelines
         recipe_inventory.validate_installed_catalogs(package,recipes.parse,pipelines.parse,self.fixture.repository)
 
@@ -496,7 +500,7 @@ class PackagingTest(unittest.TestCase):
                 self.assertIn(target, str(raised.exception))
 
     def test_sdist_requires_each_exact_regular_openwebui_source_once(self):
-        names = ('integrations/__init__.py', 'integrations/openwebui/__init__.py', 'integrations/openwebui/hem_openwebui.py', 'integrations/openwebui/hem_openwebui_http.py', 'integrations/openwebui/hem_openwebui_state.py', 'integrations/openwebui/hem_openwebui_stt.py', 'integrations/openwebui/hem_openwebui_receipts.py', 'integrations/openwebui/hem_openwebui_wire.py')
+        names = ('integrations/__init__.py', 'integrations/openwebui/__init__.py', 'integrations/openwebui/hem_openwebui.py', 'integrations/openwebui/hem_openwebui_http.py', 'integrations/openwebui/hem_openwebui_state.py', 'integrations/openwebui/hem_openwebui_stt.py', 'integrations/openwebui/hem_openwebui_tts.py', 'integrations/openwebui/hem_openwebui_receipts.py', 'integrations/openwebui/hem_openwebui_wire.py')
         for target in names:
             for failure in (None, 'missing', 'changed', 'symlink', 'duplicate'):
                 path = self.root / 'openwebui-source.tar.gz'
@@ -524,7 +528,7 @@ class PackagingTest(unittest.TestCase):
 
     def test_wheel_requires_each_exact_regular_openwebui_source_once(self):
         import warnings
-        for target in ('integrations/__init__.py', 'integrations/openwebui/__init__.py', 'integrations/openwebui/hem_openwebui.py', 'integrations/openwebui/hem_openwebui_http.py', 'integrations/openwebui/hem_openwebui_state.py', 'integrations/openwebui/hem_openwebui_stt.py', 'integrations/openwebui/hem_openwebui_receipts.py', 'integrations/openwebui/hem_openwebui_wire.py'):
+        for target in ('integrations/__init__.py', 'integrations/openwebui/__init__.py', 'integrations/openwebui/hem_openwebui.py', 'integrations/openwebui/hem_openwebui_http.py', 'integrations/openwebui/hem_openwebui_state.py', 'integrations/openwebui/hem_openwebui_stt.py', 'integrations/openwebui/hem_openwebui_tts.py', 'integrations/openwebui/hem_openwebui_receipts.py', 'integrations/openwebui/hem_openwebui_wire.py'):
             for failure in ('missing', 'changed', 'duplicate', 'symlink', 'directory'):
                 wheel = self.wheel()
                 target_path = 'hrx_solutions/' + target
@@ -623,7 +627,7 @@ class PackagingTest(unittest.TestCase):
         package=self.root/'staged'
         consume=namespace['check_recipe_consumers']
         with patch.object(pipelines,'catalog_roots',return_value=(package/'loom-pipeline',)):
-            self.assertEqual(consume(package),('moonshine-streaming-tiny','qwen35-08b-q5-k-xl','qwen38-27b-q5-k-xl'))
+            self.assertEqual(consume(package),('moonshine-streaming-tiny','pocket-tts-alba','qwen35-08b-q5-k-xl','qwen38-27b-q5-k-xl'))
             module=package/'loom-pipeline/llm/qwen/qwen_08b/pipeline.loombc'
             original=module.read_bytes()
             module.write_bytes(b'LOOMtampered')
@@ -654,7 +658,7 @@ class PackagingTest(unittest.TestCase):
              patch.object(model_download,'_run_hf',side_effect=AssertionError('query must not fetch')), \
              patch.object(moonshine_preparation,'preflight',side_effect=AssertionError('query must not preflight')):
             self.assertEqual(namespace['check_public_recipe_queries'](invoke),
-                             ('moonshine-streaming-tiny','qwen35-08b-q5-k-xl','qwen38-27b-q5-k-xl'))
+                             ('moonshine-streaming-tiny','pocket-tts-alba','qwen35-08b-q5-k-xl','qwen38-27b-q5-k-xl'))
         self.assertFalse(state.exists())
 
     def test_source_and_wheel_reject_each_retired_model_module(self):
@@ -681,8 +685,9 @@ class PackagingTest(unittest.TestCase):
             'models/__init__.py', 'models/gguf.py', 'models/hem_config.py',
             'models/hem_models.py', 'models/model_download.py', 'models/model_store.py',
             'models/preparation/__init__.py', 'models/preparation/moonshine.py', 'models/preparation/moonshine_contract.py',
+            'models/preparation/pocket.py', 'models/preparation/pocket_contract.py', 'models/pocket.py',
             'models/recipes.py', 'models/pipelines.py',
-            'models/modalities/__init__.py', 'models/modalities/chat.py', 'models/modalities/asr.py',
+            'models/modalities/__init__.py', 'models/modalities/chat.py', 'models/modalities/asr.py', 'models/modalities/tts.py',
         )
         for target in names:
             for failure in (None, 'missing', 'changed', 'symlink', 'duplicate'):
@@ -870,7 +875,7 @@ class PackagingTest(unittest.TestCase):
                          'integrations/omp/hem_omp.py', 'integrations/omp/hem_omp_yaml.py'))
         expected.update(('integrations/__init__.py', 'integrations/opencode/__init__.py',
                          'integrations/opencode/hem_opencode.py'))
-        expected.update(('integrations/__init__.py', 'integrations/openwebui/__init__.py', 'integrations/openwebui/hem_openwebui.py', 'integrations/openwebui/hem_openwebui_http.py', 'integrations/openwebui/hem_openwebui_state.py', 'integrations/openwebui/hem_openwebui_stt.py', 'integrations/openwebui/hem_openwebui_receipts.py', 'integrations/openwebui/hem_openwebui_wire.py'))
+        expected.update(('integrations/__init__.py', 'integrations/openwebui/__init__.py', 'integrations/openwebui/hem_openwebui.py', 'integrations/openwebui/hem_openwebui_http.py', 'integrations/openwebui/hem_openwebui_state.py', 'integrations/openwebui/hem_openwebui_stt.py', 'integrations/openwebui/hem_openwebui_tts.py', 'integrations/openwebui/hem_openwebui_receipts.py', 'integrations/openwebui/hem_openwebui_wire.py'))
         expected.update(('integrations/__init__.py', 'integrations/hem_integrations.py',
                          'integrations/hem_client_documents.py', 'integrations/hem_clients_endpoints.py'))
         staged = Path(command.build_lib) / 'hrx_solutions'
@@ -887,9 +892,10 @@ class PackagingTest(unittest.TestCase):
         metadata={path.name for path in (root/'loom-pipeline').iterdir()
                   if path.is_file() and (path.suffix=='.bzl' or path.name=='BUILD.bazel')}
         paths=recipe_inventory.source_paths(self.release)|metadata
-        operation='binding/python/models/preparation/moonshine-operation.json'
         baseline={'loom-pipeline/'+name:(root/'loom-pipeline'/name).read_bytes() for name in paths}
-        baseline[operation]=(root/operation).read_bytes()
+        for expected in self.release['operations'].values():
+            operation = expected['source']
+            baseline[operation]=(root/operation).read_bytes()
         source=next(name for name in baseline if name.endswith('.loom'))
         unrelated=('validate_pi_sdist','validate_pi_python_sdist','validate_client_sdist',
                    'validate_models_sdist','validate_cli_sdist','validate_omp_sdist',

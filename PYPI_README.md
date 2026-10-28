@@ -59,3 +59,55 @@ use an available release or build wheel with the walkthrough installation steps.
 The Python launcher and packaging code are MIT licensed. Bundled native code,
 pipeline modules, and ROCm libraries retain their upstream licenses and
 notices. Model weights are not redistributed.
+
+### Pocket TTS Alba
+
+Prepared Alba assets can be imported and served with the base installation. To
+use `model download`, create a Python 3.12 environment and explicitly select CPU
+Torch before installing the optional preparation dependencies:
+
+```sh
+python3.12 -m venv .venv
+.venv/bin/python -m pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/python -m pip install 'hrx-solutions[pocket]'
+.venv/bin/hf auth login
+.venv/bin/loom-control model download pocket-tts-alba --id pocket
+.venv/bin/loom-control server start --name speech --device amdgpu --listen 127.0.0.1:8080
+.venv/bin/loom-control instance start pocket --name reader --server speech
+```
+
+Accept the checkpoint repository's access terms at
+<https://huggingface.co/kyutai/pocket-tts> before downloading. Use `--offline`
+when all three pinned inputs are already in the Hugging Face cache. Preparation
+runs the wheel's fixed HRX helper offline; it does not install dependencies or
+fetch code. The reference WAV is used only during preparation and is not required
+for hosting. Stop with `loom-control instance stop reader --server speech`, then
+`loom-control server shutdown speech`.
+
+The recipe pins the full encoder checkpoint from `kyutai/pocket-tts`, the
+compatible tokenizer from `kyutai/pocket-tts-without-voice-cloning`, and Alba
+MacKenna's Casual reference from `kyutai/tts-voices`. Alba's recording is CC BY
+4.0: credit Alba MacKenna and Kyutai, link the source and license, and identify
+changes (the helper downmixes, resamples, trims and pads the reference waveform).
+The reference is available at
+<https://huggingface.co/kyutai/tts-voices/blob/323332d33f997de8394f24a193e1a76df720e01a/alba-mackenna/casual.wav>;
+license: <https://creativecommons.org/licenses/by/4.0/>. Model assets stay external
+to the wheel; checkpoint/tokenizer repository terms continue to apply.
+
+Pocket read-aloud can use a compatible full Open WebUI deployment with FFmpeg and
+pydub preprocessing enabled. Managed configuration requires its explicit TTS
+`CACHE_ENABLED` capability; ordinary unpatched 0.12.3 is refused. The locally
+reviewed WebUI cache patch is a separate deployment artifact, not installed or
+applied by Control. With an administrator token in `OPENWEBUI_TOKEN`:
+
+```sh
+loom-control openwebui configure --url http://127.0.0.1:3000 --tts-server speech --tts-instance reader
+loom-control openwebui configure --url http://127.0.0.1:3000 --check
+loom-control openwebui configure --url http://127.0.0.1:3000 --disable-tts
+```
+
+Managed Pocket uses Alba and fixes PCM, speed 1 and empty instructions through the
+OpenAI TTS parameters; stored user voice preferences are preserved. Selected TTS
+disconnect returns read-aloud to browser speech and preserves chat/STT settings.
+The existing `--disable` still disconnects the whole managed integration. A
+successful configuration readback does not establish browser playback or hearing.

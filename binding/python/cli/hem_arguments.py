@@ -70,7 +70,7 @@ def serving(parser: argparse.ArgumentParser) -> None:
 def selection_assertions(parser: argparse.ArgumentParser) -> None:
     """Assertions on a recipe/model selection; neither flag selects a model."""
     parser.add_argument("--executable", metavar="REF")
-    parser.add_argument("--modality", choices=("chat", "asr"))
+    parser.add_argument("--modality", choices=("chat", "asr", "tts"))
 
 
 def select_server(explicit: str | None, configured: list[str]) -> str:

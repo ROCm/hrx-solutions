@@ -91,9 +91,11 @@ def load_builds(path):
                     raise ValueError('Compiler inputs must be Loom source')
             policy = group['policy']
             if policy is not None:
-                if type(policy) is not dict or set(policy) != {'source', 'from', 'to'} or policy['source'] not in sources:
+                if type(policy) is not dict or set(policy) != {'source', 'from', 'to'} | ({'symbol'} if 'symbol' in policy else set()) or policy['source'] not in sources:
                     raise ValueError('Invalid policy projection')
                 for value in policy.values(): relative(value)
+                if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]*', policy.get('symbol', 'policy')):
+                    raise ValueError('Invalid policy symbol')
             name = build['root'] + '/' + output
             if name in jobs and jobs[name] != group:
                 raise ValueError('Conflicting compiler producers: ' + name)
@@ -213,7 +215,7 @@ def program_roots(text: str) -> dict:
 
 
 def validate_compiled_program(artifact: Path, sources, root: Path, decoder: Path,
-                              *, policy=None, exact_configs=True) -> dict:
+                              *, policy=None, exact_configs=True, policy_symbol='policy') -> dict:
     """Prove a linked closure and its policy rewrite before normalizing metadata.
 
     Source identities are explicit compiler inputs. A singleton and a multi-file
@@ -255,8 +257,8 @@ def validate_compiled_program(artifact: Path, sources, root: Path, decoder: Path
                     or posixpath.normpath(locator) != locator
                     or locator.startswith(("/", "../")) or "\\" in locator):
                 raise ValueError("Unsafe compiled policy locator")
-        old = 'global.rodata.def @policy = bytes("' + before.encode().hex() + '")'
-        new = 'global.rodata.def @policy = bytes("' + after.encode().hex() + '")'
+        old = 'global.rodata.def @' + policy_symbol + ' = bytes("' + before.encode().hex() + '")'
+        new = 'global.rodata.def @' + policy_symbol + ' = bytes("' + after.encode().hex() + '")'
         if inputs.count(old) != 1 or text.count(new) != 1 or old in text:
             raise ValueError("Compiled program does not preserve exact policy projection")
     return {"source_roots": expected, "compiled_roots": actual,
@@ -264,12 +266,14 @@ def validate_compiled_program(artifact: Path, sources, root: Path, decoder: Path
 
 
 
-def preparation_bytecode_source(source, old_policy, policy):
+def preparation_bytecode_source(source, old_policy, policy, symbol='policy'):
     relative(old_policy)
     relative(policy)
-    old = 'global.rodata.def @policy = bytes("' + old_policy.encode().hex() + '")'
-    new = 'global.rodata.def @policy = bytes("' + policy.encode().hex() + '")'
-    declarations = re.findall(r'^global\.rodata\.def\s+@policy\s*=.*$', source, re.MULTILINE)
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]*', symbol):
+        raise ValueError('Invalid policy symbol')
+    old = 'global.rodata.def @' + symbol + ' = bytes("' + old_policy.encode().hex() + '")'
+    new = 'global.rodata.def @' + symbol + ' = bytes("' + policy.encode().hex() + '")'
+    declarations = re.findall(r'^global\.rodata\.def\s+@' + re.escape(symbol) + r'\s*=.*$', source, re.MULTILINE)
     if declarations != [old]:
         raise ValueError('Expected exactly one authored policy locator')
     return source.replace(old, new, 1)
@@ -302,7 +306,7 @@ def normalize_catalog(package_root, repository, reference, build, source, source
         policy = group['policy']
         proof = validate_compiled_program(artifact, group['sources'], root, decoder,
             policy=(policy['from'], policy['to']) if policy else None,
-            exact_configs=group['exact_configs'])
+            exact_configs=group['exact_configs'], policy_symbol=policy.get('symbol', 'policy') if policy else 'policy')
         content = artifact.read_bytes()
         if digest(content) != before:
             raise ValueError('Compiled program changed during decode: ' + name)
@@ -367,6 +371,7 @@ def main():
     prepare.add_argument('--output', type=Path, required=True)
     prepare.add_argument('--from-policy', required=True)
     prepare.add_argument('--policy', required=True)
+    prepare.add_argument('--policy-symbol', default='policy')
     args = parser.parse_args()
     if args.command == 'validate':
         builds = load_builds(args.inventory)
@@ -374,7 +379,7 @@ def main():
             admit_source(args.inventory.resolve().parent.parent, reference, build)
         args.stamp.write_text('validated\n')
     else:
-        args.output.write_text(preparation_bytecode_source(args.source.read_text(), args.from_policy, args.policy))
+        args.output.write_text(preparation_bytecode_source(args.source.read_text(), args.from_policy, args.policy, args.policy_symbol))
 
 
 if __name__ == '__main__':

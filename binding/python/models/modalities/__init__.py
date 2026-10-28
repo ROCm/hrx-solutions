@@ -4,10 +4,10 @@ from importlib import import_module
 from ...hem_common import InvalidInput
 
 
-NAMES = ('chat', 'asr')
+NAMES = ('chat', 'asr', 'tts')
 
 
 def get(modality):
     if type(modality) is not str or modality not in NAMES:
-        raise InvalidInput(f'Unsupported modality {modality!r}; select chat or asr')
+        raise InvalidInput(f'Unsupported modality {modality!r}; select chat, asr or tts')
     return import_module(f'{__name__}.{modality}')

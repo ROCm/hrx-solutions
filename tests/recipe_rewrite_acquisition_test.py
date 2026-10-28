@@ -71,6 +71,9 @@ class AcquisitionDraftTest(unittest.TestCase):
 
     def test_all_three_recipes_and_plain_inspection_handoff(self):
         for doc in self.documents.values():
+            if doc['id'] == 'pocket-tts-alba':
+                # Pocket has its own helper/acquisition/retry coverage.
+                continue
             self.cache(doc); view=self.download(doc,doc['id'])
             self.assertEqual(view['state'],'ready')
             record=self.registry.get_model(doc['id']); original=deepcopy(record)

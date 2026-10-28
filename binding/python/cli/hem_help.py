@@ -179,6 +179,9 @@ def _arguments(parser, resource, command):
                      opencode_dir='Explicit OpenCode configuration directory; overrides OPENCODE_CONFIG_DIR. Launch with the printed environment setting.')
     if resource == 'openwebui':
         helps.update(check='Inspect version and connection configuration without writes or probing model availability.',
+                     tts_server='Managed Pocket speech server; requires --tts-instance and a cache-capable WebUI deployment.',
+                     tts_instance='Exact native speech instance; requires --tts-server. Uses fixed Alba playback.',
+                     disable_tts='Disconnect unchanged owned Pocket routing and return read-aloud to browser speech; preserve chat/STT.',
                      disable='Disconnect unchanged owned STT and remove owned model override/connections; preserve edits and foreign prerequisites. Requires administrator authentication.',
                      stt_server='Managed STT server; requires --stt-instance. Uses the existing host-network backend connection topology.',
                      stt_instance='Unprefixed served recognition instance; requires --stt-server. Configure validates readiness; --check remains unprobed.',
