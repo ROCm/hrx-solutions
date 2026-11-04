@@ -172,7 +172,8 @@ preserving installed application import provenance.
 | Catalog Bazel action | `//build_tools:loom_catalog` | Used by `loom-pipeline/bytecode.bzl`; retains runfiles/direct-import handling |
 | Cache lifecycle | `ci_tools/wheel_cache.py`, `wheel_cache_summary.py` | Build/container/CI-owned cache directory, fingerprints and diagnostics; writes cache provenance/configuration or summaries; owning unit tests are the smallest check |
 | GitHub cache maintenance | `ci_tools/github_wheel_cache.py` | Workflow-owned authenticated GitHub cache metadata and attempted key; may delete eligible remote caches; policy and client unit tests are the smallest check |
-| Shared source tests | `python -m build_tools.ci_tools.source_tests {install,verify,build_tools,tests}` | Caller owns venv/environment/runtime fixtures; installs source requirements, verifies provenance, or runs unchanged full unittest discovery; console results |
+| Shared source tests | `python -m build_tools.ci_tools.source_tests {install,verify,build_tools,tests}` | Caller owns venv/environment/runtime fixtures; installs source requirements, verifies provenance, or runs pre-build unit discovery; console results |
+| Native onboarding integration | `python -m build_tools.ci_tools.source_tests onboarding --decoder DECODER --fixture-directory NEW_DIRECTORY` | Required after wheel compilation in the manylinux build used by full local/GitHub CI; verifies checked-in frozen native inputs, replaces ambient fixture overrides, runs all eight real producer/checker cases without skips; caller owns extracted directory cleanup; see `tests/fixtures/generic_modalities/README.md` |
 | Shared version rules | `versioning.py` | Reads `version.json`; release/tag validation; no independent CLI |
 
 Only two top-level forwarding files remain supported compatibility commands:

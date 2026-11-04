@@ -1,7 +1,7 @@
 """Real generic runtime/checker onboarding in isolated source/installed fixtures.
 
 The fixed harness copies DATA only after initial admission. Compiled bytes come
-from an explicitly supplied accepted wheel; there is no fake compiler or decoder.
+from a checked-in archive of accepted native build inputs; there is no fake compiler or decoder.
 The producer case also executes the real uniform staging API and native decoder.
 These fixtures never execute a native model or claim genuine wheel qualification.
 """
@@ -49,7 +49,7 @@ def _worker(package, release_path, mode, action, build_path=None):
         from build_tools.model_tools import package_families, loom_catalog
         builds = loom_catalog.load_builds(repository / 'loom-pipeline/catalog_sources.bzl')
         artifacts = []
-        with zipfile.ZipFile(os.environ['GENERIC_MODALITY_FIXTURE_WHEEL']) as archive:
+        with zipfile.ZipFile(os.environ['GENERIC_MODALITY_FIXTURE_ARCHIVE']) as archive:
             for case in json.loads((FIXTURES / 'cases.json').read_bytes()):
                 if case['reference'] not in builds: continue
                 declared = json.loads((FIXTURES / case['phase'] / 'installed' / case['reference']).read_bytes())
@@ -154,11 +154,11 @@ class GenericModalityOnboardingTest(unittest.TestCase):
         self.root = Path(temporary.name)
         self.cases = json.loads((FIXTURES / 'cases.json').read_bytes())
         # Real native bytes are reused as inputs, never fabricated or executed.
-        wheel = os.environ.get('GENERIC_MODALITY_FIXTURE_WHEEL')
-        self.assertTrue(wheel, 'Set GENERIC_MODALITY_FIXTURE_WHEEL to an accepted real wheel; no synthetic compiler fallback')
-        self.wheel = Path(wheel).resolve(strict=True)
+        archive = os.environ.get('GENERIC_MODALITY_FIXTURE_ARCHIVE')
+        self.assertTrue(archive, 'Run source_tests onboarding to provision the frozen genuine native fixture')
+        self.archive = Path(archive).resolve(strict=True)
         source_root = os.environ.get('GENERIC_MODALITY_FIXTURE_SOURCE_ROOT')
-        self.assertTrue(source_root, 'Set GENERIC_MODALITY_FIXTURE_SOURCE_ROOT to the immutable loom-pipeline source matching the fixture wheel')
+        self.assertTrue(source_root, 'Set GENERIC_MODALITY_FIXTURE_SOURCE_ROOT to the immutable loom-pipeline source matching the frozen native fixture')
         self.source_root = Path(source_root).resolve(strict=True)
         self.code_before = _python_identity(ROOT)
         for relative in self.code_before:
@@ -190,7 +190,7 @@ class GenericModalityOnboardingTest(unittest.TestCase):
                     target = root / name; target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(self.source_root / case['source_root'] / name, target)
             else:
-                with zipfile.ZipFile(self.wheel) as archive:
+                with zipfile.ZipFile(self.archive) as archive:
                     for name, member in case['compiled_members'].items():
                         content = archive.read(member)
                         self.assertEqual(hashlib.sha256(content).hexdigest(), declaration['programs']['files'][name])
@@ -351,4 +351,8 @@ if __name__ == '__main__':
         else:
             print(json.dumps(answer))
     else:
-        unittest.main()
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(GenericModalityOnboardingTest)
+        if suite.countTestCases() != 8:
+            raise SystemExit("Expected all eight onboarding tests")
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        raise SystemExit(not result.wasSuccessful() or bool(result.skipped))

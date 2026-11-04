@@ -63,6 +63,24 @@ if [[ ${HRX_BAZEL_CACHE_ENABLED:-0} == 1 ]]; then
   fi
 fi
 "$HRX_BUILD_PYTHON" -m build --wheel --outdir "$HRX_OUTPUT_DIR/dist"
+
+# Required native onboarding runs after compilation, using the decoder built
+# from MODULE.bazel's HRX pin. Both hosted and full local CI use this script.
+(
+  env -u PYTHONPATH -u PYTHONHOME /opt/python/cp312-cp312/bin/python3 -m venv "$HRX_OUTPUT_DIR/onboarding-venv"
+  onboarding_python="$HRX_OUTPUT_DIR/onboarding-venv/bin/python"
+  export PYTHONNOUSERSITE=1
+  unset PYTHONPATH PYTHONHOME GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
+  export LOOM_SERVE_DIR="$HRX_OUTPUT_DIR/onboarding-state"
+  "$onboarding_python" -m build_tools.ci_tools.source_tests install
+  "$onboarding_python" -m build_tools.ci_tools.source_tests verify
+  "$onboarding_python" -m pip install --no-deps "$HRX_OUTPUT_DIR/dist/"*.whl
+  "$onboarding_python" -I -c 'import hrx_solutions, pathlib, sys; assert pathlib.Path(hrx_solutions.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix)); print(sys.executable, hrx_solutions.__file__)'
+  decoder=$("$HRX_BUILD_PYTHON" -c 'import os; from pathlib import Path; from build_tools.ci_tools.onboarding_fixture import built_decoder; print(built_decoder(Path(os.environ["HRX_ROCM_ROOT"])))')
+  "$onboarding_python" -m build_tools.ci_tools.source_tests onboarding \
+    --decoder "$decoder" --fixture-directory "$HRX_OUTPUT_DIR/onboarding-fixtures"
+)
+
 "$HRX_BUILD_PYTHON" -m build_tools.wheel_tools.validate_wheel "$HRX_OUTPUT_DIR/dist/"*.whl
 env LD_LIBRARY_PATH="$HRX_AUDITWHEEL_LD_LIBRARY_PATH" \
   /usr/local/bin/auditwheel show "$HRX_OUTPUT_DIR/dist/"*.whl

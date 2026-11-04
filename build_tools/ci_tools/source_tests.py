@@ -34,8 +34,23 @@ def verify_provenance():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument('action', choices=('install', 'verify', *DISCOVERY_DIRECTORIES))
+    parser.add_argument('action', choices=('install', 'verify', 'onboarding', *DISCOVERY_DIRECTORIES))
+    parser.add_argument('--decoder', type=Path)
+    parser.add_argument('--fixture-directory', type=Path)
     args = parser.parse_args(argv)
+    if args.action == 'onboarding':
+        if args.decoder is None or args.fixture_directory is None:
+            parser.error('onboarding requires --decoder and --fixture-directory')
+        from build_tools.ci_tools.onboarding_fixture import prepare
+        for name in tuple(os.environ):
+            if name.startswith('GENERIC_MODALITY_FIXTURE_'):
+                del os.environ[name]
+        os.environ.update(prepare(args.fixture_directory, args.decoder))
+        command = ['tests/generic_modality_onboarding.py']
+        os.execv(sys.executable, [sys.executable, *command])
+        return 0
+    if args.decoder is not None or args.fixture_directory is not None:
+        parser.error('fixture options only apply to onboarding')
     if args.action == 'verify':
         verify_provenance()
         return 0
